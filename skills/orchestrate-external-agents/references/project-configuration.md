@@ -27,6 +27,12 @@ Keep `duplicate_implementation` false. The broker rejects CC implementation if C
 - `max_log_bytes`: per-stream disk and memory cap.
 - `max_result_chars`: maximum AGY result returned to Codex.
 
+## Antigravity CLI
+
+- `cli.agy_sandbox`: keep true by default. Set false only when the local AGY install cannot access its normal silent-auth state from sandboxed print mode.
+- `cli.agy_project` / `cli.agy_project_id`: optional existing Antigravity project identifier. When set, the broker passes `--project <id>` to avoid creating implicit projects for each worker probe.
+- `cli.agy_prefix_args`: advanced escape hatch for site-specific wrapper arguments. Prefer the dedicated AGY fields above for project binding and sandbox behavior.
+
 ## Models
 
 Set provider model names per complexity only when the installed CLI and current account support them. A null value preserves CLI/ccswitch defaults.

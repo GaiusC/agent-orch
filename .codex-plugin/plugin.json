@@ -1,6 +1,6 @@
 {
   "name": "external-agent-orchestrator",
-  "version": "0.1.0+codex.20260701085911",
+  "version": "0.1.0+codex.20260701185526",
   "description": "Delegate implementation to Claude Code and specialized verification to Antigravity while Codex retains planning and acceptance control.",
   "author": {
     "name": "Jieli Chen"

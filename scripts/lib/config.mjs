@@ -16,6 +16,9 @@ export const DEFAULT_CONFIG = {
     agy: process.env.EAO_AGY_BIN || "agy",
     claude_prefix_args: [],
     agy_prefix_args: [],
+    agy_sandbox: true,
+    agy_project: null,
+    agy_project_id: null,
   },
   execution: {
     workspace_mode: "isolated",

@@ -122,8 +122,32 @@ async function discoverAgyConversation({ workspace, stdout, cliLogPath, existing
   return cachedAfter && cachedAfter !== cachedBefore ? cachedAfter : null;
 }
 
-export function buildAgyArgs({ prompt, conversationId, model, timeoutSeconds, sandbox = true }) {
+function agyProjectId(config) {
+  return config.cli.agy_project || config.cli.agy_project_id || null;
+}
+
+function sanitizedAgyArgs(args) {
+  const sanitized = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    sanitized.push(arg);
+    if (["--print", "--prompt", "-p", "--prompt-interactive", "-i"].includes(arg) && i + 1 < args.length) {
+      const prompt = args[i + 1] || "";
+      sanitized.push(`[prompt redacted chars=${prompt.length}]`);
+      i += 1;
+    }
+  }
+  return sanitized;
+}
+
+function safeAgyEnvSnapshot() {
+  const keys = ["USERPROFILE", "HOME", "LOCALAPPDATA", "APPDATA", "EAO_AGY_HOME"];
+  return Object.fromEntries(keys.map((key) => [key, process.env[key] ? { present: true, value: process.env[key] } : { present: false }]));
+}
+
+export function buildAgyArgs({ prompt, conversationId, model, timeoutSeconds, sandbox = true, projectId = null }) {
   const args = ["--print", prompt, "--print-timeout", `${timeoutSeconds}s`];
+  if (projectId) args.push("--project", projectId);
   if (conversationId) args.push("--conversation", conversationId);
   if (model) args.push("--model", model);
   if (sandbox) args.push("--sandbox");
@@ -241,15 +265,26 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, taskSessio
       ].filter(Boolean).join("\n\n");
   const cachedBefore = await cachedAgyConversation(workspace);
   const cliLogPath = path.join(jobDir, `agy-${mode}.cli.log`);
+  const projectId = agyProjectId(config);
+  const sandbox = config.cli.agy_sandbox !== false;
   const args = buildAgyArgs({
     prompt,
     conversationId: taskSession?.session_id,
     model,
     timeoutSeconds: config.execution.agy_timeout_seconds,
-    sandbox: true,
+    sandbox,
+    projectId,
   });
   args.unshift(...(config.cli.agy_prefix_args || []));
   args.push("--log-file", cliLogPath);
+  const launch = {
+    command: config.cli.agy,
+    args: sanitizedAgyArgs(args),
+    cwd: workspace,
+    sandbox,
+    project_id: projectId,
+    env: safeAgyEnvSnapshot(),
+  };
   const processResult = await runProcess({
     command: config.cli.agy,
     args,
@@ -279,5 +314,6 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, taskSessio
     result_source: processResult.stdout.trim() ? "stdout" : transcriptResult ? "transcript" : storeResult ? "conversation_store" : "none",
     cli_log_path: cliLogPath,
     cli_log_tail: cliLogTail,
+    launch,
   };
 }

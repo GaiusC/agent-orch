@@ -258,6 +258,7 @@ export class WorkerOrchestrator {
       stdout_path: run.stdout_path,
       stderr_path: run.stderr_path,
       cli_log_path: run.cli_log_path,
+      launch: run.launch,
     };
     const evidencePath = path.join(jobDir, "evidence.json");
     await writeJsonAtomic(evidencePath, evidence);

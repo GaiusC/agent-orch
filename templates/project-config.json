@@ -10,7 +10,10 @@
     "claude": "claude",
     "agy": "agy",
     "claude_prefix_args": [],
-    "agy_prefix_args": []
+    "agy_prefix_args": [],
+    "agy_sandbox": true,
+    "agy_project": null,
+    "agy_project_id": null
   },
   "execution": {
     "workspace_mode": "isolated",

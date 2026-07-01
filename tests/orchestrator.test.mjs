@@ -26,6 +26,8 @@ async function createProject(root) {
       agy: process.execPath,
       claude_prefix_args: [fakeCc],
       agy_prefix_args: [fakeAgy],
+      agy_sandbox: false,
+      agy_project: "fixture-project",
     },
     execution: {
       workspace_mode: "isolated",
@@ -111,6 +113,13 @@ test("AGY conversation is captured and reused explicitly", async (t) => {
   await waitFor(orchestrator, first.id);
   const firstResult = await orchestrator.result(first.id);
   assert.equal(firstResult.evidence.session_id, "123e4567-e89b-42d3-a456-426614174000");
+  assert.equal(firstResult.evidence.launch.sandbox, false);
+  assert.equal(firstResult.evidence.launch.project_id, "fixture-project");
+  assert.deepEqual(
+    firstResult.evidence.launch.args.slice(firstResult.evidence.launch.args.indexOf("--project"), firstResult.evidence.launch.args.indexOf("--project") + 2),
+    ["--project", "fixture-project"],
+  );
+  assert.doesNotMatch(firstResult.evidence.result, /--sandbox/);
 
   const second = await orchestrator.startAgy({ project_dir: project, task_id: "investigate", goal: "Continue investigation" }, "investigate");
   await waitFor(orchestrator, second.id);
