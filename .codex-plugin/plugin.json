@@ -1,0 +1,32 @@
+{
+  "name": "external-agent-orchestrator",
+  "version": "0.1.0+codex.20260701085911",
+  "description": "Delegate implementation to Claude Code and specialized verification to Antigravity while Codex retains planning and acceptance control.",
+  "author": {
+    "name": "Jieli Chen"
+  },
+  "license": "MIT",
+  "keywords": [
+    "orchestration",
+    "claude-code",
+    "antigravity",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "External Agent Orchestrator",
+    "shortDescription": "Delegate coding to CC and verification to AGY.",
+    "longDescription": "A local, contract-driven worker broker that keeps Codex in charge of project planning and final acceptance while Claude Code implements and Antigravity performs targeted investigation or verification.",
+    "developerName": "Jieli Chen",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Plan this change, delegate implementation to CC, and verify it.",
+      "Ask AGY to investigate this failure without duplicating implementation."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

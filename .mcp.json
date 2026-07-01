@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "external_agents": {
+      "command": "node",
+      "args": [
+        "./scripts/server.mjs"
+      ]
+    }
+  }
+}
