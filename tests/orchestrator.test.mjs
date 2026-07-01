@@ -132,6 +132,7 @@ test("AGY conversation is captured and reused explicitly", async (t) => {
   const changedModelResult = await orchestrator.result(changedModel.id);
   assert.doesNotMatch(changedModelResult.evidence.result, /--conversation/);
   assert.doesNotMatch(changedModelResult.evidence.result, /--new-project/);
+  assert.match(changedModelResult.evidence.result, /--add-dir/);
 });
 
 test("AGY falls back to conversation store when stdout and transcript are empty", async (t) => {

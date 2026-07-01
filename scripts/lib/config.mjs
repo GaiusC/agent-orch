@@ -41,7 +41,7 @@ export const DEFAULT_CONFIG = {
   },
   models: {
     cc: { low: null, medium: null, high: null },
-    agy: { low: "Gemini 3.5 Flash (Medium)", medium: "Gemini 3.1 Pro (Low)", high: "Gemini 3.1 Pro (High)" },
+    agy: { low: "Gemini 3.5 Flash", medium: "Gemini 3.1 Pro", high: "Gemini 3.1 Pro" },
   },
   scope: {
     writable: ["."],

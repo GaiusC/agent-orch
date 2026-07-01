@@ -143,7 +143,7 @@ async function probeAgy(config, projectDir) {
   const logDir = path.join(projectRunsRoot(projectDir), probeId);
   const result = await runProcess({
     command: config.cli.agy,
-    args: [...(config.cli.agy_prefix_args || []), "models"],
+    args: [...(config.cli.agy_prefix_args || []), "--help"],
     cwd: projectDir,
     timeoutSeconds: 30,
     logDir,

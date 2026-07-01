@@ -49,15 +49,15 @@ Set provider model names per complexity only when the installed CLI and current 
   "models": {
     "cc": { "low": null, "medium": null, "high": null },
     "agy": {
-      "low": "Gemini 3.5 Flash (Medium)",
-      "medium": "Gemini 3.1 Pro (Low)",
-      "high": "Gemini 3.1 Pro (High)"
+      "low": "Gemini 3.5 Flash",
+      "medium": "Gemini 3.1 Pro",
+      "high": "Gemini 3.1 Pro"
     }
   }
 }
 ```
 
-Do not force a Claude model name when ccswitch should select GLM, DeepSeek, or another configured backend. Record an explicit override only when the user requests it. The default AGY routing uses Flash for low-risk work and escalates Pro reasoning effort with complexity; replace the labels if the installed AGY version exposes different names.
+Do not force a Claude model name when ccswitch should select GLM, DeepSeek, or another configured backend. Record an explicit override only when the user requests it. Use AGY CLI model names, not UI labels with effort suffixes, because labels such as `Gemini 3.5 Flash (Medium)` can fail in `--new-project` print mode.
 
 ## Scope and verification
 

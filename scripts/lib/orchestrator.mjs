@@ -243,6 +243,9 @@ export class WorkerOrchestrator {
       ].filter(Boolean).join("\n\n");
       throw new Error(`AGY execution failed: ${truncate(detail, 3000)}`);
     }
+    if (/(failed to construct executor|neither PlanModel nor RequestedModel specified|model output error|invalid tool call error)/i.test(run.result || "")) {
+      throw new Error(`AGY completed with an internal error: ${truncate(run.result, 3000)}`);
+    }
     if (!run.session_id) throw new Error("AGY completed without a discoverable conversation ID; refusing an untracked session.");
     await this.store.setSession(job.project_dir, "agy", job.task_id, {
       session_id: run.session_id,

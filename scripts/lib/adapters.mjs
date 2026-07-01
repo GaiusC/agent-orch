@@ -145,10 +145,12 @@ function safeAgyEnvSnapshot() {
   return Object.fromEntries(keys.map((key) => [key, process.env[key] ? { present: true, value: process.env[key] } : { present: false }]));
 }
 
-export function buildAgyArgs({ prompt, conversationId, model, timeoutSeconds, sandbox = true, projectId = null }) {
+export function buildAgyArgs({ prompt, conversationId, model, timeoutSeconds, sandbox = true, projectId = null, workspace = null }) {
   const args = ["--print", prompt, "--print-timeout", `${timeoutSeconds}s`];
   if (projectId) args.push("--project", projectId);
   if (conversationId) args.push("--conversation", conversationId);
+  else if (!projectId) args.push("--new-project");
+  if (workspace) args.push("--add-dir", workspace);
   if (model) args.push("--model", model);
   if (sandbox) args.push("--sandbox");
   return args;
@@ -274,6 +276,7 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, taskSessio
     timeoutSeconds: config.execution.agy_timeout_seconds,
     sandbox,
     projectId,
+    workspace,
   });
   args.unshift(...(config.cli.agy_prefix_args || []));
   args.push("--log-file", cliLogPath);
