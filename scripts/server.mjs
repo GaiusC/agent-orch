@@ -107,7 +107,7 @@ await store.init();
 const orchestrator = new WorkerOrchestrator(store);
 
 const server = new Server(
-  { name: "external-agent-orchestrator", version: "0.1.0" },
+  { name: "agent-orch-legacy-mcp", version: "0.1.0" },
   { capabilities: { tools: {} } },
 );
 

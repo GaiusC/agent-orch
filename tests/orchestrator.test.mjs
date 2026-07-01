@@ -43,8 +43,8 @@ async function createProject(root) {
   await fs.writeFile(path.join(project, "verify.cjs"), "const fs=require('fs'); process.exit(fs.existsSync('feature.txt') && fs.readFileSync('feature.txt','utf8') === 'good' ? 0 : 1);\n");
   await fs.writeFile(path.join(project, "README.md"), "fixture\n");
   git(project, "init");
-  git(project, "config", "user.name", "EAO Tests");
-  git(project, "config", "user.email", "eao@example.test");
+  git(project, "config", "user.name", "Agent Orch Tests");
+  git(project, "config", "user.email", "agent-orch@example.test");
   git(project, "add", ".");
   git(project, "commit", "-m", "fixture");
   return project;
@@ -61,7 +61,7 @@ async function waitFor(orchestrator, jobId, timeoutMs = 15000) {
 }
 
 test("CC implements, repairs in the same session, verifies, applies, and cleans", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eao-integration-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-integration-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
   const store = new StateStore(path.join(root, "state"));
@@ -102,7 +102,7 @@ test("CC implements, repairs in the same session, verifies, applies, and cleans"
 });
 
 test("AGY conversation is captured and reused explicitly", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eao-agy-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-agy-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
   const store = new StateStore(path.join(root, "state"));
@@ -135,16 +135,16 @@ test("AGY conversation is captured and reused explicitly", async (t) => {
 });
 
 test("AGY falls back to conversation store when stdout and transcript are empty", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eao-agy-store-"));
-  const previousStoreOnly = process.env.EAO_FAKE_AGY_STORE_ONLY;
-  const previousAgyHome = process.env.EAO_AGY_HOME;
-  process.env.EAO_FAKE_AGY_STORE_ONLY = "1";
-  process.env.EAO_AGY_HOME = path.join(root, "agy-home");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-agy-store-"));
+  const previousStoreOnly = process.env.AGENT_ORCH_FAKE_AGY_STORE_ONLY;
+  const previousAgyHome = process.env.AGENT_ORCH_AGY_HOME;
+  process.env.AGENT_ORCH_FAKE_AGY_STORE_ONLY = "1";
+  process.env.AGENT_ORCH_AGY_HOME = path.join(root, "agy-home");
   t.after(() => {
-    if (previousStoreOnly === undefined) delete process.env.EAO_FAKE_AGY_STORE_ONLY;
-    else process.env.EAO_FAKE_AGY_STORE_ONLY = previousStoreOnly;
-    if (previousAgyHome === undefined) delete process.env.EAO_AGY_HOME;
-    else process.env.EAO_AGY_HOME = previousAgyHome;
+    if (previousStoreOnly === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_STORE_ONLY;
+    else process.env.AGENT_ORCH_FAKE_AGY_STORE_ONLY = previousStoreOnly;
+    if (previousAgyHome === undefined) delete process.env.AGENT_ORCH_AGY_HOME;
+    else process.env.AGENT_ORCH_AGY_HOME = previousAgyHome;
     return fs.rm(root, { recursive: true, force: true });
   });
   const project = await createProject(root);

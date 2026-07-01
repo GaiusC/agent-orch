@@ -1,8 +1,8 @@
-# External Agent Orchestrator
+# Agent Orch
 
-External Agent Orchestrator is a local Codex plugin that delegates implementation to Claude Code CLI, uses Antigravity CLI for targeted investigation or verification, and keeps Codex responsible for planning, routing, acceptance, and user communication.
+Agent Orch is a local Codex plugin for supervising external coding agents without depending on a Codex MCP server. Codex plans and accepts the work, Claude Code implements, and Antigravity provides targeted investigation or verification when its local auth is usable.
 
-The design is intentionally conservative:
+The default path is Skill + CLI:
 
 - Claude Code is the primary writer.
 - Antigravity is a non-duplicating specialist and verifier.
@@ -16,65 +16,63 @@ The design is intentionally conservative:
 - Node.js 18.18 or newer.
 - Git.
 - Local `claude` CLI.
-- Local `agy` CLI.
+- Local `agy` CLI if AGY verification is desired.
 
 ## Install
 
-Clone this repository, install dependencies, and add it to a personal Codex plugin marketplace.
-
 ```powershell
-git clone git@github.com:GaiusC/external-agent-orchestrator.git
-cd external-agent-orchestrator
+git clone git@github.com:GaiusC/agent-orch.git
+cd agent-orch
 npm install
 ```
 
-Create or update `%USERPROFILE%\.agents\plugins\marketplace.json` so it points at the cloned plugin directory, then install it with Codex:
+Add the cloned plugin to a personal Codex plugin marketplace, then install:
 
 ```powershell
-codex plugin add external-agent-orchestrator@personal
+codex plugin add agent-orch@personal
 ```
 
 Open a new Codex session after installation.
 
 ## Project Setup
 
-In each target project, copy the template config:
+Initialize each target project:
 
 ```powershell
-mkdir .agent-orchestrator
-copy <plugin-root>\templates\project-config.json .agent-orchestrator\config.json
+powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 init -ProjectDir <project>
 ```
 
-Review the file carefully, set `"trusted": true`, and configure real verification commands before launching workers.
+For a partially built project, add `-ExistingProject`.
 
-At minimum:
+This creates:
 
-```json
-{
-  "version": 1,
-  "trusted": true,
-  "roles": {
-    "primary_writer": "cc",
-    "specialist": "agy",
-    "duplicate_implementation": false
-  }
-}
+```text
+.agent-orchestrator/
+  config.json
+  state/
+  runs/
 ```
+
+Review `.agent-orchestrator/config.json`, keep `duplicate_implementation` false, and configure real verification commands before accepting worker output.
 
 ## Usage
 
-In a Codex session for a configured project, say for example:
+In a Codex session for a configured project:
 
 ```text
-Use external-agent-orchestrator. Plan this change, delegate implementation to CC, use AGY only for targeted verification, and apply the patch only after acceptance.
+Use agent-orch. Plan this change, delegate implementation to CC, use AGY only for targeted verification, and apply the patch only after acceptance.
 ```
 
-Codex should call the plugin tools to health-check workers, launch CC implementation, inspect the evidence pack, request same-session repair if needed, and apply the patch only after verification.
+Codex should call `scripts\agent-orch.ps1`, inspect evidence under `.agent-orchestrator\runs`, request same-session repair if needed, and apply the patch only after verification.
+
+## Legacy MCP
+
+The previous MCP server remains in the repository for legacy use, but it is not registered by default. The CLI path is recommended for multi-account Codex setups and environments where MCP startup or AGY OAuth state is unstable.
 
 ## Safety Notes
 
 - Keep `duplicate_implementation` false unless you have a very specific reason.
-- Do not commit `.agent-orchestrator/state/` or worker logs.
+- Do not commit `.agent-orchestrator/state/` or `.agent-orchestrator/runs/`.
 - Review project-provided `.agent-orchestrator/config.json` before setting `trusted` to true.
 - Treat worker output as a claim; Codex still needs to verify diffs, forbidden paths, and acceptance commands.
 

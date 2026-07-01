@@ -1,12 +1,14 @@
 {
-  "name": "external-agent-orchestrator",
+  "name": "agent-orch",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local MCP worker broker for Claude Code and Antigravity CLI.",
+  "description": "CLI-driven Codex workflow for Claude Code and Antigravity CLI.",
   "scripts": {
+    "agent-orch": "node scripts/agent-orch.mjs",
     "test": "node --test tests/*.test.mjs",
-    "start": "node scripts/server.mjs"
+    "start": "node scripts/agent-orch.mjs",
+    "start:legacy-mcp": "node scripts/server.mjs"
   },
   "engines": {
     "node": ">=18.18"

@@ -5,20 +5,21 @@
 - Bind sessions by resolved project path, provider, and stable `task_id`.
 - Continue the same session for the same goal, implementation, deterministic repair, and incremental acceptance feedback.
 - Start a new session for an unrelated goal, project change, underlying model change, architecture reset, missing workspace, or polluted/oversized context.
-- Never rely on ambiguous global `--continue`; the broker uses explicit CC session UUIDs and AGY conversation IDs.
+- Never rely on ambiguous global `--continue`; Agent Orch uses explicit CC session UUIDs and AGY conversation IDs when available.
 - Keep the isolated worktree until acceptance or abandonment. Cleanup clears its session binding.
 
 ## Routing policy
 
 | Situation | Route |
 | --- | --- |
-| Code implementation or test repair | CC |
-| Reproduction or environment diagnosis | AGY investigate |
-| Browser/UI/runtime verification | AGY verify |
+| Code implementation or test repair | `agent-orch cc-exec` / `cc-continue` |
+| Reproduction or environment diagnosis | `agent-orch agy-investigate` |
+| Browser/UI/runtime verification | `agent-orch agy-verify` |
 | Non-overlapping module | CC by default; AGY only with explicit disjoint-write permission |
 | CC deterministic test failure | Same CC session, bounded repair loop |
 | Architecture, dependency, schema, security, or scope change | Return to Codex |
 | CC unavailable or repeatedly fails | Return to Codex; do not silently switch writers |
+| AGY auth probe fails | Continue without AGY and report the limitation |
 
 ## Model and cost policy
 

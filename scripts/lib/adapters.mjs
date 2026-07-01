@@ -141,7 +141,7 @@ function sanitizedAgyArgs(args) {
 }
 
 function safeAgyEnvSnapshot() {
-  const keys = ["USERPROFILE", "HOME", "LOCALAPPDATA", "APPDATA", "EAO_AGY_HOME"];
+  const keys = ["USERPROFILE", "HOME", "LOCALAPPDATA", "APPDATA", "AGENT_ORCH_AGY_HOME", "EAO_AGY_HOME"];
   return Object.fromEntries(keys.map((key) => [key, process.env[key] ? { present: true, value: process.env[key] } : { present: false }]));
 }
 
@@ -155,7 +155,7 @@ export function buildAgyArgs({ prompt, conversationId, model, timeoutSeconds, sa
 }
 
 function agyHomeDir() {
-  return process.env.EAO_AGY_HOME || os.homedir();
+  return process.env.AGENT_ORCH_AGY_HOME || process.env.EAO_AGY_HOME || os.homedir();
 }
 
 function agyCliRoot() {

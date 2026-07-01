@@ -6,7 +6,7 @@ import test from "node:test";
 import { StateStore } from "../scripts/lib/state.mjs";
 
 test("sessions are isolated by project, provider, and task", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eao-state-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-state-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const store = new StateStore(root);
   await store.init();

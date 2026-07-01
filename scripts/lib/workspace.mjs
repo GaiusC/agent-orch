@@ -3,6 +3,18 @@ import path from "node:path";
 import { runProcess } from "./process.mjs";
 import { matchesPathPattern, pathExists } from "./utils.mjs";
 
+function relevantStatus(rawStatus) {
+  return rawStatus
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .filter((line) => {
+      const file = line.slice(3).replaceAll("\\", "/");
+      return !(file === ".agent-orchestrator" || file.startsWith(".agent-orchestrator/"));
+    })
+    .join("\n");
+}
+
 async function runGit(projectDir, args, logDir, prefix, options = {}) {
   return runProcess({
     command: "git",
@@ -20,13 +32,15 @@ export async function inspectGit(projectDir, logDir) {
   if (!inside || inside.exit_code !== 0 || inside.stdout.trim() !== "true") return { is_git: false, clean: false };
   const rootResult = await runGit(projectDir, ["rev-parse", "--show-toplevel"], logDir, "git-root");
   const status = await runGit(projectDir, ["status", "--porcelain=v1", "--untracked-files=all"], logDir, "git-status");
+  const relevant = relevantStatus(status.stdout);
   const head = await runGit(projectDir, ["rev-parse", "HEAD"], logDir, "git-head");
   return {
     is_git: true,
     root: rootResult.stdout.trim(),
     head: head.stdout.trim(),
-    clean: status.stdout.trim().length === 0,
-    status: status.stdout.trim(),
+    clean: relevant.length === 0,
+    status: relevant,
+    raw_status: status.stdout.trim(),
   };
 }
 

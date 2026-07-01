@@ -5,20 +5,30 @@ import { deepMerge, pathExists, readJson } from "./utils.mjs";
 
 export const DEFAULT_CONFIG = {
   version: 1,
+  mode: "cli",
   trusted: false,
+  mcp: {
+    enabled: false,
+  },
   roles: {
     primary_writer: "cc",
     specialist: "agy",
     duplicate_implementation: false,
   },
   cli: {
-    claude: process.env.EAO_CLAUDE_BIN || "claude",
-    agy: process.env.EAO_AGY_BIN || "agy",
+    claude: process.env.AGENT_ORCH_CLAUDE_BIN || process.env.EAO_CLAUDE_BIN || "claude",
+    agy: process.env.AGENT_ORCH_AGY_BIN || process.env.EAO_AGY_BIN || "agy",
     claude_prefix_args: [],
     agy_prefix_args: [],
     agy_sandbox: true,
     agy_project: null,
     agy_project_id: null,
+  },
+  agy: {
+    enabled: true,
+    launch: "codex_cli",
+    auth_probe_required: true,
+    fail_fast_on_auth_window: true,
   },
   execution: {
     workspace_mode: "isolated",
@@ -43,7 +53,19 @@ export const DEFAULT_CONFIG = {
 };
 
 export function dataRoot() {
-  return path.resolve(process.env.EAO_DATA_DIR || path.join(os.homedir(), ".external-agent-orchestrator"));
+  return path.resolve(process.env.AGENT_ORCH_DATA_DIR || process.env.EAO_DATA_DIR || path.join(os.homedir(), ".agent-orch"));
+}
+
+export function projectOrchestratorRoot(projectDir) {
+  return path.join(path.resolve(projectDir), ".agent-orchestrator");
+}
+
+export function projectStateRoot(projectDir) {
+  return path.join(projectOrchestratorRoot(projectDir), "state");
+}
+
+export function projectRunsRoot(projectDir) {
+  return path.join(projectOrchestratorRoot(projectDir), "runs");
 }
 
 export async function loadProjectConfig(projectDir) {
@@ -62,8 +84,8 @@ export async function loadProjectConfig(projectDir) {
     }
   }
   const config = deepMerge(DEFAULT_CONFIG, projectConfig);
-  config.cli.claude = process.env.EAO_CLAUDE_BIN || config.cli.claude;
-  config.cli.agy = process.env.EAO_AGY_BIN || config.cli.agy;
+  config.cli.claude = process.env.AGENT_ORCH_CLAUDE_BIN || process.env.EAO_CLAUDE_BIN || config.cli.claude;
+  config.cli.agy = process.env.AGENT_ORCH_AGY_BIN || process.env.EAO_AGY_BIN || config.cli.agy;
   config.project_dir = root;
   config.source = source ?? null;
   return config;

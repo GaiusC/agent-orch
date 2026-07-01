@@ -6,7 +6,7 @@ import test from "node:test";
 import { runProcess } from "../scripts/lib/process.mjs";
 
 test("process runner captures output", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eao-process-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-process-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const result = await runProcess({
     command: process.execPath,
@@ -22,7 +22,7 @@ test("process runner captures output", async (t) => {
 });
 
 test("process runner times out and terminates", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eao-timeout-"));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-timeout-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const result = await runProcess({
     command: process.execPath,

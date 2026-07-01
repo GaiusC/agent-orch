@@ -1,22 +1,22 @@
 {
-  "name": "external-agent-orchestrator",
+  "name": "agent-orch",
   "version": "0.1.0+codex.20260701185526",
-  "description": "Delegate implementation to Claude Code and specialized verification to Antigravity while Codex retains planning and acceptance control.",
+  "description": "CLI-driven Codex workflow for delegating implementation to Claude Code and targeted verification to Antigravity.",
   "author": {
     "name": "Jieli Chen"
   },
   "license": "MIT",
   "keywords": [
+    "agent-orch",
     "orchestration",
     "claude-code",
-    "antigravity",
-    "mcp"
+    "antigravity"
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "External Agent Orchestrator",
+    "displayName": "Agent Orch",
     "shortDescription": "Delegate coding to CC and verification to AGY.",
-    "longDescription": "A local, contract-driven worker broker that keeps Codex in charge of project planning and final acceptance while Claude Code implements and Antigravity performs targeted investigation or verification.",
+    "longDescription": "A CLI-driven workflow that keeps Codex in charge of project planning and final acceptance while Claude Code implements and Antigravity performs targeted investigation or verification.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [
@@ -24,9 +24,8 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Plan this change, delegate implementation to CC, and verify it.",
-      "Ask AGY to investigate this failure without duplicating implementation."
+      "Use agent-orch to plan this change, delegate implementation to CC, and verify it.",
+      "Use agent-orch to ask AGY to investigate this failure without duplicating implementation."
     ]
-  },
-  "mcpServers": "./.mcp.json"
+  }
 }

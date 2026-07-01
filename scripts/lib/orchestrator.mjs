@@ -16,8 +16,8 @@ export class WorkerOrchestrator {
 
   async health(projectDir) {
     const config = projectDir ? await assertProject(projectDir, { requireTrusted: false }) : null;
-    const claude = await commandExists(config?.cli?.claude || process.env.EAO_CLAUDE_BIN || "claude");
-    const agy = await commandExists(config?.cli?.agy || process.env.EAO_AGY_BIN || "agy");
+    const claude = await commandExists(config?.cli?.claude || process.env.AGENT_ORCH_CLAUDE_BIN || process.env.EAO_CLAUDE_BIN || "claude");
+    const agy = await commandExists(config?.cli?.agy || process.env.AGENT_ORCH_AGY_BIN || process.env.EAO_AGY_BIN || "agy");
     return {
       ok: claude.found && agy.found,
       claude,
@@ -61,6 +61,7 @@ export class WorkerOrchestrator {
     const taskId = requireString(args, "task_id");
     const goal = requireString(args, "goal");
     const config = await assertProject(projectDir);
+    if (config.agy?.enabled === false) throw new Error("AGY is disabled in project config.");
     if (mode === "disjoint_subtask" && args.allow_write !== true) throw new Error("AGY write tasks require allow_write=true and must be disjoint from CC implementation.");
     const id = newId("agy");
     const job = await this.store.createJob({
@@ -79,6 +80,12 @@ export class WorkerOrchestrator {
     });
     this.launch(job, (signal) => this.executeAgy(job, config, signal));
     return this.publicJob(job);
+  }
+
+  async wait(jobId) {
+    const promise = this.promises.get(jobId);
+    if (promise) await promise;
+    return this.status(jobId);
   }
 
   launch(job, runner) {

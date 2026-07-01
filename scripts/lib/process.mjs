@@ -101,8 +101,12 @@ export async function runProcess({ command, args = [], cwd, timeoutSeconds = 600
 }
 
 export async function commandExists(command) {
+  if (command && (path.isAbsolute(command) || command.includes("\\") || command.includes("/"))) {
+    const stat = await fsp.stat(command).catch(() => null);
+    if (stat?.isFile()) return { found: true, path: path.resolve(command) };
+  }
   const locator = process.platform === "win32" ? "where.exe" : "which";
-  const tmp = path.join(process.env.TEMP || process.env.TMPDIR || ".", `eao-health-${process.pid}`);
+  const tmp = path.join(process.env.TEMP || process.env.TMPDIR || ".", `agent-orch-health-${process.pid}`);
   const result = await runProcess({ command: locator, args: [command], cwd: process.cwd(), timeoutSeconds: 10, logDir: tmp, logPrefix: command.replaceAll(/[\\/:]/g, "_") });
   return { found: result.exit_code === 0, path: result.stdout.trim().split(/\r?\n/)[0] || null };
 }

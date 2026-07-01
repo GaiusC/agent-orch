@@ -1,0 +1,7 @@
+interface:
+  display_name: "Agent Orch"
+  short_description: "Delegate code to CC and AGY safely"
+  default_prompt: "Use $orchestrate-agents to plan this project, delegate implementation to CC, and verify the result through the Agent Orch CLI."
+
+policy:
+  allow_implicit_invocation: true

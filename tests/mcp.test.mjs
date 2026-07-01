@@ -7,7 +7,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const pluginRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, "$1")), "..");
 
 test("MCP server starts and exposes bounded tools", async () => {
-  const client = new Client({ name: "eao-test", version: "1.0.0" });
+  const client = new Client({ name: "agent-orch-test", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [path.join(pluginRoot, "scripts", "server.mjs")],

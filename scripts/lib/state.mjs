@@ -4,9 +4,9 @@ import { dataRoot } from "./config.mjs";
 import { nowIso, projectKey, readJson, writeJsonAtomic } from "./utils.mjs";
 
 export class StateStore {
-  constructor(root = dataRoot()) {
+  constructor(root = dataRoot(), options = {}) {
     this.root = root;
-    this.jobsRoot = path.join(root, "jobs");
+    this.jobsRoot = options.jobsRoot || path.join(root, "jobs");
     this.sessionsFile = path.join(root, "sessions.json");
   }
 

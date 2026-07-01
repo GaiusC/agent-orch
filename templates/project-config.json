@@ -1,6 +1,10 @@
 {
   "version": 1,
+  "mode": "cli",
   "trusted": true,
+  "mcp": {
+    "enabled": false
+  },
   "roles": {
     "primary_writer": "cc",
     "specialist": "agy",
@@ -14,6 +18,12 @@
     "agy_sandbox": true,
     "agy_project": null,
     "agy_project_id": null
+  },
+  "agy": {
+    "enabled": true,
+    "launch": "codex_cli",
+    "auth_probe_required": true,
+    "fail_fast_on_auth_window": true
   },
   "execution": {
     "workspace_mode": "isolated",

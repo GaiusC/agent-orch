@@ -1,5 +1,6 @@
 node_modules/
 .agent-orchestrator/state/
+.agent-orchestrator/runs/
 *.log
 *.tmp
 .DS_Store
