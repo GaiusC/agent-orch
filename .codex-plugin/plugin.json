@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
-  "version": "0.1.0+codex.20260701193643",
-  "description": "CLI-driven Codex workflow for delegating implementation to Claude Code and targeted verification to Antigravity.",
+  "version": "0.1.0+codex.20260702191841",
+  "description": "CLI-driven Codex workflow for delegating implementation to Claude Code, targeted verification to Antigravity, and read-only monitoring of Agent Orch runs.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -15,8 +15,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Orch",
-    "shortDescription": "Delegate coding to CC and verification to AGY.",
-    "longDescription": "A CLI-driven workflow that keeps Codex in charge of project planning and final acceptance while Claude Code implements and Antigravity performs targeted investigation or verification.",
+    "shortDescription": "Delegate coding to CC, verify with AGY, and monitor runs.",
+    "longDescription": "A CLI-driven workflow that keeps Codex in charge of project planning and final acceptance while Claude Code implements, Antigravity performs targeted investigation or verification, and a read-only dashboard can inspect Agent Orch progress.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [
@@ -25,7 +25,8 @@
     ],
     "defaultPrompt": [
       "Use agent-orch to plan this change, delegate implementation to CC, and verify it.",
-      "Use agent-orch to ask AGY to investigate this failure without duplicating implementation."
+      "Use agent-orch to ask AGY to investigate this failure without duplicating implementation.",
+      "Use agent-orch to open a read-only dashboard for CC/AGY progress and visible conversation logs."
     ]
   }
 }

@@ -1,0 +1,1163 @@
+﻿<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Orchestrator Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+
+      color-scheme: dark;
+
+      /* Colors - Dark Theme (Default) */
+      --bg-app: #101214;
+      --bg-sidebar: #17191d;
+      --bg-card: #1e2227;
+      --bg-card-hover: #272d34;
+      --border-color: rgba(231, 236, 240, 0.11);
+      
+      --text-primary: #edf2f4;
+      --text-secondary: #b6c0c8;
+      --text-muted: #7d8994;
+      
+      --primary: #38bdf8;
+      --primary-hover: #7dd3fc;
+      --primary-bg: rgba(56, 189, 248, 0.14);
+      --scrollbar-track: #15181c;
+      --scrollbar-thumb: #3a444e;
+      --scrollbar-thumb-hover: #55616d;
+      
+      --status-running: #38bdf8;
+      --status-running-bg: rgba(56, 189, 248, 0.16);
+      --status-completed: #34d399;
+      --status-completed-bg: rgba(52, 211, 153, 0.14);
+      --status-failed: #fb7185;
+      --status-failed-bg: rgba(251, 113, 133, 0.14);
+      --status-stale: #fbbf24;
+      --status-stale-bg: rgba(251, 191, 36, 0.15);
+    }
+
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg-app: #f4f6fa;
+      --bg-sidebar: #ffffff;
+      --bg-card: #ffffff;
+      --bg-card-hover: #f8fafc;
+      --border-color: rgba(0, 0, 0, 0.08);
+      
+      --text-primary: #1e293b;
+      --text-secondary: #475569;
+      --text-muted: #94a3b8;
+      
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-bg: rgba(37, 99, 235, 0.08);
+      --scrollbar-track: #eef2f7;
+      --scrollbar-thumb: #c7d0dc;
+      --scrollbar-thumb-hover: #94a3b8;
+      
+      --status-running: #2563eb;
+      --status-running-bg: rgba(37, 99, 235, 0.1);
+      --status-completed: #059669;
+      --status-completed-bg: rgba(5, 150, 105, 0.1);
+      --status-failed: #dc2626;
+      --status-failed-bg: rgba(220, 38, 38, 0.1);
+      --status-stale: #d97706;
+      --status-stale-bg: rgba(217, 119, 6, 0.1);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      scrollbar-width: thin;
+      scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+    }
+
+    *::-webkit-scrollbar {
+      width: 11px;
+      height: 11px;
+    }
+
+    *::-webkit-scrollbar-track {
+      background: var(--scrollbar-track);
+      border-radius: 999px;
+    }
+
+    *::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+      border: 3px solid var(--scrollbar-track);
+      border-radius: 999px;
+    }
+
+    *::-webkit-scrollbar-thumb:hover {
+      background: var(--scrollbar-thumb-hover);
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background-color: var(--bg-app);
+      color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      transition: background-color 0.3s, color 0.3s;
+    }
+
+    /* Main Layout */
+    .sidebar {
+      width: 320px;
+      background-color: var(--bg-sidebar);
+      border-right: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      flex-shrink: 0;
+      transition: background-color 0.3s, border-color 0.3s;
+    }
+
+    .main-content {
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* Sidebar Components */
+    .sidebar-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .brand {
+      font-size: 1.2rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--primary-hover), var(--primary));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 15px;
+    }
+
+    .filter-box {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background-color: var(--bg-app);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 0.9rem;
+      outline: none;
+    }
+
+    .search-input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px var(--primary-bg);
+    }
+
+    .filter-group {
+      display: flex;
+      gap: 6px;
+    }
+
+    .filter-btn {
+      flex-grow: 1;
+      padding: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      border-radius: 6px;
+      background-color: var(--bg-app);
+      border: 1px solid var(--border-color);
+      color: var(--text-secondary);
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s;
+    }
+
+    .filter-btn.active {
+      background-color: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+    }
+
+    .job-list {
+      flex-grow: 1;
+      overflow-y: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .job-card {
+      padding: 12px;
+      background-color: var(--bg-card);
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .job-card:hover {
+      background-color: var(--bg-card-hover);
+    }
+
+    .job-card.active {
+      border-color: var(--primary);
+      background-color: var(--primary-bg);
+    }
+
+    .job-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .job-card-id {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+
+    .job-card-task {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-bottom: 4px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .provider-badge {
+      background-color: var(--border-color);
+      color: var(--text-secondary);
+    }
+
+    .status-badge {
+      margin-left: 5px;
+    }
+
+    .status-running { color: var(--status-running); background-color: var(--status-running-bg); }
+    .status-stale-running { color: var(--status-stale); background-color: var(--status-stale-bg); }
+    .status-completed { color: var(--status-completed); background-color: var(--status-completed-bg); }
+    .status-failed { color: var(--status-failed); background-color: var(--status-failed-bg); }
+    .status-stale { color: var(--status-stale); background-color: var(--status-stale-bg); }
+
+    /* Header Components */
+    .header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: var(--bg-sidebar);
+      transition: background-color 0.3s;
+    }
+
+    .header-info h2 {
+      font-size: 1.3rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .header-info p {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+    }
+
+    .theme-toggle {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 1.2rem;
+      cursor: pointer;
+      outline: none;
+      padding: 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    input[type="checkbox"] {
+      accent-color: var(--primary);
+    }
+
+    /* Dashboard Details */
+    .dashboard-view {
+      flex-grow: 1;
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .process-section {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 15px;
+    }
+
+    .process-section h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .process-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 10px;
+    }
+
+    .process-card {
+      padding: 10px 12px;
+      background-color: var(--bg-app);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      font-size: 0.8rem;
+    }
+
+    .process-card-title {
+      font-weight: 600;
+      color: var(--status-running);
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .process-card-cmd {
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+
+    .detail-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+    }
+
+    .detail-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      border-bottom: 1px solid var(--border-color);
+      padding-bottom: 15px;
+    }
+
+    .detail-title h3 {
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+      font-size: 0.85rem;
+    }
+
+    .meta-item {
+      color: var(--text-secondary);
+    }
+
+    .meta-item strong {
+      color: var(--text-primary);
+    }
+
+    .content-box {
+      background-color: var(--bg-app);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .content-box-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--primary);
+      margin-bottom: 6px;
+    }
+
+    .content-box-body {
+      font-size: 0.9rem;
+      line-height: 1.4;
+      color: var(--text-primary);
+    }
+
+    /* Tabbed Container */
+    .tab-container {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      overflow: hidden;
+      background-color: var(--bg-card);
+    }
+
+    .tab-bar {
+      display: flex;
+      background-color: var(--bg-sidebar);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .tab-btn {
+      padding: 12px 20px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      background: none;
+      border: none;
+      cursor: pointer;
+      border-right: 1px solid var(--border-color);
+      transition: all 0.2s;
+    }
+
+    .tab-btn:hover {
+      background-color: var(--bg-card-hover);
+    }
+
+    .tab-btn.active {
+      background-color: var(--bg-card);
+      color: var(--primary);
+    }
+
+    .tab-pane {
+      display: none;
+      padding: 15px;
+      overflow-y: visible;
+      max-height: none;
+    }
+
+    .tab-pane.active {
+      display: block;
+    }
+
+    pre {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      background-color: var(--bg-app);
+      border-radius: 6px;
+      padding: 12px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      color: var(--text-primary);
+    }
+
+    .conversation-controls {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      margin: 0 0 12px 0;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+    }
+
+    .conversation-frame {
+      max-height: 720px;
+      overflow-y: auto;
+      overflow-anchor: none;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 14px;
+      background-color: var(--bg-app);
+    }
+
+    .conversation-frame.hide-assistant .event-assistant,
+    .conversation-frame.hide-tools .event-tool {
+      display: none;
+    }
+
+    .conversation-controls label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+
+    .event-stream {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .event-stream-container {
+      max-height: none;
+      overflow-y: visible;
+      padding-right: 6px;
+    }
+
+    .event-bubble {
+      max-width: 86%;
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 10px 12px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    }
+
+    .event-assistant {
+      align-self: flex-start;
+      background: rgba(59, 130, 246, 0.10);
+      border-color: rgba(59, 130, 246, 0.25);
+    }
+
+    .event-tool {
+      align-self: flex-end;
+      background: rgba(16, 185, 129, 0.10);
+      border-color: rgba(16, 185, 129, 0.25);
+    }
+
+    .event-error {
+      background: rgba(239, 68, 68, 0.12);
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+
+    .event-title {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .event-body {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    /* Markdown styling inside tabs */
+    .md-text h4 {
+      font-size: 0.95rem;
+      margin: 10px 0 5px 0;
+      color: var(--primary);
+    }
+    .md-text p {
+      font-size: 0.85rem;
+      margin-bottom: 10px;
+      line-height: 1.4;
+    }
+    .md-text ul {
+      margin-left: 20px;
+      margin-bottom: 10px;
+      font-size: 0.85rem;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 50px 20px;
+      color: var(--text-secondary);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Left Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <div class="brand">Agent Orch Auditor</div>
+      <div class="filter-box">
+        <input type="text" class="search-input" id="searchInput" placeholder="Search Task ID / Job ID..." oninput="applyFilters()">
+        <div class="filter-group">
+          <div class="filter-btn active" id="btnAll" onclick="setStatusFilter('all')">All</div>
+          <div class="filter-btn" id="btnRunning" onclick="setStatusFilter('running')">Running</div>
+          <div class="filter-btn" id="btnCompleted" onclick="setStatusFilter('completed')">Done</div>
+          <div class="filter-btn" id="btnFailed" onclick="setStatusFilter('failed')">Failed</div>
+        </div>
+        <div class="filter-group">
+          <div class="filter-btn active" id="btnProvAll" onclick="setProviderFilter('all')">All Providers</div>
+          <div class="filter-btn" id="btnCc" onclick="setProviderFilter('cc')">CC</div>
+          <div class="filter-btn" id="btnAgy" onclick="setProviderFilter('agy')">AGY</div>
+        </div>
+      </div>
+    </div>
+    <div class="job-list" id="jobList">
+      <!-- Jobs injected here -->
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="main-content">
+    <div class="header">
+      <div class="header-info">
+        <h2>Orchestration Monitor</h2>
+        <p id="systemStatus">Checking workspace state...</p>
+      </div>
+      <div class="header-actions">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode">🌓</button>
+      </div>
+    </div>
+
+    <div class="dashboard-view">
+      
+      <!-- Active Processes -->
+      <div class="process-section" id="processSection" style="display: none;">
+        <h3>🟢 Running Orchestrator Processes</h3>
+        <div class="process-grid" id="processGrid">
+          <!-- Active processes cards here -->
+        </div>
+      </div>
+
+      <!-- Selected Job Detail Pane -->
+      <div id="detailPane">
+        <div class="empty-state">Select a task from the left sidebar to view real-time logs and session metadata.</div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    let rawJobs = [];
+    let activeJobId = null;
+    let statusFilter = 'all';
+    let providerFilter = 'all';
+    let theme = 'dark';
+    let detailRequestSeq = 0;
+    let detailAbortController = null;
+    let detailPollTimer = null;
+    let detailInFlight = false;
+    let activeTabId = null;
+    let showAssistantEvents = true;
+    let showToolEvents = true;
+
+    // Theme switcher
+    function toggleTheme() {
+      theme = theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', theme);
+    }
+
+    // Filters
+    function setStatusFilter(val) {
+      statusFilter = val;
+      ['btnAll', 'btnRunning', 'btnCompleted', 'btnFailed'].forEach(id => {
+        document.getElementById(id).classList.remove('active');
+      });
+      const targetId = val === 'all' ? 'btnAll' : 'btn' + val.charAt(0).toUpperCase() + val.slice(1);
+      document.getElementById(targetId).classList.add('active');
+      applyFilters();
+    }
+
+    function setProviderFilter(val) {
+      providerFilter = val;
+      ['btnProvAll', 'btnCc', 'btnAgy'].forEach(id => {
+        document.getElementById(id).classList.remove('active');
+      });
+      const targetId = val === 'all' ? 'btnProvAll' : 'btn' + val.charAt(0).toUpperCase() + val.slice(1);
+      document.getElementById(targetId).classList.add('active');
+      applyFilters();
+    }
+
+    function applyFilters() {
+      const search = document.getElementById('searchInput').value.toLowerCase();
+      const filtered = rawJobs.filter(job => {
+        const matchesSearch = job.job_id.toLowerCase().includes(search) || job.task_id.toLowerCase().includes(search);
+        const matchesStatus = statusFilter === 'all' || job.status === statusFilter;
+        const matchesProvider = providerFilter === 'all' || job.provider === providerFilter;
+        return matchesSearch && matchesStatus && matchesProvider;
+      });
+      renderJobList(filtered);
+    }
+
+    // API Polling loop
+    async function pollStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        
+        const statusText = data.orchestrator_found 
+          ? `Connected | Workspace: ${data.orchestrator_dir}` 
+          : '⚠️ Orchestrator root folder not detected in current path tree.';
+        document.getElementById('systemStatus').innerText = statusText;
+
+        const procSec = document.getElementById('processSection');
+        const grid = document.getElementById('processGrid');
+        
+        if (data.active_processes && data.active_processes.length > 0) {
+          procSec.style.display = 'block';
+          grid.innerHTML = data.active_processes.map(p => `
+            <div class="process-card">
+              <div class="process-card-title">
+                <span>${p.Name}</span>
+                <span class="badge status-running">PID ${p.ProcessId}</span>
+              </div>
+              <div class="process-card-cmd" title="${p.CommandLine}">${p.CommandLine || ''}</div>
+            </div>
+          `).join('');
+        } else {
+          procSec.style.display = 'none';
+        }
+      } catch (err) {
+        document.getElementById('systemStatus').innerText = 'Offline - Web Server Unreachable';
+      }
+    }
+
+    async function pollRuns() {
+      try {
+        const res = await fetch('/api/runs');
+        rawJobs = await res.json();
+        applyFilters();
+        
+      } catch (err) {
+        console.error("Error polling runs:", err);
+      }
+    }
+
+    function renderJobList(jobs) {
+      const container = document.getElementById('jobList');
+      if (jobs.length === 0) {
+        container.innerHTML = '<div class="empty-state">No jobs match selection.</div>';
+        return;
+      }
+
+      container.innerHTML = jobs.map(job => {
+        const isActive = job.job_id === activeJobId ? 'active' : '';
+        const statusClass = 'status-' + job.status;
+        return `
+          <div class="job-card ${isActive}" onclick="selectJob('${job.job_id}')">
+            <div class="job-card-header">
+              <span class="job-card-id">${job.job_id}</span>
+              <span class="badge ${statusClass}">${job.status}</span>
+            </div>
+            <div class="job-card-task" title="${job.task_id}">${job.task_id || '(No Task ID)'}</div>
+            <div>
+              <span class="badge provider-badge">${job.provider}</span>
+              <span class="badge provider-badge" style="margin-left:5px;">${job.phase || ''}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function selectJob(id) {
+      activeJobId = id;
+      activeTabId = null;
+      applyFilters(); // updates list active classes
+      const container = document.getElementById('detailPane');
+      delete container.dataset.jobId;
+      delete container.dataset.provider;
+      container.innerHTML = '<div class="empty-state">Loading selected job...</div>';
+      await refreshActiveJobDetail(true);
+    }
+
+    async function refreshActiveJobDetail(force = false) {
+      if (!activeJobId) return;
+
+      const requestJobId = activeJobId;
+      if (detailInFlight && !force) return;
+      const seq = ++detailRequestSeq;
+      if (force && detailAbortController) {
+        detailAbortController.abort();
+      }
+      detailAbortController = new AbortController();
+      detailInFlight = true;
+
+      try {
+        const res = await fetch(`/api/run/${encodeURIComponent(requestJobId)}`, { signal: detailAbortController.signal });
+        const data = await res.json();
+        if (seq !== detailRequestSeq || requestJobId !== activeJobId) return;
+        renderJobDetail(data);
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.error("Error fetching job detail:", err);
+      } finally {
+        if (seq === detailRequestSeq) detailInFlight = false;
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function isToolEvent(e) {
+      return e && (e.kind === 'tool_use' || e.kind === 'tool_result');
+    }
+
+    function isAssistantEvent(e) {
+      return e && !isToolEvent(e);
+    }
+
+    function renderEventFilters() {
+      return `<div class="conversation-controls">
+        <label><input type="checkbox" ${showAssistantEvents ? 'checked' : ''} onchange="setConversationFilter('assistant', this.checked)"> Assistant</label>
+        <label><input type="checkbox" ${showToolEvents ? 'checked' : ''} onchange="setConversationFilter('tools', this.checked)"> Tools</label>
+      </div>`;
+    }
+
+    function setConversationFilter(kind, checked) {
+      if (kind === 'assistant') showAssistantEvents = checked;
+      if (kind === 'tools') showToolEvents = checked;
+      document.querySelectorAll('.conversation-frame').forEach(frame => {
+        frame.classList.toggle('hide-assistant', !showAssistantEvents);
+        frame.classList.toggle('hide-tools', !showToolEvents);
+        updateConversationAutofollow(frame);
+      });
+    }
+
+    function isConversationAtBottom(frame) {
+      return frame.scrollHeight - frame.scrollTop - frame.clientHeight <= 8;
+    }
+
+    function updateConversationAutofollow(frame) {
+      frame.dataset.autofollow = isConversationAtBottom(frame) ? 'true' : 'false';
+    }
+
+    function attachConversationAutofollow() {
+      document.querySelectorAll('.conversation-frame').forEach(frame => {
+        if (frame.dataset.autofollowBound === 'true') return;
+        updateConversationAutofollow(frame);
+        frame.dataset.autofollowBound = 'true';
+        frame.addEventListener('scroll', () => updateConversationAutofollow(frame), { passive: true });
+      });
+    }
+
+    function followConversationBottom(frame) {
+      frame.scrollTop = frame.scrollHeight;
+      frame.dataset.autofollow = 'true';
+    }
+
+    function getRenderableEvents(events, mode = 'conversation') {
+      if (!events || events.length === 0) return '<div class="empty-state">No transcript events found yet.</div>';
+      let filtered = events;
+      if (mode === 'tools') {
+        filtered = events.filter(isToolEvent);
+      } else if (mode === 'conversation') {
+        filtered = events.filter(e => isAssistantEvent(e) || isToolEvent(e));
+      }
+      return filtered;
+    }
+
+    function eventKey(e, index) {
+      return [index, e.timestamp || '', e.kind || '', e.role || '', e.tool || ''].join('|');
+    }
+
+    function renderEventBubble(e, index) {
+      const tool = isToolEvent(e);
+      const label = e.kind === 'tool_use'
+        ? `[tool_use ${escapeHtml(e.tool || 'tool')}]`
+        : e.kind === 'tool_result'
+          ? `[tool_result${e.is_error ? ' ERROR' : ''}]`
+          : `[${escapeHtml(e.role || e.kind)}]`;
+      const meta = [e.timestamp, e.model].filter(Boolean).map(escapeHtml).join(' | ');
+      const cls = `${tool ? 'event-tool' : 'event-assistant'} ${e.is_error ? 'event-error' : ''}`;
+      return `<div class="event-bubble ${cls}" data-event-key="${escapeHtml(eventKey(e, index))}" data-event-size="${escapeHtml((e.text || '').length)}">
+        <div class="event-title"><span>${label}</span>${meta ? `<span>${meta}</span>` : ''}</div>
+        <div class="event-body">${escapeHtml(e.text || '')}</div>
+      </div>`;
+    }
+
+    function renderEventItems(events, mode = 'conversation') {
+      const filtered = getRenderableEvents(events, mode);
+      if (typeof filtered === 'string') return filtered;
+      if (filtered.length === 0) return '<div class="empty-state">No matching events found.</div>';
+      return filtered.map(renderEventBubble).join('');
+    }
+
+    function renderEvents(events, mode = 'conversation') {
+      return `<div class="event-stream-container"><div class="event-stream">${renderEventItems(events, mode)}</div></div>`;
+    }
+
+    function syncEventStream(events, mode = 'conversation') {
+      const container = document.getElementById('detailPane');
+      const stream = container.querySelector('.conversation-frame .event-stream');
+      if (!stream) return;
+      const frame = stream.closest('.conversation-frame');
+      const shouldFollow = frame && frame.dataset.autofollow === 'true';
+
+      const filtered = getRenderableEvents(events, mode);
+      if (typeof filtered === 'string' || filtered.length === 0) {
+        const emptyHtml = typeof filtered === 'string' ? filtered : '<div class="empty-state">No matching events found.</div>';
+        if (stream.innerHTML !== emptyHtml) stream.innerHTML = emptyHtml;
+        if (shouldFollow) followConversationBottom(frame);
+        return;
+      }
+
+      const existing = Array.from(stream.children).filter(el => el.classList.contains('event-bubble'));
+      const canAppend = existing.length <= filtered.length && existing.every((el, index) => el.dataset.eventKey === eventKey(filtered[index], index));
+      if (!canAppend) {
+        stream.innerHTML = filtered.map(renderEventBubble).join('');
+        if (shouldFollow) followConversationBottom(frame);
+        return;
+      }
+
+      let changed = false;
+      existing.forEach((el, index) => {
+        const nextSize = String((filtered[index].text || '').length);
+        if (el.dataset.eventSize !== nextSize) {
+          el.outerHTML = renderEventBubble(filtered[index], index);
+          changed = true;
+        }
+      });
+
+      if (existing.length < filtered.length) {
+        if (stream.querySelector('.empty-state')) stream.innerHTML = '';
+        stream.insertAdjacentHTML('beforeend', filtered.slice(existing.length).map((event, offset) => renderEventBubble(event, existing.length + offset)).join(''));
+        changed = true;
+      }
+
+      if (changed && shouldFollow) {
+        followConversationBottom(frame);
+      }
+    }
+
+    function setFieldText(container, field, value) {
+      const el = container.querySelector(`[data-field="${field}"]`);
+      if (el) el.textContent = value ?? '';
+    }
+
+    function updateJobDetailInPlace(data, modelStr, startStr, endStr, statusClass) {
+      const container = document.getElementById('detailPane');
+      const job = data.job || {};
+      setFieldText(container, 'taskId', job.task_id || job.id || '-');
+      setFieldText(container, 'jobId', job.id || '-');
+      setFieldText(container, 'provider', job.provider || '-');
+      setFieldText(container, 'status', job.status || '-');
+      setFieldText(container, 'complexity', job.complexity || '-');
+      setFieldText(container, 'model', modelStr);
+      setFieldText(container, 'started', startStr);
+      setFieldText(container, 'ended', endStr);
+      setFieldText(container, 'goal', job.goal || '-');
+      setFieldText(container, 'transcriptPath', job.provider === 'cc' ? (data.transcript_path || 'No transcript path found yet.') : (data.agy_transcript_path || 'No AGY transcript path found yet.'));
+
+      const statusEl = container.querySelector('[data-field="status"]');
+      if (statusEl) {
+        statusEl.className = `badge ${statusClass} status-badge`;
+        statusEl.style.cssText = 'font-size:0.8rem; padding: 4px 8px;';
+      }
+
+      if (job.provider === 'cc') {
+        syncEventStream(data.transcript_events, 'conversation');
+        setFieldText(container, 'debugLog', data.debug_log || 'No debug logs written yet.');
+        setFieldText(container, 'stdoutLog', data.stdout_log || '');
+        setFieldText(container, 'stderrLog', data.stderr_log || '');
+        setFieldText(container, 'patchLog', data.patch || 'No changes.patch found yet.');
+        setFieldText(container, 'gitLog', data.git_status || 'Isolated worktree has no uncommitted changes.');
+      } else {
+        syncEventStream(data.agy_transcript_events, 'conversation');
+        setFieldText(container, 'agyLog', data.agy_cli_log || 'No AGY CLI log found yet.');
+        setFieldText(container, 'agyStdoutLog', data.agy_stdout_log || '');
+        setFieldText(container, 'agyStderrLog', data.agy_stderr_log || '');
+      }
+    }
+
+    // Markdown simple parser for evidence text
+    function parseMarkdown(txt) {
+      if (!txt) return '';
+      return escapeHtml(txt)
+        .replace(/^#### (.*?)$/gm, '<h4>$1</h4>')
+        .replace(/^### (.*?)$/gm, '<h3>$1</h3>')
+        .replace(/^## (.*?)$/gm, '<h2>$1</h2>')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        .replace(/`(.*?)`/g, '<code>$1</code>')
+        .replace(/\n\n/g, '<p></p>')
+        .replace(/^\s*[-*]\s*(.*?)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*?<\/li>)+/g, '<ul>$&</ul>');
+    }
+
+    function renderJobDetail(data) {
+      const container = document.getElementById('detailPane');
+      if (!data || data.error) {
+        container.innerHTML = `<div class="empty-state">Error loading job: ${escapeHtml(data ? data.error : 'unknown')}</div>`;
+        return;
+      }
+
+      const job = data.job || {};
+      const statusClass = 'status-' + (job.status || 'unknown');
+      const startStr = job.started_at ? new Date(job.started_at).toLocaleString() : '-';
+      const endStr = job.finished_at ? new Date(job.finished_at).toLocaleString() : 'Active/Running';
+      const eventModel = (data.transcript_events || []).slice().reverse().find(e => e.model)?.model;
+      const modelStr = job.model || data.evidence?.model || data.observed_model || eventModel || '-';
+      if (container.dataset.jobId === String(job.id || '') && container.dataset.provider === String(job.provider || '')) {
+        updateJobDetailInPlace(data, modelStr, startStr, endStr, statusClass);
+        return;
+      }
+      const previousTab = activeTabId;
+
+      // Setup tab selection
+      let tabHtml = '';
+      let paneHtml = '';
+
+      if (job.provider === 'cc') {
+        tabHtml = `
+          <button class="tab-btn" data-tab="tab-conversation" onclick="switchTab('tab-conversation')">Conversation</button>
+          <button class="tab-btn" onclick="switchTab('tab-log')">Debug</button>
+          <button class="tab-btn" onclick="switchTab('tab-stdio')">Stdout/Stderr</button>
+          <button class="tab-btn" onclick="switchTab('tab-patch')">Patch</button>
+          <button class="tab-btn" onclick="switchTab('tab-git')">Git Status (Worktree)</button>
+          <button class="tab-btn" onclick="switchTab('tab-raw')">Raw job.json</button>
+        `;
+        paneHtml = `
+          <div class="tab-pane" id="tab-conversation">
+            <div class="content-box"><div class="content-box-title">Transcript Path</div><div class="content-box-body" data-field="transcriptPath" style="font-family:var(--font-mono);">${escapeHtml(data.transcript_path || 'No transcript path found yet.')}</div></div>
+            <div class="conversation-frame ${showAssistantEvents ? '' : 'hide-assistant'} ${showToolEvents ? '' : 'hide-tools'}">
+              ${renderEventFilters()}
+              ${renderEvents(data.transcript_events, 'conversation')}
+            </div>
+          </div>
+          <div class="tab-pane" id="tab-log"><pre data-field="debugLog">${escapeHtml(data.debug_log || 'No debug logs written yet.')}</pre></div>
+          <div class="tab-pane" id="tab-stdio"><h3>stdout</h3><pre data-field="stdoutLog">${escapeHtml(data.stdout_log || '')}</pre><h3>stderr</h3><pre data-field="stderrLog">${escapeHtml(data.stderr_log || '')}</pre></div>
+          <div class="tab-pane" id="tab-patch"><pre data-field="patchLog">${escapeHtml(data.patch || 'No changes.patch found yet.')}</pre></div>
+          <div class="tab-pane" id="tab-git"><pre data-field="gitLog">${escapeHtml(data.git_status || 'Isolated worktree has no uncommitted changes.')}</pre></div>
+          <div class="tab-pane" id="tab-raw"><pre>${escapeHtml(JSON.stringify(job, null, 2))}</pre></div>
+        `;
+      } else {
+        const reportText = data.evidence ? data.evidence.result : 'AGY investigation evidence file not found.';
+        tabHtml = `
+          <button class="tab-btn" onclick="switchTab('tab-report')">Audit Report (evidence.json)</button>
+          <button class="tab-btn" onclick="switchTab('tab-agy-transcript')">Transcript</button>
+          <button class="tab-btn" onclick="switchTab('tab-agy-log')">Live Log</button>
+          <button class="tab-btn" onclick="switchTab('tab-agy-stdio')">Stdout/Stderr</button>
+          <button class="tab-btn" onclick="switchTab('tab-raw')">Raw Metadata</button>
+        `;
+        paneHtml = `
+          <div class="tab-pane md-text" id="tab-report"><p>${parseMarkdown(reportText)}</p></div>
+          <div class="tab-pane" id="tab-agy-transcript">
+            <div class="content-box"><div class="content-box-title">Transcript Path</div><div class="content-box-body" data-field="transcriptPath" style="font-family:var(--font-mono);">${escapeHtml(data.agy_transcript_path || 'No AGY transcript path found yet.')}</div></div>
+            <div class="conversation-frame ${showAssistantEvents ? '' : 'hide-assistant'} ${showToolEvents ? '' : 'hide-tools'}">
+              ${renderEventFilters()}
+              ${renderEvents(data.agy_transcript_events, 'conversation')}
+            </div>
+          </div>
+          <div class="tab-pane" id="tab-agy-log"><pre data-field="agyLog">${escapeHtml(data.agy_cli_log || 'No AGY CLI log found yet.')}</pre></div>
+          <div class="tab-pane" id="tab-agy-stdio"><h3>stdout</h3><pre data-field="agyStdoutLog">${escapeHtml(data.agy_stdout_log || '')}</pre><h3>stderr</h3><pre data-field="agyStderrLog">${escapeHtml(data.agy_stderr_log || '')}</pre></div>
+          <div class="tab-pane" id="tab-raw"><pre>${escapeHtml(JSON.stringify(data.evidence || job, null, 2))}</pre></div>
+        `;
+      }
+
+      container.innerHTML = `
+        <div class="detail-card">
+          <div class="detail-header">
+            <div class="detail-title">
+              <h3>Task: <span data-field="taskId">${escapeHtml(job.task_id || job.id)}</span></h3>
+              <p style="color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.85rem;">Job ID: <span data-field="jobId">${escapeHtml(job.id)}</span></p>
+            </div>
+            <div>
+              <span class="badge provider-badge" data-field="provider" style="font-size:0.8rem; padding: 4px 8px;">${escapeHtml(job.provider)}</span>
+              <span class="badge ${statusClass} status-badge" data-field="status" style="font-size:0.8rem; padding: 4px 8px;">${escapeHtml(job.status)}</span>
+            </div>
+          </div>
+
+          <div class="meta-grid">
+            <div class="meta-item"><strong>Complexity:</strong> <span data-field="complexity">${escapeHtml(job.complexity || '-')}</span></div>
+            <div class="meta-item"><strong>Model:</strong> <span data-field="model">${escapeHtml(modelStr)}</span></div>
+            <div class="meta-item"><strong>Started:</strong> <span data-field="started">${escapeHtml(startStr)}</span></div>
+            <div class="meta-item"><strong>Ended:</strong> <span data-field="ended">${escapeHtml(endStr)}</span></div>
+          </div>
+
+            <div class="content-box">
+              <div class="content-box-title">Goal</div>
+            <div class="content-box-body" data-field="goal">${escapeHtml(job.goal || '-')}</div>
+          </div>
+
+          ${job.plan ? `
+            <div class="content-box">
+              <div class="content-box-title">Plan</div>
+              <div class="content-box-body">${escapeHtml(job.plan)}</div>
+            </div>
+          ` : ''}
+
+          ${job.acceptance_commands && job.acceptance_commands.length > 0 ? `
+            <div class="content-box">
+              <div class="content-box-title">Acceptance Commands</div>
+              <div class="content-box-body" style="font-family: var(--font-mono); font-size: 0.8rem;">
+                ${job.acceptance_commands.map(cmd => `<div>$ ${escapeHtml(cmd)}</div>`).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          <div class="tab-container">
+            <div class="tab-bar">
+              ${tabHtml}
+            </div>
+            ${paneHtml}
+          </div>
+        </div>
+      `;
+      container.dataset.jobId = String(job.id || '');
+      container.dataset.provider = String(job.provider || '');
+
+      const defaultTab = job.provider === 'cc' ? 'tab-conversation' : 'tab-report';
+      const tabToRestore = previousTab && document.getElementById(previousTab) ? previousTab : defaultTab;
+      switchTab(tabToRestore, false);
+      attachConversationAutofollow();
+    }
+
+    function switchTab(targetId, userInitiated = true) {
+      activeTabId = targetId;
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
+      
+      const targetPane = document.getElementById(targetId);
+      if (!targetPane) return;
+      targetPane.classList.add('active');
+
+      const buttons = Array.from(document.querySelectorAll('.tab-btn'));
+      const idx = Array.from(document.querySelectorAll('.tab-pane')).indexOf(targetPane);
+      if (buttons[idx]) buttons[idx].classList.add('active');
+    }
+
+    // Loops setup
+    pollStatus();
+    pollRuns();
+    setInterval(pollStatus, 5000);
+    setInterval(pollRuns, 5000);
+    detailPollTimer = setInterval(() => {
+      if (activeJobId) refreshActiveJobDetail();
+    }, 2000);
+  </script>
+</body>
+</html>
