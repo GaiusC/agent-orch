@@ -13,6 +13,7 @@ SERVER_VERSION = "audit-orch-project-bound-v3"
 MAX_TAIL_BYTES = 256 * 1024
 MAX_TRANSCRIPT_BYTES = 192 * 1024
 MAX_EVENTS = 120
+MAX_PROMPT_CONTENT_BYTES = 160 * 1024
 JOB_ID_RE = re.compile(r"^(cc|agy|agy-probe)-[A-Za-z0-9_.-]+$")
 TRANSCRIPT_CACHE = {}
 PROCESS_CACHE = {"time": 0.0, "processes": [], "text": ""}
@@ -252,6 +253,166 @@ def load_project_config(orchestrator_dir):
         return {}
 
 
+def project_display_name(project_path):
+    """Derive a human-readable display name from a project directory path."""
+    if not project_path:
+        return ""
+    try:
+        config_file = os.path.join(project_path, ".agent-orchestrator", "config.json")
+        if os.path.isfile(config_file):
+            with open(config_file, "r", encoding="utf-8-sig") as fh:
+                cfg = json.load(fh)
+            display = cfg.get("display_name") or cfg.get("name")
+            if display:
+                return str(display)
+    except Exception:
+        pass
+    return os.path.basename(os.path.abspath(project_path))
+
+
+def discover_projects():
+    """Discover known Codex/Agent Orch projects from safe local sources.
+
+    Sources, in order of priority:
+      1. the server-bound project directory (always included)
+      2. parent directories containing .agent-orchestrator
+      3. ~/.claude/projects/  (Claude Code project folders)
+      4. recent Agent Orch job.json files that reference distinct project directories
+    """
+    seen = {}
+    root = os.path.abspath(SERVER_PROJECT_DIR or os.getcwd())
+    sources = []
+
+    # 1. server-bound project
+    sources.append(("server", root))
+
+    # 2. walk up from root for .agent-orchestrator parents
+    target = root
+    while target:
+        check = os.path.join(target, ".agent-orchestrator")
+        if os.path.isdir(check) and os.path.abspath(target) != os.path.abspath(root):
+            sources.append(("parent_orchestrator", target))
+        parent = os.path.dirname(target)
+        if parent == target:
+            break
+        target = parent
+
+    # 3. ~/.claude/projects/
+    cc_projects = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    if os.path.isdir(cc_projects):
+        for folder_name in os.listdir(cc_projects):
+            folder = os.path.join(cc_projects, folder_name)
+            if not os.path.isdir(folder):
+                continue
+            for settings_name in ("settings.json", "settings.local.json"):
+                settings_path = os.path.join(folder, settings_name)
+                if not os.path.isfile(settings_path):
+                    continue
+                try:
+                    with open(settings_path, "r", encoding="utf-8-sig") as fh:
+                        settings = json.load(fh)
+                    project_dir = settings.get("projectRoot") or settings.get("cwd")
+                    if project_dir and os.path.isdir(project_dir):
+                        sources.append(("claude_projects", os.path.abspath(project_dir)))
+                    break
+                except Exception:
+                    pass
+
+    # 4. recent job.json files referencing distinct project directories
+    #    scan the server orchestrator dir, plus any parent orchestrator dirs found
+    orchestrator_dirs = set()
+    if SERVER_ORCHESTRATOR_DIR:
+        orchestrator_dirs.add(SERVER_ORCHESTRATOR_DIR)
+    for source_kind, source_path in sources:
+        orch = os.path.join(source_path, ".agent-orchestrator")
+        if os.path.isdir(orch):
+            orchestrator_dirs.add(orch)
+
+    for orch_dir in orchestrator_dirs:
+        runs_root = os.path.join(orch_dir, "runs")
+        if not os.path.isdir(runs_root):
+            continue
+        for run_folder in sorted(os.listdir(runs_root), reverse=True)[:20]:
+            job_file = os.path.join(runs_root, run_folder, "job.json")
+            if not os.path.isfile(job_file):
+                continue
+            try:
+                with open(job_file, "r", encoding="utf-8-sig") as fh:
+                    job = json.load(fh)
+                pd = job.get("project_dir")
+                if not pd:
+                    continue
+                pd = os.path.abspath(pd)
+                if os.path.isdir(pd):
+                    sources.append(("job_reference", pd))
+            except Exception:
+                pass
+
+    # Deduplicate and build result list
+    for source_kind, source_path in sources:
+        key = os.path.normcase(os.path.abspath(source_path))
+        if key in seen:
+            # keep the first (highest-priority) source kind
+            continue
+        if not os.path.isdir(source_path):
+            continue
+        seen[key] = source_kind
+
+    projects = []
+    _, process_text = get_active_processes_snapshot()
+
+    for abs_path, src in seen.items():
+        orch_dir = os.path.join(abs_path, ".agent-orchestrator")
+        has_orchestrator = os.path.isdir(orch_dir)
+        total_jobs = 0
+        active_jobs = 0
+        if has_orchestrator:
+            runs_dir = os.path.join(orch_dir, "runs")
+            if os.path.isdir(runs_dir):
+                for run_folder in os.listdir(runs_dir):
+                    job_file = os.path.join(runs_dir, run_folder, "job.json")
+                    if not os.path.isfile(job_file):
+                        continue
+                    total_jobs += 1
+                    try:
+                        with open(job_file, "r", encoding="utf-8-sig") as fh:
+                            job = json.load(fh)
+                        status = job.get("status", "unknown")
+                        if status in ("queued", "running"):
+                            if status == "running":
+                                needles = [
+                                    job.get("id", ""),
+                                    job.get("session_id", ""),
+                                    job.get("task_id", ""),
+                                    job.get("project_dir", ""),
+                                    ((job.get("workspace") or {}).get("path") or ""),
+                                ]
+                                needles = [n for n in needles if n]
+                                if not any(needle and needle in process_text for needle in needles):
+                                    continue
+                            active_jobs += 1
+                    except Exception:
+                        pass
+
+        projects.append({
+            "path": abs_path,
+            "display_name": project_display_name(abs_path),
+            "has_orchestrator": has_orchestrator,
+            "total_jobs": total_jobs,
+            "active_jobs": active_jobs,
+            "source": src,
+        })
+
+    # sort: projects with orchestrator first, then by active/total jobs desc
+    projects.sort(key=lambda p: (
+        not p["has_orchestrator"],
+        -p["active_jobs"],
+        -p["total_jobs"],
+        p["display_name"].lower(),
+    ))
+    return projects
+
+
 def write_conclusion(orchestrator_dir, job_id, payload):
     path = conclusion_path(orchestrator_dir, job_id)
     temp = path + ".tmp"
@@ -269,15 +430,42 @@ def run_conclusion(orchestrator_dir, job_id, transcript_path, run_path, project_
     prefix = list(cli.get("agy_prefix_args") or [])
     model = ((models.get("agy") or {}).get("low")) or "Gemini 3.5 Flash"
     timeout = min(int(execution.get("agy_timeout_seconds") or 300), 600)
-    prompt = (
-        "Read the Agent Orch conversation transcript at the exact path below and produce a concise conclusion. "
-        "Write the entire conclusion in Simplified Chinese. Keep code identifiers, file paths, commands, model names, "
+
+    # Read transcript content directly so AGY doesn't need to access the file path.
+    transcript_content = ""
+    if transcript_path and os.path.isfile(transcript_path):
+        size = os.path.getsize(transcript_path)
+        try:
+            with open(transcript_path, "rb") as fh:
+                if size > MAX_PROMPT_CONTENT_BYTES:
+                    fh.seek(size - MAX_PROMPT_CONTENT_BYTES)
+                raw = fh.read()
+            # Strip UTF-8 BOM if present
+            if raw.startswith(b"\xef\xbb\xbf"):
+                raw = raw[3:]
+            transcript_content = raw.decode("utf-8", errors="replace")
+        except Exception:
+            transcript_content = ""
+
+    prompt_header = (
+        "You are a summarizer. Read the Agent Orch conversation transcript below and produce a concise conclusion. "
+        "Write the entire conclusion in Simplified Chinese (简体中文). Keep code identifiers, file paths, commands, model names, "
         "and other proper nouns unchanged when translation would reduce precision. Do not include an English version. "
         "Cover the goal, decisions, code or files changed, tools and tests, failures or blockers, cost-relevant observations, "
-        "and recommended next action. Distinguish verified facts from inference. Do not modify files or external systems.\n\n"
-        f"Transcript: {transcript_path}"
+        "and recommended next action. Distinguish verified facts from inference. Do not modify files or external systems."
     )
-    args = prefix + ["--print", prompt, "--print-timeout", f"{timeout}s", "--new-project", "--add-dir", run_path, "--model", model]
+    if transcript_content:
+        prompt = f"{prompt_header}\n\nTranscript:\n\n{transcript_content}"
+    else:
+        prompt = (
+            f"{prompt_header}\n\n"
+            f"(Transcript file was not readable at {transcript_path or 'unknown path'}. "
+            "Please note in the conclusion that the transcript could not be loaded.)"
+        )
+
+    args = prefix + ["--print", prompt, "--print-timeout", f"{timeout}s", "--model", model]
+    if not transcript_content:
+        args.extend(["--new-project", "--add-dir", run_path])
     if cli.get("agy_sandbox", True):
         args.append("--sandbox")
     started_at = utc_timestamp()
@@ -291,14 +479,69 @@ def run_conclusion(orchestrator_dir, job_id, transcript_path, run_path, project_
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         output = (completed.stdout or "").strip()
+        stderr_text = (completed.stderr or "").strip()
+
+        # Detect permission / auth failures from AGY output
+        auth_indicators = [
+            "permission denied", "access denied", "not authorized",
+            "authentication required", "login required", "please sign in",
+            "credentials", "token expired", "forbidden",
+            "权限不足", "认证失败", "未授权", "请登录",
+        ]
+        is_auth_failure = any(
+            indicator in (output + stderr_text).lower()
+            for indicator in auth_indicators
+        )
+
+        if completed.returncode != 0:
+            if is_auth_failure or "permission" in stderr_text.lower():
+                error_msg = (
+                    "AGY 权限或认证失败。请检查 AGY CLI 是否已登录，"
+                    "以及项目信任配置是否正确。"
+                    f"\n详细错误: {stderr_text or '未知错误'}"
+                )
+            else:
+                error_msg = (
+                    f"AGY 执行失败 (退出码 {completed.returncode})。"
+                    f"\n详细错误: {stderr_text or '未知错误'}"
+                )
+        elif not output:
+            error_msg = "AGY 未返回任何结论内容。可能的原因: 模型无响应或请求超时。"
+        elif is_auth_failure:
+            error_msg = (
+                "AGY 返回的内容中包含权限或认证错误。请检查 AGY CLI 配置。"
+            )
+        else:
+            error_msg = ""
+
         payload = {
-            "status": "completed" if completed.returncode == 0 and output else "failed",
+            "status": "completed" if completed.returncode == 0 and output and not is_auth_failure else "failed",
             "job_id": job_id,
             "model": model,
             "started_at": started_at,
             "finished_at": utc_timestamp(),
             "conclusion": output,
-            "error": "" if completed.returncode == 0 and output else ((completed.stderr or "No AGY conclusion returned.").strip()),
+            "error": error_msg,
+        }
+    except subprocess.TimeoutExpired:
+        payload = {
+            "status": "failed",
+            "job_id": job_id,
+            "model": model,
+            "started_at": started_at,
+            "finished_at": utc_timestamp(),
+            "conclusion": "",
+            "error": "AGY 结论生成超时。请检查 AGY CLI 是否正常运行，或尝试减少 transcript 大小。",
+        }
+    except FileNotFoundError:
+        payload = {
+            "status": "failed",
+            "job_id": job_id,
+            "model": model,
+            "started_at": started_at,
+            "finished_at": utc_timestamp(),
+            "conclusion": "",
+            "error": f"找不到 AGY CLI 可执行文件 '{command}'。请确认 AGY 已安装并在系统 PATH 中。",
         }
     except Exception as exc:
         payload = {
@@ -308,7 +551,7 @@ def run_conclusion(orchestrator_dir, job_id, transcript_path, run_path, project_
             "started_at": started_at,
             "finished_at": utc_timestamp(),
             "conclusion": "",
-            "error": str(exc),
+            "error": f"AGY 结论生成失败: {str(exc)}",
         }
     write_conclusion(orchestrator_dir, job_id, payload)
     with CONCLUSION_LOCK:
@@ -477,6 +720,8 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/status":
                 response_data = self.get_status_data(orchestrator_dir)
+            elif path == "/api/projects":
+                response_data = discover_projects()
             elif path == "/api/runs":
                 response_data = self.get_runs_list(orchestrator_dir)
             elif path.startswith("/api/conclusion/"):
