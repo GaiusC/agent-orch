@@ -732,7 +732,12 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
             if path == "/api/status":
                 response_data = self.get_status_data(orchestrator_dir)
             elif path == "/api/projects":
-                response_data = discover_projects()
+                projects_list = discover_projects()
+                response_data = {
+                    "projects": projects_list,
+                    "current_project": SERVER_PROJECT_DIR or os.getcwd(),
+                    "current_orchestrator": SERVER_ORCHESTRATOR_DIR or find_orchestrator_dir(SERVER_PROJECT_DIR or os.getcwd()),
+                }
             elif path == "/api/runs":
                 response_data = self.get_runs_list(orchestrator_dir)
             elif path.startswith("/api/conclusion/"):

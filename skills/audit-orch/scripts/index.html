@@ -93,7 +93,7 @@
       transition: background-color 0.3s, color 0.3s;
     }
 
-    /* ── Sidebar ── */
+    /* -- Sidebar -- */
     .sidebar {
       width: 320px;
       background-color: var(--bg-sidebar);
@@ -201,7 +201,7 @@
     .status-failed { color: var(--status-failed); background-color: var(--status-failed-bg); }
     .status-stale { color: var(--status-stale); background-color: var(--status-stale-bg); }
 
-    /* ── Main Content ── */
+    /* -- Main Content -- */
     .main-content {
       flex-grow: 1;
       display: flex;
@@ -211,7 +211,7 @@
       min-width: 0;
     }
 
-    /* ── Header ── */
+    /* -- Header -- */
     .header {
       padding: 20px;
       border-bottom: 1px solid var(--border-color);
@@ -257,7 +257,7 @@
 
     input[type="checkbox"] { accent-color: var(--primary); }
 
-    /* ── Dashboard View ── */
+    /* -- Dashboard View -- */
     .dashboard-view {
       flex-grow: 1;
       padding: 20px;
@@ -267,7 +267,7 @@
       gap: 20px;
     }
 
-    /* ── Project Selection View ── */
+    /* -- Project Selection View -- */
     .project-view {
       flex-grow: 1;
       padding: 20px;
@@ -336,6 +336,10 @@
       gap: 4px;
     }
 
+    .project-card-meta .meta-stat.active-jobs {
+      color: var(--status-running);
+    }
+
     .project-card-meta .orch-indicator {
       font-size: 0.72rem;
       padding: 2px 8px;
@@ -355,7 +359,7 @@
       color: var(--primary);
     }
 
-    /* ── Right Process Column ── */
+    /* -- Right Process Column -- */
     .process-column {
       width: 260px;
       background-color: var(--bg-sidebar);
@@ -387,6 +391,17 @@
       color: var(--text-primary);
       white-space: nowrap;
       overflow: hidden;
+    }
+
+    .process-column-title::before {
+      content: '';
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--status-running);
+      margin-right: 6px;
+      flex-shrink: 0;
     }
 
     .process-column.collapsed .process-column-title { display: none; }
@@ -468,7 +483,7 @@
 
     .process-column.collapsed .process-collapsed-indicator { display: flex; align-items: center; justify-content: center; }
 
-    /* ── Detail Card ── */
+    /* -- Detail Card -- */
     .detail-card {
       background-color: var(--bg-card);
       border: 1px solid var(--border-color);
@@ -490,7 +505,7 @@
     .detail-title h3 { font-size: 1.2rem; font-weight: 600; margin-bottom: 6px; }
     .detail-title p { color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.85rem; }
 
-    /* ── Compact Metadata ── */
+    /* -- Compact Metadata -- */
     .meta-compact {
       display: flex;
       flex-wrap: wrap;
@@ -565,7 +580,7 @@
       .meta-item-wide { grid-column: 1 / -1; }
     }
 
-    /* ── Content Box ── */
+    /* -- Content Box -- */
     .content-box {
       background-color: var(--bg-app);
       border: 1px solid var(--border-color);
@@ -586,7 +601,7 @@
       color: var(--text-primary);
     }
 
-    /* ── Tabbed Container ── */
+    /* -- Tabbed Container -- */
     .tab-container {
       display: flex;
       flex-direction: column;
@@ -633,7 +648,7 @@
       color: var(--text-primary);
     }
 
-    /* ── Conversation ── */
+    /* -- Conversation -- */
     .conversation-controls {
       display: flex;
       gap: 14px;
@@ -716,7 +731,7 @@
       overflow-wrap: anywhere;
     }
 
-    /* ── 3-line tool folding ── */
+    /* -- 3-line tool folding -- */
     .tool-body-clamped {
       display: -webkit-box;
       -webkit-line-clamp: 3;
@@ -750,7 +765,7 @@
 
     .tool-details[open] summary { margin-bottom: 8px; }
 
-    /* ── Conclusion ── */
+    /* -- Conclusion -- */
     .conclusion-actions {
       display: flex;
       align-items: center;
@@ -771,14 +786,14 @@
     .conclusion-button:disabled { cursor: wait; opacity: 0.55; }
     .conclusion-status { color: var(--text-secondary); font-size: 0.82rem; }
 
-    /* ── Markdown ── */
+    /* -- Markdown -- */
     .md-text h4 { font-size: 0.95rem; margin: 10px 0 5px 0; color: var(--primary); }
     .md-text p { font-size: 0.85rem; margin-bottom: 10px; line-height: 1.4; }
     .md-text ul { margin-left: 20px; margin-bottom: 10px; font-size: 0.85rem; }
 
     .empty-state { text-align: center; padding: 50px 20px; color: var(--text-secondary); }
 
-    /* ── Responsive ── */
+    /* -- Responsive -- */
     @media (max-width: 1100px) {
       .process-column { width: 220px; }
       .process-column.collapsed { width: 40px; }
@@ -822,8 +837,8 @@
         <p id="systemStatus">Checking workspace state...</p>
       </div>
       <div class="header-actions">
-        <button class="back-btn" id="backToProjectsBtn" onclick="showProjectsView()" style="display:none;">← Projects</button>
-        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode">🌓</button>
+        <button class="back-btn" id="backToProjectsBtn" onclick="showProjectsView()" style="display:none;">Projects</button>
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode">Toggle Theme</button>
       </div>
     </div>
 
@@ -835,17 +850,17 @@
   <!-- Right Process Column -->
   <div class="process-column" id="processColumn">
     <div class="process-column-header">
-      <span class="process-column-title">🟢 Processes</span>
-      <button class="process-toggle" id="processToggle" onclick="toggleProcessColumn()" title="Collapse/Expand">◀</button>
+      <span class="process-column-title">Processes</span>
+      <button class="process-toggle" id="processToggle" onclick="toggleProcessColumn()" title="Collapse/Expand">Collapse</button>
     </div>
-    <div class="process-collapsed-indicator">🟢</div>
+    <div class="process-collapsed-indicator">Active</div>
     <div class="process-column-body" id="processColumnBody">
       <!-- Process cards injected here -->
     </div>
   </div>
 
   <script>
-    // ── State ──
+    // -- State --
     let rawJobs = [];
     let activeJobId = null;
     let statusFilter = 'all';
@@ -864,7 +879,7 @@
     let metadataExpanded = false;
     const TOOL_LINE_LIMIT = 3;
 
-    // ── Init ──
+    // -- Init --
     (function init() {
       const params = new URLSearchParams(window.location.search);
       const projectParam = params.get('project');
@@ -876,7 +891,7 @@
       }
     })();
 
-    // ── View Management ──
+    // -- View Management --
     function showProjectsView() {
       currentView = 'projects';
       document.getElementById('sidebar').classList.add('hidden');
@@ -903,17 +918,15 @@
       showDashboardView();
     }
 
-    // ── Project List ──
+    // -- Project List --
     async function loadProjects() {
       const container = document.getElementById('dashboardView');
       container.innerHTML = '<div class="empty-state">Loading projects...</div>';
       try {
-        const statusRes = await fetch('/api/status');
-        const statusData = await statusRes.json();
-        const currentProjectDir = statusData.project_dir || '';
-
         const projRes = await fetch('/api/projects');
-        const projects = await projRes.json();
+        const data = await projRes.json();
+        const projects = data.projects || data;
+        const currentProjectDir = data.current_project || '';
 
         if (!projects || projects.length === 0) {
           container.innerHTML = '<div class="empty-state">No projects discovered.</div>';
@@ -936,8 +949,8 @@
                 <div class="project-card-path">${escapeHtml(p.path)}</div>
                 <div class="project-card-meta">
                   <span class="orch-indicator ${p.has_orchestrator ? 'orch-yes' : 'orch-no'}">${p.has_orchestrator ? 'Agent Orch' : 'No Orch'}</span>
-                  <span class="meta-stat">📋 ${p.total_jobs} jobs</span>
-                  ${p.active_jobs > 0 ? `<span class="meta-stat" style="color:var(--status-running);">🟢 ${p.active_jobs} active</span>` : ''}
+                  <span class="meta-stat">${p.total_jobs} jobs</span>
+                  ${p.active_jobs > 0 ? `<span class="meta-stat active-jobs">${p.active_jobs} active</span>` : ''}
                 </div>
               </div>`;
             }).join('')}
@@ -948,7 +961,7 @@
       }
     }
 
-    // ── Dashboard Load ──
+    // -- Dashboard Load --
     function loadDashboard() {
       activeJobId = null;
       activeTabId = null;
@@ -963,13 +976,13 @@
       }
     }
 
-    // ── Theme ──
+    // -- Theme --
     function toggleTheme() {
       theme = theme === 'dark' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', theme);
     }
 
-    // ── Filters ──
+    // -- Filters --
     function setStatusFilter(val) {
       statusFilter = val;
       ['btnAll', 'btnRunning', 'btnCompleted', 'btnFailed'].forEach(id => document.getElementById(id).classList.remove('active'));
@@ -997,17 +1010,17 @@
       renderJobList(filtered);
     }
 
-    // ── Process Column ──
+    // -- Process Column --
     function toggleProcessColumn() {
       processesCollapsed = !processesCollapsed;
       const col = document.getElementById('processColumn');
       const btn = document.getElementById('processToggle');
       if (processesCollapsed) {
         col.classList.add('collapsed');
-        btn.textContent = '▶';
+        btn.textContent = 'Expand';
       } else {
         col.classList.remove('collapsed');
-        btn.textContent = '◀';
+        btn.textContent = 'Collapse';
       }
     }
 
@@ -1032,14 +1045,14 @@
       }).join('');
     }
 
-    // ── API Polling ──
+    // -- API Polling --
     async function pollStatus() {
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
         const statusText = data.orchestrator_found
           ? `Connected | Project: ${data.project_dir} | Orchestrator: ${data.orchestrator_dir}`
-          : '⚠️ Orchestrator root folder not detected in current path tree.';
+          : 'Warning: Orchestrator root folder not detected in current path tree.';
         document.getElementById('systemStatus').innerText = statusText;
         updateProcessColumn(data.active_processes);
       } catch (err) {
@@ -1057,7 +1070,7 @@
       }
     }
 
-    // ── Job List ──
+    // -- Job List --
     function renderJobList(jobs) {
       const container = document.getElementById('jobList');
       if (jobs.length === 0) {
@@ -1081,7 +1094,7 @@
       }).join('');
     }
 
-    // ── Job Detail ──
+    // -- Job Detail --
     async function selectJob(id) {
       activeJobId = id;
       activeTabId = null;
@@ -1115,7 +1128,7 @@
       }
     }
 
-    // ── Helpers ──
+    // -- Helpers --
     function escapeHtml(value) {
       return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
@@ -1144,7 +1157,7 @@
     function isToolEvent(e) { return e && (e.kind === 'tool_use' || e.kind === 'tool_result'); }
     function isAssistantEvent(e) { return e && !isToolEvent(e); }
 
-    // ── Event Rendering ──
+    // -- Event Rendering --
     function renderEventFilters() {
       return `<div class="conversation-controls">
         <label><input type="checkbox" ${showAssistantEvents ? 'checked' : ''} onchange="setConversationFilter('assistant', this.checked)"> Assistant</label>
@@ -1191,7 +1204,7 @@
       scroller.dataset.autofollow = 'true';
     }
 
-    // ── 3-Line Tool Folding ──
+    // -- 3-Line Tool Folding --
     function countVisualLines(text) {
       if (!text) return 0;
       return text.split('\n').length;
@@ -1208,7 +1221,7 @@
       return `<div class="event-body">
         <div class="tool-body-clamped" id="${uid}-clamped">${escaped}</div>
         <div id="${uid}-full" style="display:none;">${escaped}</div>
-        <button class="tool-expand-btn" id="${uid}-btn" onclick="toggleToolFold('${uid}')">Show all (${lineCount} lines) ▾</button>
+        <button class="tool-expand-btn" id="${uid}-btn" onclick="toggleToolFold('${uid}')">Show all (${lineCount} lines) [+]</button>
       </div>`;
     }
 
@@ -1221,11 +1234,11 @@
         clamped.style.display = '';
         full.style.display = 'none';
         const lines = (full.textContent || '').split('\n').length;
-        btn.textContent = `Show all (${lines} lines) ▾`;
+        btn.textContent = `Show all (${lines} lines) [+]`;
       } else {
         clamped.style.display = 'none';
         full.style.display = '';
-        btn.textContent = 'Collapse ▴';
+        btn.textContent = 'Collapse [-]';
       }
     }
 
@@ -1313,7 +1326,7 @@
       if (changed && shouldFollow) { followConversationBottom(frame); }
     }
 
-    // ── Conclusion ──
+    // -- Conclusion --
     function renderConclusionState(data) {
       const status = document.querySelector('[data-field="conclusionStatus"]');
       const output = document.querySelector('[data-field="conclusionText"]');
@@ -1364,14 +1377,14 @@
       </div>`;
     }
 
-    // ── Metadata ──
+    // -- Metadata --
     function toggleMetadata() {
       metadataExpanded = !metadataExpanded;
       const grid = document.querySelector('.meta-grid');
       const btn = document.querySelector('.meta-toggle-btn');
       if (grid) {
         grid.classList.toggle('expanded', metadataExpanded);
-        if (btn) btn.textContent = metadataExpanded ? 'Less ▴' : 'More ▾';
+        if (btn) btn.textContent = metadataExpanded ? 'Less [-]' : 'More [+]';
       }
     }
 
@@ -1383,7 +1396,7 @@
         <span class="meta-badge"><strong>Session:</strong> ${escapeHtml(job.session_id || '-')}</span>
         <span class="meta-badge"><strong>Started:</strong> ${escapeHtml(startStr)}</span>
         <span class="meta-badge"><strong>Ended:</strong> ${escapeHtml(endStr)}</span>
-        <button class="meta-toggle-btn" onclick="toggleMetadata()">More ▾</button>
+        <button class="meta-toggle-btn" onclick="toggleMetadata()">More [+]</button>
       </div>`;
     }
 
@@ -1445,7 +1458,7 @@
       }
     }
 
-    // ── Markdown ──
+    // -- Markdown --
     function parseMarkdown(txt) {
       if (!txt) return '';
       return escapeHtml(txt)
@@ -1460,7 +1473,7 @@
         .replace(/(<li>.*?<\/li>)+/g, '<ul>$&</ul>');
     }
 
-    // ── Job Detail Rendering ──
+    // -- Job Detail Rendering --
     function renderJobDetail(data) {
       const container = document.getElementById('dashboardView');
       if (!data || data.error) {
@@ -1609,7 +1622,7 @@
       if (buttons[idx]) buttons[idx].classList.add('active');
     }
 
-    // ── Initial Poll ──
+    // -- Initial Poll --
     pollStatus();
     setInterval(pollStatus, 5000);
     setInterval(pollRuns, 5000);

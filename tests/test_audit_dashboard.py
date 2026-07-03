@@ -633,6 +633,58 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertIn("tab-agy-log", html)
         self.assertIn("tab-agy-stdio", html)
 
+    # -- API response format tests --
+
+    def test_api_projects_returns_object_with_keys(self):
+        """The /api/projects handler should wrap discover_projects result in an object."""
+        # Verify the code that wraps the response exists in server.py
+        server_source = SERVER_PATH.read_text(encoding="utf-8")
+        self.assertIn('"projects": projects_list', server_source)
+        self.assertIn('"current_project":', server_source)
+        self.assertIn('"current_orchestrator":', server_source)
+
+    def test_frontend_handles_new_projects_response(self):
+        """The frontend should handle the new object-format /api/projects response."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("data.projects || data", html)
+        self.assertIn("data.current_project", html)
+
+    # -- Emoji/symbol-free UI tests --
+
+    def test_frontend_no_emoji_in_labels(self):
+        """Visible UI labels should not contain emoji characters."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        # Check for common emoji that were previously in use
+        for emoji in ["🟢", "📋", "⚠️", "🌓", "◀", "▶", "▾", "▴", "←"]:
+            self.assertNotIn(emoji, html, f"Emoji/symbol '{emoji}' should not appear in the frontend")
+
+    def test_frontend_uses_plain_text_processes_label(self):
+        """Process column should use plain text label 'Processes'."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("Processes</span>", html)
+        self.assertIn("process-column-title", html)
+
+    def test_frontend_uses_plain_text_collapse_expand(self):
+        """Process column toggle should use 'Collapse'/'Expand' text."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("Collapse</button>", html)
+        # The toggle function sets btn.textContent to 'Expand' or 'Collapse'
+        self.assertIn("'Expand'", html)
+        self.assertIn("'Collapse'", html)
+
+    def test_frontend_comments_are_ascii(self):
+        """CSS/JS comments should not contain box-drawing characters."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        # U+2500 is box drawings light horizontal
+        self.assertNotIn("─", html, "Box-drawing characters should not appear in comments")
+
+    def test_frontend_handles_project_url_switching(self):
+        """The frontend should support ?project= URL parameter for project switching."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("navigateToProject(", html)
+        self.assertIn("searchParams.set('project'", html.replace(" ", ""))
+        self.assertIn("currentProjectPath", html)
+
 
 if __name__ == "__main__":
     unittest.main()
