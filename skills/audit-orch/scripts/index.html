@@ -283,9 +283,16 @@
       margin-bottom: 4px;
     }
 
+    .header-info {
+      min-width: 0;
+      flex: 1;
+    }
+
     .header-info p {
       font-size: 0.85rem;
       color: var(--text-secondary);
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .header-actions {
@@ -350,7 +357,16 @@
       border: 1px solid var(--border-color);
       border-radius: 8px;
       font-size: 0.8rem;
+      border-left: 4px solid var(--text-muted);
     }
+
+    .process-card.process-claude { border-left-color: #a78bfa; background: rgba(167, 139, 250, 0.08); }
+    .process-card.process-node { border-left-color: #34d399; background: rgba(52, 211, 153, 0.08); }
+    .process-card.process-agy { border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.08); }
+    .process-card.process-agent-shell { border-left-color: #38bdf8; background: rgba(56, 189, 248, 0.08); }
+    .process-card.process-dashboard { border-left-color: #22c55e; background: rgba(34, 197, 94, 0.07); }
+    .process-card.process-scanner { border-left-color: #94a3b8; opacity: 0.82; }
+    .process-card.process-shell { border-left-color: #64748b; opacity: 0.75; }
 
     .process-card-title {
       font-weight: 600;
@@ -397,17 +413,42 @@
 
     .meta-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
       font-size: 0.85rem;
+      min-width: 0;
     }
 
     .meta-item {
       color: var(--text-secondary);
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .meta-item-wide {
+      grid-column: span 2;
+    }
+
+    .meta-value-path {
+      display: block;
+      margin-top: 4px;
+      max-width: 100%;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .meta-item strong {
       color: var(--text-primary);
+    }
+
+    @media (max-width: 900px) {
+      .meta-item-wide {
+        grid-column: 1 / -1;
+      }
     }
 
     .content-box {
@@ -493,18 +534,23 @@
       display: flex;
       gap: 14px;
       align-items: center;
-      margin: 0 0 12px 0;
+      margin: 0;
       color: var(--text-secondary);
       font-size: 0.85rem;
+      padding: 10px 14px;
+      background-color: var(--bg-sidebar);
+      border-bottom: 1px solid var(--border-color);
+      flex: 0 0 auto;
     }
 
     .conversation-frame {
+      display: flex;
+      flex-direction: column;
       max-height: 720px;
-      overflow-y: auto;
-      overflow-anchor: none;
+      overflow: hidden;
       border: 1px solid var(--border-color);
       border-radius: 8px;
-      padding: 14px;
+      padding: 0;
       background-color: var(--bg-app);
     }
 
@@ -527,9 +573,9 @@
     }
 
     .event-stream-container {
-      max-height: none;
-      overflow-y: visible;
-      padding-right: 6px;
+      overflow-y: auto;
+      overflow-anchor: none;
+      padding: 14px;
     }
 
     .event-bubble {
@@ -573,6 +619,45 @@
       line-height: 1.5;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+    }
+
+    .tool-details summary {
+      color: var(--primary);
+      cursor: pointer;
+      font-size: 0.78rem;
+      margin: 2px 0;
+      user-select: none;
+    }
+
+    .tool-details[open] summary {
+      margin-bottom: 8px;
+    }
+
+    .conclusion-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .conclusion-button {
+      border: 1px solid var(--primary);
+      background: var(--primary-bg);
+      color: var(--primary);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .conclusion-button:disabled {
+      cursor: wait;
+      opacity: 0.55;
+    }
+
+    .conclusion-status {
+      color: var(--text-secondary);
+      font-size: 0.82rem;
     }
 
     /* Markdown styling inside tabs */
@@ -668,6 +753,7 @@
     let activeTabId = null;
     let showAssistantEvents = true;
     let showToolEvents = true;
+    const TOOL_COLLAPSE_CHARS = 1200;
 
     // Theme switcher
     function toggleTheme() {
@@ -714,7 +800,7 @@
         const data = await res.json();
         
         const statusText = data.orchestrator_found 
-          ? `Connected | Workspace: ${data.orchestrator_dir}` 
+          ? `Connected | Project: ${data.project_dir} | Orchestrator: ${data.orchestrator_dir}`
           : '⚠️ Orchestrator root folder not detected in current path tree.';
         document.getElementById('systemStatus').innerText = statusText;
 
@@ -723,15 +809,18 @@
         
         if (data.active_processes && data.active_processes.length > 0) {
           procSec.style.display = 'block';
-          grid.innerHTML = data.active_processes.map(p => `
-            <div class="process-card">
+          grid.innerHTML = sortedProcesses(data.active_processes).map(p => {
+            const kind = classifyProcess(p);
+            const fullCommand = p.CommandLine || '';
+            return `
+            <div class="process-card ${kind.cls}" title="${escapeHtml(fullCommand)}">
               <div class="process-card-title">
-                <span>${p.Name}</span>
-                <span class="badge status-running">PID ${p.ProcessId}</span>
+                <span>${escapeHtml(kind.label)} · ${escapeHtml(p.Name)}</span>
+                <span class="badge status-running">PID ${escapeHtml(p.ProcessId)}</span>
               </div>
-              <div class="process-card-cmd" title="${p.CommandLine}">${p.CommandLine || ''}</div>
+              <div class="process-card-cmd">${escapeHtml(fullCommand)}</div>
             </div>
-          `).join('');
+          `}).join('');
         } else {
           procSec.style.display = 'none';
         }
@@ -822,6 +911,42 @@
         .replace(/'/g, '&#39;');
     }
 
+    function classifyProcess(process) {
+      const name = String(process?.Name || '').toLowerCase();
+      const cmd = String(process?.CommandLine || '').toLowerCase();
+      if (name.includes('claude') || cmd.includes('claude -p')) {
+        return { cls: 'process-claude', label: 'Claude Worker', priority: 1 };
+      }
+      if (name.includes('agy') || cmd.includes('agy --print')) {
+        return { cls: 'process-agy', label: 'AGY Worker', priority: 2 };
+      }
+      if (name.includes('node') && cmd.includes('agent-orch.mjs')) {
+        return { cls: 'process-node', label: 'Orchestrator Node', priority: 3 };
+      }
+      if (cmd.includes('agent-orch.ps1')) {
+        return { cls: 'process-agent-shell', label: 'Orchestrator Shell', priority: 4 };
+      }
+      if (name.includes('python') && cmd.includes('audit-orch') && cmd.includes('server.py')) {
+        return { cls: 'process-dashboard', label: 'Dashboard Server', priority: 5 };
+      }
+      if (name.includes('powershell') && cmd.includes('get-ciminstance')) {
+        return { cls: 'process-scanner', label: 'Process Scanner', priority: 8 };
+      }
+      if (name.includes('powershell')) {
+        return { cls: 'process-shell', label: 'PowerShell', priority: 9 };
+      }
+      return { cls: 'process-other', label: process?.Name || 'Process', priority: 10 };
+    }
+
+    function sortedProcesses(processes) {
+      return [...(processes || [])].sort((a, b) => {
+        const ca = classifyProcess(a);
+        const cb = classifyProcess(b);
+        if (ca.priority !== cb.priority) return ca.priority - cb.priority;
+        return String(a.Name || '').localeCompare(String(b.Name || ''));
+      });
+    }
+
     function isToolEvent(e) {
       return e && (e.kind === 'tool_use' || e.kind === 'tool_result');
     }
@@ -847,12 +972,18 @@
       });
     }
 
+    function conversationScroller(frame) {
+      return frame?.querySelector('.event-stream-container') || frame;
+    }
+
     function isConversationAtBottom(frame) {
-      return frame.scrollHeight - frame.scrollTop - frame.clientHeight <= 8;
+      const scroller = conversationScroller(frame);
+      return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 8;
     }
 
     function updateConversationAutofollow(frame) {
-      frame.dataset.autofollow = isConversationAtBottom(frame) ? 'true' : 'false';
+      const scroller = conversationScroller(frame);
+      scroller.dataset.autofollow = isConversationAtBottom(frame) ? 'true' : 'false';
     }
 
     function attachConversationAutofollow() {
@@ -860,13 +991,14 @@
         if (frame.dataset.autofollowBound === 'true') return;
         updateConversationAutofollow(frame);
         frame.dataset.autofollowBound = 'true';
-        frame.addEventListener('scroll', () => updateConversationAutofollow(frame), { passive: true });
+        conversationScroller(frame).addEventListener('scroll', () => updateConversationAutofollow(frame), { passive: true });
       });
     }
 
     function followConversationBottom(frame) {
-      frame.scrollTop = frame.scrollHeight;
-      frame.dataset.autofollow = 'true';
+      const scroller = conversationScroller(frame);
+      scroller.scrollTop = scroller.scrollHeight;
+      scroller.dataset.autofollow = 'true';
     }
 
     function getRenderableEvents(events, mode = 'conversation') {
@@ -886,6 +1018,7 @@
 
     function renderEventBubble(e, index) {
       const tool = isToolEvent(e);
+      const text = e.text || '';
       const label = e.kind === 'tool_use'
         ? `[tool_use ${escapeHtml(e.tool || 'tool')}]`
         : e.kind === 'tool_result'
@@ -893,9 +1026,12 @@
           : `[${escapeHtml(e.role || e.kind)}]`;
       const meta = [e.timestamp, e.model].filter(Boolean).map(escapeHtml).join(' | ');
       const cls = `${tool ? 'event-tool' : 'event-assistant'} ${e.is_error ? 'event-error' : ''}`;
+      const body = tool && text.length > TOOL_COLLAPSE_CHARS
+        ? `<details class="tool-details"><summary>Show tool message (${text.length.toLocaleString()} characters)</summary><div class="event-body">${escapeHtml(text)}</div></details>`
+        : `<div class="event-body">${escapeHtml(text)}</div>`;
       return `<div class="event-bubble ${cls}" data-event-key="${escapeHtml(eventKey(e, index))}" data-event-size="${escapeHtml((e.text || '').length)}">
         <div class="event-title"><span>${label}</span>${meta ? `<span>${meta}</span>` : ''}</div>
-        <div class="event-body">${escapeHtml(e.text || '')}</div>
+        ${body}
       </div>`;
     }
 
@@ -915,7 +1051,7 @@
       const stream = container.querySelector('.conversation-frame .event-stream');
       if (!stream) return;
       const frame = stream.closest('.conversation-frame');
-      const shouldFollow = frame && frame.dataset.autofollow === 'true';
+      const shouldFollow = frame && conversationScroller(frame).dataset.autofollow === 'true';
 
       const filtered = getRenderableEvents(events, mode);
       if (typeof filtered === 'string' || filtered.length === 0) {
@@ -953,6 +1089,56 @@
       }
     }
 
+    function renderConclusionState(data) {
+      const status = document.querySelector('[data-field="conclusionStatus"]');
+      const output = document.querySelector('[data-field="conclusionText"]');
+      const button = document.querySelector('[data-action="runConclusion"]');
+      if (!status || !output || !button) return;
+      const state = data?.status || 'idle';
+      button.disabled = state === 'running';
+      button.textContent = state === 'running' ? 'Summarizing...' : (state === 'completed' ? 'Regenerate Conclusion' : 'Generate Conclusion');
+      status.textContent = state === 'running'
+        ? 'AGY is summarizing this transcript with the configured low-cost model.'
+        : state === 'completed'
+          ? `Completed${data.model ? ` with ${data.model}` : ''}${data.finished_at ? ` at ${data.finished_at}` : ''}.`
+          : state === 'failed'
+            ? `Failed: ${data.error || 'Unknown error'}`
+            : 'No conclusion has been generated.';
+      output.textContent = data?.conclusion || (state === 'running' ? 'Waiting for AGY output...' : '');
+    }
+
+    async function loadConclusion() {
+      if (!activeJobId) return;
+      try {
+        const res = await fetch(`/api/conclusion/${encodeURIComponent(activeJobId)}`);
+        renderConclusionState(await res.json());
+      } catch (err) {
+        renderConclusionState({ status: 'failed', error: String(err) });
+      }
+    }
+
+    async function requestConclusion() {
+      if (!activeJobId) return;
+      renderConclusionState({ status: 'running' });
+      try {
+        const res = await fetch(`/api/conclusion/${encodeURIComponent(activeJobId)}`, { method: 'POST' });
+        const data = await res.json();
+        renderConclusionState(data);
+      } catch (err) {
+        renderConclusionState({ status: 'failed', error: String(err) });
+      }
+    }
+
+    function conclusionPaneHtml() {
+      return `<div class="tab-pane" id="tab-conclusion">
+        <div class="conclusion-actions">
+          <button class="conclusion-button" data-action="runConclusion" onclick="requestConclusion()">Generate Conclusion</button>
+          <span class="conclusion-status" data-field="conclusionStatus">No conclusion has been generated.</span>
+        </div>
+        <pre data-field="conclusionText"></pre>
+      </div>`;
+    }
+
     function setFieldText(container, field, value) {
       const el = container.querySelector(`[data-field="${field}"]`);
       if (el) el.textContent = value ?? '';
@@ -970,7 +1156,12 @@
       setFieldText(container, 'started', startStr);
       setFieldText(container, 'ended', endStr);
       setFieldText(container, 'goal', job.goal || '-');
+      setFieldText(container, 'projectDir', job.project_dir || '-');
+      setFieldText(container, 'workspacePath', job.workspace?.path || '-');
+      setFieldText(container, 'sessionId', job.session_id || '-');
+      setFieldText(container, 'jobJsonPath', data.job_json_path || '-');
       setFieldText(container, 'transcriptPath', job.provider === 'cc' ? (data.transcript_path || 'No transcript path found yet.') : (data.agy_transcript_path || 'No AGY transcript path found yet.'));
+      setFieldText(container, 'transcriptReason', data.transcript_match_reason || '-');
 
       const statusEl = container.querySelector('[data-field="status"]');
       if (statusEl) {
@@ -1034,6 +1225,7 @@
       if (job.provider === 'cc') {
         tabHtml = `
           <button class="tab-btn" data-tab="tab-conversation" onclick="switchTab('tab-conversation')">Conversation</button>
+          <button class="tab-btn" onclick="switchTab('tab-conclusion')">Conclusion</button>
           <button class="tab-btn" onclick="switchTab('tab-log')">Debug</button>
           <button class="tab-btn" onclick="switchTab('tab-stdio')">Stdout/Stderr</button>
           <button class="tab-btn" onclick="switchTab('tab-patch')">Patch</button>
@@ -1043,11 +1235,13 @@
         paneHtml = `
           <div class="tab-pane" id="tab-conversation">
             <div class="content-box"><div class="content-box-title">Transcript Path</div><div class="content-box-body" data-field="transcriptPath" style="font-family:var(--font-mono);">${escapeHtml(data.transcript_path || 'No transcript path found yet.')}</div></div>
+            <div class="content-box"><div class="content-box-title">Transcript Match</div><div class="content-box-body" data-field="transcriptReason">${escapeHtml(data.transcript_match_reason || '-')}</div></div>
             <div class="conversation-frame ${showAssistantEvents ? '' : 'hide-assistant'} ${showToolEvents ? '' : 'hide-tools'}">
               ${renderEventFilters()}
               ${renderEvents(data.transcript_events, 'conversation')}
             </div>
           </div>
+          ${conclusionPaneHtml()}
           <div class="tab-pane" id="tab-log"><pre data-field="debugLog">${escapeHtml(data.debug_log || 'No debug logs written yet.')}</pre></div>
           <div class="tab-pane" id="tab-stdio"><h3>stdout</h3><pre data-field="stdoutLog">${escapeHtml(data.stdout_log || '')}</pre><h3>stderr</h3><pre data-field="stderrLog">${escapeHtml(data.stderr_log || '')}</pre></div>
           <div class="tab-pane" id="tab-patch"><pre data-field="patchLog">${escapeHtml(data.patch || 'No changes.patch found yet.')}</pre></div>
@@ -1059,6 +1253,7 @@
         tabHtml = `
           <button class="tab-btn" onclick="switchTab('tab-report')">Audit Report (evidence.json)</button>
           <button class="tab-btn" onclick="switchTab('tab-agy-transcript')">Transcript</button>
+          <button class="tab-btn" onclick="switchTab('tab-conclusion')">Conclusion</button>
           <button class="tab-btn" onclick="switchTab('tab-agy-log')">Live Log</button>
           <button class="tab-btn" onclick="switchTab('tab-agy-stdio')">Stdout/Stderr</button>
           <button class="tab-btn" onclick="switchTab('tab-raw')">Raw Metadata</button>
@@ -1067,11 +1262,13 @@
           <div class="tab-pane md-text" id="tab-report"><p>${parseMarkdown(reportText)}</p></div>
           <div class="tab-pane" id="tab-agy-transcript">
             <div class="content-box"><div class="content-box-title">Transcript Path</div><div class="content-box-body" data-field="transcriptPath" style="font-family:var(--font-mono);">${escapeHtml(data.agy_transcript_path || 'No AGY transcript path found yet.')}</div></div>
+            <div class="content-box"><div class="content-box-title">Transcript Match</div><div class="content-box-body" data-field="transcriptReason">${escapeHtml(data.transcript_match_reason || '-')}</div></div>
             <div class="conversation-frame ${showAssistantEvents ? '' : 'hide-assistant'} ${showToolEvents ? '' : 'hide-tools'}">
               ${renderEventFilters()}
               ${renderEvents(data.agy_transcript_events, 'conversation')}
             </div>
           </div>
+          ${conclusionPaneHtml()}
           <div class="tab-pane" id="tab-agy-log"><pre data-field="agyLog">${escapeHtml(data.agy_cli_log || 'No AGY CLI log found yet.')}</pre></div>
           <div class="tab-pane" id="tab-agy-stdio"><h3>stdout</h3><pre data-field="agyStdoutLog">${escapeHtml(data.agy_stdout_log || '')}</pre><h3>stderr</h3><pre data-field="agyStderrLog">${escapeHtml(data.agy_stderr_log || '')}</pre></div>
           <div class="tab-pane" id="tab-raw"><pre>${escapeHtml(JSON.stringify(data.evidence || job, null, 2))}</pre></div>
@@ -1096,6 +1293,10 @@
             <div class="meta-item"><strong>Model:</strong> <span data-field="model">${escapeHtml(modelStr)}</span></div>
             <div class="meta-item"><strong>Started:</strong> <span data-field="started">${escapeHtml(startStr)}</span></div>
             <div class="meta-item"><strong>Ended:</strong> <span data-field="ended">${escapeHtml(endStr)}</span></div>
+            <div class="meta-item meta-item-wide"><strong>Project:</strong> <span class="meta-value-path" data-field="projectDir">${escapeHtml(job.project_dir || '-')}</span></div>
+            <div class="meta-item meta-item-wide"><strong>Workspace:</strong> <span class="meta-value-path" data-field="workspacePath">${escapeHtml(job.workspace?.path || '-')}</span></div>
+            <div class="meta-item"><strong>Session:</strong> <span data-field="sessionId">${escapeHtml(job.session_id || '-')}</span></div>
+            <div class="meta-item meta-item-wide"><strong>job.json:</strong> <span class="meta-value-path" data-field="jobJsonPath">${escapeHtml(data.job_json_path || '-')}</span></div>
           </div>
 
             <div class="content-box">
@@ -1134,6 +1335,7 @@
       const tabToRestore = previousTab && document.getElementById(previousTab) ? previousTab : defaultTab;
       switchTab(tabToRestore, false);
       attachConversationAutofollow();
+      loadConclusion();
     }
 
     function switchTab(targetId, userInitiated = true) {
@@ -1144,6 +1346,7 @@
       const targetPane = document.getElementById(targetId);
       if (!targetPane) return;
       targetPane.classList.add('active');
+      if (targetId === 'tab-conclusion') loadConclusion();
 
       const buttons = Array.from(document.querySelectorAll('.tab-btn'));
       const idx = Array.from(document.querySelectorAll('.tab-pane')).indexOf(targetPane);
@@ -1157,6 +1360,7 @@
     setInterval(pollRuns, 5000);
     detailPollTimer = setInterval(() => {
       if (activeJobId) refreshActiveJobDetail();
+      if (activeJobId && activeTabId === 'tab-conclusion') loadConclusion();
     }, 2000);
   </script>
 </body>

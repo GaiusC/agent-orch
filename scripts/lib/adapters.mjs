@@ -63,7 +63,7 @@ export async function runClaude({ config, workspace, jobDir, goal, plan, accepta
     sessionId,
     resume: Boolean(taskSession?.session_id),
     model,
-    permissionMode: "auto",
+    permissionMode: config.cli.claude_permission_mode || "auto",
     maxBudgetUsd: config.execution.cc_max_budget_usd,
   });
   args.unshift(...(config.cli.claude_prefix_args || []));

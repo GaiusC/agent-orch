@@ -7,6 +7,7 @@ The default path is Skill + CLI:
 - Claude Code is the primary writer.
 - Antigravity is a non-duplicating specialist and verifier.
 - Codex owns task planning, scope boundaries, and final acceptance.
+- Codex does not author project patches while Agent Orch is active; it plans, delegates, verifies, and accepts or rejects.
 - Worker changes are produced in an isolated Git worktree by default and applied only after acceptance.
 - Sessions are reused by project, provider, task id, and model to keep context stable.
 
@@ -53,7 +54,7 @@ This creates:
   runs/
 ```
 
-Review `.agent-orchestrator/config.json`, keep `duplicate_implementation` false, and configure real verification commands before accepting worker output.
+Review `.agent-orchestrator/config.json`, keep `duplicate_implementation` false, and configure real verification commands before accepting worker output. The default template launches CC with `bypassPermissions` and AGY without sandbox so both workers can run non-interactively in local desktop workflows; tighten these settings only if your local CLIs can still complete delegated contracts without blocking.
 
 ## Usage
 
@@ -65,6 +66,10 @@ Use agent-orch. Plan this change, delegate implementation to CC, use AGY only fo
 
 Codex should call `scripts\agent-orch.ps1`, inspect evidence under `.agent-orchestrator\runs`, request same-session repair if needed, and apply the patch only after verification.
 
+For substantial work, Codex should first split the goal into small contracts, route implementation contracts to CC, route required investigation or verification gates to AGY, and record any waived gate or residual risk for the user.
+
+Parallel routing is allowed, but bounded: multiple CC workers can run for read-only or disjoint contracts; AGY should be serialized unless the current local AGY account has passed a fresh multi-AGY smoke test. In this environment, a 2026-07-04 smoke test showed parallel CC working, but two concurrent AGY jobs were unstable while sequential AGY recovered successfully.
+
 ## Legacy MCP
 
 The previous MCP server remains in the repository for legacy use, but it is not registered by default. The CLI path is recommended for multi-account Codex setups and environments where MCP startup or AGY OAuth state is unstable.
@@ -75,6 +80,7 @@ The previous MCP server remains in the repository for legacy use, but it is not 
 - Do not commit `.agent-orchestrator/state/` or `.agent-orchestrator/runs/`.
 - Review project-provided `.agent-orchestrator/config.json` before setting `trusted` to true.
 - Treat worker output as a claim; Codex still needs to verify diffs, forbidden paths, and acceptance commands.
+- Do not let Codex become the implementation worker unless the user explicitly leaves Agent Orch mode for that task.
 
 ## License
 

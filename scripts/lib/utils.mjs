@@ -80,12 +80,21 @@ export function deepMerge(base, override) {
 }
 
 export async function readJson(file) {
-  return JSON.parse(await fs.readFile(file, "utf8"));
+  const text = await fs.readFile(file, "utf8");
+  return JSON.parse(text.replace(/^\uFEFF/, ""));
 }
 
 export async function writeJsonAtomic(file, value) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await fs.rename(temp, file);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(temp, file);
+      return;
+    } catch (error) {
+      if (!["EPERM", "EBUSY"].includes(error?.code) || attempt >= 5) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
 }

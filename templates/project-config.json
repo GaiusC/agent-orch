@@ -14,8 +14,9 @@
     "claude": "claude",
     "agy": "agy",
     "claude_prefix_args": [],
+    "claude_permission_mode": "bypassPermissions",
     "agy_prefix_args": [],
-    "agy_sandbox": true,
+    "agy_sandbox": false,
     "agy_project": null,
     "agy_project_id": null
   },

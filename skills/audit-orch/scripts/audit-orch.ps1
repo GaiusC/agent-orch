@@ -1,7 +1,11 @@
 ﻿# audit-orch.ps1
 # Automates checking the progress of Agent Orchestrator (CC/AGY) jobs and active processes.
 
-$targetDir = $PWD.Path
+param(
+    [string]$ProjectDir = (Get-Location).Path
+)
+
+$targetDir = (Resolve-Path -LiteralPath $ProjectDir).Path
 $orchestratorDir = $null
 
 # 1. Search upwards to find .agent-orchestrator folder

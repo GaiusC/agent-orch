@@ -36,9 +36,14 @@ Keep `duplicate_implementation` false. Codex should reject CC implementation if 
 - `agy.enabled`: keep true when AGY should remain available as a verifier.
 - `agy.auth_probe_required`: keep true by default. The CLI checks AGY availability before launching longer work.
 - `agy.fail_fast_on_auth_window`: documents that Codex should stop quickly if AGY cannot use silent auth.
-- `cli.agy_sandbox`: set false when the local AGY install cannot access its normal silent-auth state from sandboxed print mode.
+- `cli.agy_sandbox`: default false for local desktop workflows where sandboxed print mode cannot access normal silent-auth state.
 - `cli.agy_project` / `cli.agy_project_id`: optional existing Antigravity project identifier. When set, the broker passes `--project <id>` to avoid creating implicit projects for each worker probe.
 - `cli.agy_prefix_args`: advanced escape hatch for site-specific wrapper arguments. Prefer the dedicated AGY fields above for project binding and sandbox behavior.
+
+## Claude Code CLI
+
+- `cli.claude_permission_mode`: default `bypassPermissions` for Agent Orch worker sessions. CC already runs against an isolated worktree by default, and Codex accepts or rejects the resulting patch after inspection. Use a stricter value only when the local CC account can complete non-interactive Bash and edit work without blocking.
+- `cli.claude_prefix_args`: wrapper arguments for site-specific launch needs. Prefer `claude_permission_mode` over wrapper hacks for approval behavior.
 
 ## Models
 
@@ -64,6 +69,10 @@ Do not force a Claude model name when ccswitch should select GLM, DeepSeek, or a
 `scope.writable` documents allowed implementation paths. `scope.forbidden` is enforced against the generated patch. Configure real project commands under `verification.commands`, ordered from fastest to broadest. Stop at the first failure.
 
 Treat configuration as executable policy because verification commands run in a shell. Review repository-provided configuration before setting `trusted` to true.
+
+## Workflow policy
+
+For substantial changes, create small contracts and require an AGY gate for high-risk behavior. See [role-boundaries-and-workflow.md](role-boundaries-and-workflow.md).
 
 ## Legacy MCP
 

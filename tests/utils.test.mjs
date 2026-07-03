@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { deepMerge, matchesPathPattern, normalizeRelative, truncate } from "../scripts/lib/utils.mjs";
+import { deepMerge, matchesPathPattern, normalizeRelative, readJson, truncate } from "../scripts/lib/utils.mjs";
 
 test("path policy matches exact, directory, and wildcard patterns", () => {
   assert.equal(matchesPathPattern(".env", ".env"), true);
@@ -19,4 +22,12 @@ test("truncate keeps bounded context", () => {
   const output = truncate("x".repeat(100), 20);
   assert.ok(output.length < 100);
   assert.match(output, /truncated/);
+});
+
+test("readJson accepts UTF-8 BOM files produced by Windows tooling", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-json-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "config.json");
+  await fs.writeFile(file, "\uFEFF{\"trusted\":true}\n", "utf8");
+  assert.deepEqual(await readJson(file), { trusted: true });
 });

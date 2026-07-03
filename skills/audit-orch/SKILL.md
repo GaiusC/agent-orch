@@ -7,14 +7,16 @@ description: Inspect Agent Orch progress with a read-only CLI report or live das
 
 Use this skill to inspect Agent Orch jobs and worker activity without mutating any job state.
 
-This skill is read-only. It must not start, stop, continue, apply, cleanup, cancel, or modify Agent Orch jobs. It may read `.agent-orchestrator`, process metadata, logs, transcripts, evidence files, patches, and isolated worktree status.
+This skill is read-only by default. It must not stop, continue, apply, cleanup, cancel, or modify Agent Orch jobs. It may read `.agent-orchestrator`, process metadata, logs, transcripts, evidence files, patches, and isolated worktree status.
+
+The dashboard has one explicit opt-in exception: the user may click **Generate Conclusion** for a selected transcript. That action starts one sandboxed, low-cost AGY summarizer, permits no project edits, and writes only its result under `.agent-orchestrator/audit-conclusions/`. Never trigger this action automatically or without the user's click.
 
 ## Quick Status
 
 When the user asks for a text status report, progress summary, active process list, or "what is CC/AGY doing", run the auditor script from the current project or one of its subdirectories:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File <plugin-root>\skills\audit-orch\scripts\audit-orch.ps1
+powershell -ExecutionPolicy Bypass -File <plugin-root>\skills\audit-orch\scripts\audit-orch.ps1 -ProjectDir <project>
 ```
 
 Summarize active processes, recent jobs, stale-running jobs, models, visible transcript/log availability, and any obvious blocker shown by job metadata or logs.
@@ -23,21 +25,17 @@ Summarize active processes, recent jobs, stale-running jobs, models, visible tra
 
 When the user asks for a dashboard, monitor, web page, live view, real-time progress, visible conversation, tool use, transcript, stdout/stderr, or logs:
 
-1. Treat the current working directory as the project context. The server searches upward for `.agent-orchestrator`.
-2. Check whether `http://localhost:15788` is already serving the dashboard.
-3. If it is not running, start the server from the project directory as a hidden background process:
+1. Treat the current working directory as the project context unless the user gives an explicit project path.
+2. Start/open the dashboard through the project-aware launcher:
 
 ```powershell
-Start-Process -WindowStyle Hidden -FilePath python -WorkingDirectory <project> -ArgumentList @('<plugin-root>\skills\audit-orch\scripts\server.py')
+powershell -ExecutionPolicy Bypass -File <plugin-root>\skills\audit-orch\scripts\open-dashboard.ps1 -ProjectDir <project>
 ```
 
-4. Open the dashboard:
+3. The launcher checks whether an existing dashboard is bound to the same `.agent-orchestrator`; if not, it starts a new read-only dashboard on the next available port instead of reusing the wrong project.
+4. Tell the user the dashboard URL printed by the launcher.
 
-```powershell
-Start-Process "http://localhost:15788"
-```
-
-5. Tell the user the dashboard URL.
+Do not start `server.py` directly unless debugging the dashboard itself. If direct startup is necessary, pass both `--project-dir <project>` and `--port <port>` explicitly.
 
 ## Dashboard Capabilities
 
@@ -48,6 +46,6 @@ The dashboard shows:
 - job metadata, observed model, evidence, git status, patch tail, stdout/stderr, and debug logs;
 - CC visible conversation and tool use/tool result events parsed from Claude transcript JSONL when available;
 - AGY evidence, CLI logs, stdout/stderr, and visible transcript events when available.
+- an optional Conclusion tab that summarizes the selected visible transcript only after an explicit user action.
 
 The dashboard only displays visible transcript content and logs that exist on disk. It does not claim to expose hidden chain-of-thought. If a provider writes visible thinking text into a transcript, it may appear as ordinary visible assistant text.
-
