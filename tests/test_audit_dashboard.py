@@ -55,10 +55,10 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertFalse(SERVER.display_process(wrapper))
         self.assertTrue(SERVER.display_process(worker))
 
-    def test_frontend_has_gap_fix_tool_folding_and_conclusion_tab(self):
+    def test_frontend_has_tool_folding_and_conclusion_tab(self):
         html = INDEX_PATH.read_text(encoding="utf-8")
         self.assertIn("overflow: hidden;", html)
-        self.assertIn("TOOL_COLLAPSE_CHARS = 1200", html)
+        self.assertIn("TOOL_LINE_LIMIT = 3", html)
         self.assertIn('id="tab-conclusion"', html)
         self.assertIn("Generate Conclusion", html)
 
@@ -540,13 +540,98 @@ class AuditDashboardTests(unittest.TestCase):
             tmp_files = [f for f in os.listdir(os.path.join(orch_dir, "audit-conclusions")) if f.endswith(".tmp")]
             self.assertEqual(len(tmp_files), 0)
 
-    # ── Frontend wiring for projects (minimal) ───────────────────────────
+    # ── Frontend wiring for new features ──────────────────────────────────
 
     def test_frontend_has_conclusion_button(self):
         """The frontend should have the Generate Conclusion button."""
         html = INDEX_PATH.read_text(encoding="utf-8")
         self.assertIn("Generate Conclusion", html)
         self.assertIn("requestConclusion()", html)
+
+    def test_frontend_has_project_switcher(self):
+        """The frontend should have a project selection view and navigation."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("showProjectsView()", html)
+        self.assertIn("navigateToProject(", html)
+        self.assertIn("loadProjects()", html)
+        self.assertIn("project-grid", html)
+        self.assertIn("project-card", html)
+        self.assertIn("backToProjectsBtn", html)
+
+    def test_frontend_has_process_column_collapse(self):
+        """The frontend should have a collapsible right-side process column."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("process-column", html)
+        self.assertIn("toggleProcessColumn()", html)
+        self.assertIn("processToggle", html)
+        self.assertIn("processesCollapsed", html)
+        self.assertIn("process-column", html)  # CSS class
+        # Collapse state
+        self.assertIn("collapsed", html)
+
+    def test_frontend_has_compact_metadata(self):
+        """The frontend should have compact metadata with expand/collapse."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("meta-compact", html)
+        self.assertIn("meta-badge", html)
+        self.assertIn("toggleMetadata()", html)
+        self.assertIn("metadataExpanded", html)
+        self.assertIn("meta-toggle-btn", html)
+
+    def test_frontend_has_default_bottom_scroll(self):
+        """The frontend should auto-scroll conversation to bottom on load."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("followConversationBottom", html)
+        self.assertIn("autofollow", html)
+        self.assertIn("attachConversationAutofollow()", html)
+        self.assertIn("isConversationAtBottom", html)
+        # Default scroll on initial load
+        self.assertIn("followConversationBottom(frame)", html)
+
+    def test_frontend_has_three_line_tool_folding(self):
+        """Tool-use/tool-result blocks should use 3-line folding."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("TOOL_LINE_LIMIT = 3", html)
+        self.assertIn("tool-body-clamped", html)
+        self.assertIn("toggleToolFold(", html)
+        self.assertIn("-webkit-line-clamp: 3", html)
+        self.assertIn("tool-expand-btn", html)
+
+    def test_frontend_card_border_radius_max_8px(self):
+        """All cards should have border-radius 8px or less, no 12px."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("border-radius: 12px", html)
+
+    def test_frontend_has_process_column_in_layout(self):
+        """The body layout includes the right process column."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn('id="processColumn"', html)
+        self.assertIn("updateProcessColumn", html)
+
+    def test_frontend_preserves_theme_behavior(self):
+        """Theme toggle and data-theme attribute are preserved."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn('data-theme="dark"', html)
+        self.assertIn("toggleTheme()", html)
+        self.assertIn("setAttribute('data-theme'", html.replace(" ", ""))
+        self.assertIn("[data-theme=", html)
+
+    def test_frontend_preserves_existing_tabs(self):
+        """All existing CC and AGY tabs are preserved."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        # CC tabs
+        self.assertIn("tab-conversation", html)
+        self.assertIn("tab-conclusion", html)
+        self.assertIn("tab-log", html)
+        self.assertIn("tab-stdio", html)
+        self.assertIn("tab-patch", html)
+        self.assertIn("tab-git", html)
+        self.assertIn("tab-raw", html)
+        # AGY tabs
+        self.assertIn("tab-report", html)
+        self.assertIn("tab-agy-transcript", html)
+        self.assertIn("tab-agy-log", html)
+        self.assertIn("tab-agy-stdio", html)
 
 
 if __name__ == "__main__":

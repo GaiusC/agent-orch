@@ -704,6 +704,17 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
     def serve_file(self, filename, content_type):
+        global SERVER_PROJECT_DIR, SERVER_ORCHESTRATOR_DIR
+        parsed = urlparse(self.path)
+        if parsed.query:
+            from urllib.parse import parse_qs
+            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            project_param = params.get("project")
+            if project_param:
+                decoded = unquote(project_param)
+                if os.path.isdir(decoded):
+                    SERVER_PROJECT_DIR = os.path.abspath(decoded)
+                    SERVER_ORCHESTRATOR_DIR = find_orchestrator_dir(SERVER_PROJECT_DIR)
         file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
         if os.path.exists(file_path):
             self.send_response(200)
