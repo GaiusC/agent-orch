@@ -9,7 +9,7 @@ Use this skill to inspect Agent Orch jobs and worker activity without mutating a
 
 This skill is read-only by default. It must not stop, continue, apply, cleanup, cancel, or modify Agent Orch jobs. It may read `.agent-orchestrator`, process metadata, logs, transcripts, evidence files, patches, and isolated worktree status.
 
-The dashboard has one explicit opt-in exception: the user may click **Generate Conclusion** for a selected transcript. That action starts one sandboxed, low-cost AGY summarizer, permits no project edits, and writes only its result under `.agent-orchestrator/audit-conclusions/`. Never trigger this action automatically or without the user's click.
+The dashboard has one explicit opt-in exception: the user may click **Generate Conclusion** for a selected transcript. That action starts one low-cost AGY summarizer with the project AGY sandbox setting, permits no project edits, and writes only its result under `.agent-orchestrator/audit-conclusions/`. In local desktop workflows the default project configuration runs AGY without `--sandbox`; only add sandboxing when `cli.agy_sandbox` is explicitly true and known to work for that machine. Never trigger this action automatically or without the user's click.
 
 ## Quick Status
 

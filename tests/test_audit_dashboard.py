@@ -16,7 +16,7 @@ SPEC.loader.exec_module(SERVER)
 
 
 class AuditDashboardTests(unittest.TestCase):
-    # ── existing tests (preserved) ──────────────────────────────────────
+    # Existing tests
 
     def test_continue_job_uses_task_session_registry(self):
         with tempfile.TemporaryDirectory() as root:
@@ -62,7 +62,7 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertIn('id="tab-conclusion"', html)
         self.assertIn("Generate Conclusion", html)
 
-    # ── project discovery tests ──────────────────────────────────────────
+    # Project discovery tests
 
     def test_project_display_name_from_config(self):
         with tempfile.TemporaryDirectory() as root:
@@ -85,10 +85,33 @@ class AuditDashboardTests(unittest.TestCase):
             orch = Path(root) / ".agent-orchestrator"
             orch.mkdir()
             # Write config with UTF-8 BOM
-            raw = "﻿" + json.dumps({"display_name": "BOM Project"})
+            raw = "\ufeff" + json.dumps({"display_name": "BOM Project"})
             (orch / "config.json").write_text(raw, encoding="utf-8")
             name = SERVER.project_display_name(root)
             self.assertEqual(name, "BOM Project")
+
+    def test_codex_state_projects_reads_thread_cwds(self):
+        """Project discovery should include Codex Desktop thread cwd values."""
+        with tempfile.TemporaryDirectory() as root:
+            project = Path(root) / "codex-project"
+            project.mkdir()
+            db_root = Path(root) / ".codex"
+            db_root.mkdir()
+            db_path = db_root / "state_5.sqlite"
+            import sqlite3
+            con = sqlite3.connect(db_path)
+            con.execute("create table threads (cwd text, updated_at_ms integer, updated_at integer, created_at_ms integer, created_at integer)")
+            con.execute("insert into threads values (?, 10, null, null, null)", (str(project),))
+            con.commit()
+            con.close()
+            original_expanduser = SERVER.os.path.expanduser
+            try:
+                SERVER.os.path.expanduser = lambda value: root if value == "~" else original_expanduser(value)
+                actual = [os.path.normcase(os.path.realpath(p)) for p in SERVER.codex_state_projects()]
+                expected = os.path.normcase(os.path.realpath(str(project)))
+                self.assertEqual(actual, [expected])
+            finally:
+                SERVER.os.path.expanduser = original_expanduser
 
     def test_discover_projects_includes_server_project(self):
         with tempfile.TemporaryDirectory() as root:
@@ -137,7 +160,7 @@ class AuditDashboardTests(unittest.TestCase):
                 self.assertIsNotNone(proj)
                 self.assertTrue(proj["has_orchestrator"])
                 self.assertEqual(proj["total_jobs"], 3)
-                # 2 completed + 1 running (stale — no matching process text)
+                # 2 completed + 1 running (stale, with no matching process text)
                 self.assertLessEqual(proj["active_jobs"], 1)
             finally:
                 SERVER.SERVER_PROJECT_DIR = old_project
@@ -228,7 +251,7 @@ class AuditDashboardTests(unittest.TestCase):
                 SERVER.SERVER_PROJECT_DIR = old_project
                 SERVER.SERVER_ORCHESTRATOR_DIR = old_orch
 
-    # ── Chinese conclusion prompt / handling ──────────────────────────────
+    # Chinese conclusion prompt and handling
 
     def test_conclusion_prompt_contains_chinese_instruction(self):
         """Verify the conclusione prompt includes a Simplified Chinese instruction."""
@@ -243,6 +266,11 @@ class AuditDashboardTests(unittest.TestCase):
 
             def fake_run(cmd_args, **kwargs):
                 called_args.append(cmd_args)
+                for i, arg in enumerate(cmd_args):
+                    if arg == "--print" and i + 1 < len(cmd_args) and "File: " in cmd_args[i + 1]:
+                        prompt_file = cmd_args[i + 1].split("File: ", 1)[1]
+                        with open(prompt_file, "r", encoding="utf-8") as fh:
+                            called_args.append([fh.read()])
                 completed = type("Completed", (), {
                     "returncode": 0,
                     "stdout": "这是中文结论内容。",
@@ -268,9 +296,10 @@ class AuditDashboardTests(unittest.TestCase):
                     orch, "cc-test-1", str(transcript), root, root
                 )
                 self.assertTrue(len(called_args) > 0)
+                self.assertNotIn("--sandbox", called_args[0])
                 # The prompt (which is in args) should contain the Chinese instruction
                 prompt_found = False
-                for arg in called_args[0]:
+                for arg in called_args[-1]:
                     if isinstance(arg, str) and "简体中文" in arg:
                         prompt_found = True
                         break
@@ -336,7 +365,7 @@ class AuditDashboardTests(unittest.TestCase):
                 (Path(orch) / "config.json").write_text(
                     json.dumps({"trusted": True}), encoding="utf-8"
                 )
-                # Transcript does not exist — should not crash
+                # A missing transcript should not crash.
                 SERVER.run_conclusion(
                     orch, "cc-no-transcript", "/nonexistent/path.jsonl", root, root
                 )
@@ -411,11 +440,13 @@ class AuditDashboardTests(unittest.TestCase):
     def test_conclusion_handles_file_not_found_with_chinese_error(self):
         """When AGY CLI is not found, the error message should be in Chinese."""
         original_run = SERVER.subprocess.run
+        original_resolve = SERVER.resolve_agy_command
         try:
             def fake_run(cmd_args, **kwargs):
                 raise FileNotFoundError("agy not found")
 
             SERVER.subprocess.run = fake_run
+            SERVER.resolve_agy_command = lambda command: "definitely-missing-agy-cli"
 
             with tempfile.TemporaryDirectory() as root:
                 orch = str(Path(root) / ".agent-orchestrator")
@@ -434,6 +465,7 @@ class AuditDashboardTests(unittest.TestCase):
                 self.assertIn("找不到", saved["error"])
         finally:
             SERVER.subprocess.run = original_run
+            SERVER.resolve_agy_command = original_resolve
 
     def test_conclusion_handles_auth_failure_with_chinese_error(self):
         """When AGY output contains auth/permission failures, the error is in Chinese."""
@@ -469,7 +501,7 @@ class AuditDashboardTests(unittest.TestCase):
         finally:
             SERVER.subprocess.run = original_run
 
-    # ── BOM / permission-safe behavior ───────────────────────────────────
+    # BOM and permission-safe behavior
 
     def test_safe_tail_handles_bom(self):
         """safe_tail should return content without BOM issues."""
@@ -487,10 +519,15 @@ class AuditDashboardTests(unittest.TestCase):
             prompts_seen = []
 
             def fake_run(cmd_args, **kwargs):
-                # Find the prompt arg (the long one after --print)
                 for i, arg in enumerate(cmd_args):
                     if arg == "--print" and i + 1 < len(cmd_args):
-                        prompts_seen.append(cmd_args[i + 1])
+                        prompt_arg = cmd_args[i + 1]
+                        if "File: " in prompt_arg:
+                            prompt_file = prompt_arg.split("File: ", 1)[1]
+                            with open(prompt_file, "r", encoding="utf-8") as fh:
+                                prompts_seen.append(fh.read())
+                        else:
+                            prompts_seen.append(prompt_arg)
                         break
                 completed = type("Completed", (), {
                     "returncode": 0,
@@ -518,8 +555,8 @@ class AuditDashboardTests(unittest.TestCase):
 
                 self.assertTrue(len(prompts_seen) > 0)
                 prompt = prompts_seen[0]
-                # BOM should have been stripped — no ﻿ in the prompt
-                self.assertNotIn("﻿", prompt)
+                # BOM should have been stripped from the prompt
+                self.assertNotIn("\ufeff", prompt)
                 self.assertIn("bom_test", prompt)
         finally:
             SERVER.subprocess.run = original_run
@@ -540,7 +577,62 @@ class AuditDashboardTests(unittest.TestCase):
             tmp_files = [f for f in os.listdir(os.path.join(orch_dir, "audit-conclusions")) if f.endswith(".tmp")]
             self.assertEqual(len(tmp_files), 0)
 
-    # ── Frontend wiring for new features ──────────────────────────────────
+    # Frontend wiring for new features
+
+    def test_agy_conclusion_uses_full_temp_file_and_short_command(self):
+        """Long transcripts should use a temporary file, not the Windows command line."""
+        original_run = SERVER.run_agy_process
+        captured = {}
+        try:
+            def fake_run(command, args, cwd, timeout):
+                print_prompt = args[args.index("--print") + 1]
+                prompt_file = print_prompt.split("File: ", 1)[1]
+                captured["print_prompt"] = print_prompt
+                captured["prompt_file"] = prompt_file
+                captured["file_content"] = Path(prompt_file).read_text(encoding="utf-8")
+                return type("Completed", (), {
+                    "returncode": 0,
+                    "stdout": "完成。",
+                    "stderr": "",
+                })()
+
+            SERVER.run_agy_process = fake_run
+            with tempfile.TemporaryDirectory() as root:
+                orch = Path(root) / ".agent-orchestrator"
+                orch.mkdir()
+                (orch / "config.json").write_text(json.dumps({"trusted": True}), encoding="utf-8")
+                transcript = Path(root) / "transcript.jsonl"
+                transcript.write_text("A" * 50000, encoding="utf-8")
+                SERVER.run_conclusion(str(orch), "cc-temp-file", str(transcript), root, root)
+
+                self.assertTrue(captured["file_content"].endswith("A" * 50000))
+                self.assertLess(len(captured["print_prompt"]), 1000)
+                self.assertFalse(os.path.exists(captured["prompt_file"]))
+                temp_root = orch / "audit-conclusions" / ".tmp"
+                self.assertEqual(list(temp_root.iterdir()), [])
+        finally:
+            SERVER.run_agy_process = original_run
+
+    def test_resolve_agy_command_uses_known_local_install_path(self):
+        """The dashboard server should find AGY even when service PATH is sparse."""
+        with tempfile.TemporaryDirectory() as root:
+            local_appdata = Path(root) / "LocalAppData"
+            agy_bin = local_appdata / "agy" / "bin"
+            agy_bin.mkdir(parents=True)
+            agy_exe = agy_bin / "agy.exe"
+            agy_exe.write_text("", encoding="utf-8")
+            old_local = os.environ.get("LOCALAPPDATA")
+            old_which = SERVER.shutil.which
+            try:
+                os.environ["LOCALAPPDATA"] = str(local_appdata)
+                SERVER.shutil.which = lambda command: None
+                self.assertEqual(SERVER.resolve_agy_command("agy"), str(agy_exe))
+            finally:
+                SERVER.shutil.which = old_which
+                if old_local is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = old_local
 
     def test_frontend_has_conclusion_button(self):
         """The frontend should have the Generate Conclusion button."""
@@ -568,6 +660,11 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertIn("process-column", html)  # CSS class
         # Collapse state
         self.assertIn("collapsed", html)
+        self.assertIn("process-summary", html)
+        self.assertIn("process-count-chip", html)
+        self.assertIn("process-dot", html)
+        self.assertNotIn("col.style.display = 'none'", html)
+        self.assertIn(".process-column.collapsed .process-empty { display: none; }", html)
 
     def test_frontend_has_compact_metadata(self):
         """The frontend should have compact metadata with expand/collapse."""
@@ -647,7 +744,9 @@ class AuditDashboardTests(unittest.TestCase):
         """The frontend should handle the new object-format /api/projects response."""
         html = INDEX_PATH.read_text(encoding="utf-8")
         self.assertIn("data.projects || data", html)
-        self.assertIn("data.current_project", html)
+        self.assertNotIn("data.current_project", html)
+        self.assertIn("running-badge", html)
+        self.assertNotIn("project-card.current", html)
 
     # -- Emoji/symbol-free UI tests --
 
@@ -655,7 +754,7 @@ class AuditDashboardTests(unittest.TestCase):
         """Visible UI labels should not contain emoji characters."""
         html = INDEX_PATH.read_text(encoding="utf-8")
         # Check for common emoji that were previously in use
-        for emoji in ["🟢", "📋", "⚠️", "🌓", "◀", "▶", "▾", "▴", "←"]:
+        for emoji in ["\U0001f7e2", "\U0001f4cb", "\u26a0\ufe0f", "\u25c0", "\u25b6", "\u25bc", "\u25b2", "\u2192"]:
             self.assertNotIn(emoji, html, f"Emoji/symbol '{emoji}' should not appear in the frontend")
 
     def test_frontend_uses_plain_text_processes_label(self):
@@ -664,19 +763,28 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertIn("Processes</span>", html)
         self.assertIn("process-column-title", html)
 
-    def test_frontend_uses_plain_text_collapse_expand(self):
-        """Process column toggle should use 'Collapse'/'Expand' text."""
+    def test_frontend_uses_symbol_process_toggle(self):
+        """Process column toggle should be a symbol button with accessible labels."""
         html = INDEX_PATH.read_text(encoding="utf-8")
-        self.assertIn("Collapse</button>", html)
-        # The toggle function sets btn.textContent to 'Expand' or 'Collapse'
-        self.assertIn("'Expand'", html)
-        self.assertIn("'Collapse'", html)
+        self.assertIn("process-toggle::before", html)
+        self.assertIn('aria-label="Collapse processes"', html)
+        self.assertIn("setAttribute('aria-label', 'Expand processes')", html)
+        self.assertNotIn("Collapse</button>", html)
+        self.assertNotIn(">Expand<", html)
+
+    def test_frontend_persists_process_column_state(self):
+        """Process column collapsed state should survive page switches/reloads."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("agentOrchAuditProcessesCollapsed", html)
+        self.assertIn("localStorage.getItem('agentOrchAuditProcessesCollapsed')", html)
+        self.assertIn("localStorage.setItem('agentOrchAuditProcessesCollapsed'", html)
+        self.assertIn("applyProcessColumnState()", html)
 
     def test_frontend_comments_are_ascii(self):
         """CSS/JS comments should not contain box-drawing characters."""
         html = INDEX_PATH.read_text(encoding="utf-8")
         # U+2500 is box drawings light horizontal
-        self.assertNotIn("─", html, "Box-drawing characters should not appear in comments")
+        self.assertNotIn("\u2500", html, "Box-drawing characters should not appear in comments")
 
     def test_frontend_handles_project_url_switching(self):
         """The frontend should support ?project= URL parameter for project switching."""
@@ -684,6 +792,113 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertIn("navigateToProject(", html)
         self.assertIn("searchParams.set('project'", html.replace(" ", ""))
         self.assertIn("currentProjectPath", html)
+        self.assertIn("function projectApiUrl(path)", html)
+        self.assertIn("projectApiUrl(`/api/conclusion/", html)
+
+    def test_project_cards_use_data_attributes_not_inline_onclick(self):
+        """Project cards should use data-project-path attributes, not inline onclick with path strings."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("data-project-path=", html)
+        # Inline onclick with a path string argument is dangerous for Windows backslash paths
+        self.assertNotIn("onclick=\"navigateToProject('", html)
+
+    def test_navigate_to_project_triggers_full_page_navigation(self):
+        """navigateToProject must trigger a full page reload via window.location.href assignment."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        # Full navigation, not just replaceState.
+        self.assertIn("window.location.href", html.replace(" ", ""))
+        # Must NOT use replaceState for project switching
+        self.assertNotIn("replaceState({},'',url.toString())", html.replace(" ", ""))
+
+    def test_theme_toggle_is_icon_button(self):
+        """Theme toggle should be an icon-style button with SVG, not visible text."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("<svg", html)
+        self.assertIn("aria-label=\"Toggle Dark/Light Mode\"", html)
+        # The visible text "Toggle Theme" should not appear inside the button
+        # (the HTML should have SVG instead of the text node)
+        self.assertNotIn(">Toggle Theme<", html)
+
+    # -- Server-side project parameter handling --
+
+    def test_request_project_context_uses_query_project(self):
+        """Every project-scoped API request should resolve its own orchestrator root."""
+        with tempfile.TemporaryDirectory() as root:
+            project = Path(root) / "project"
+            orch = project / ".agent-orchestrator"
+            orch.mkdir(parents=True)
+            parsed = SERVER.urlparse("/api/runs?project=" + str(project))
+            project_dir, orchestrator_dir = SERVER.request_project_context(parsed)
+            self.assertEqual(os.path.normcase(project_dir), os.path.normcase(str(project)))
+            self.assertEqual(os.path.normcase(orchestrator_dir), os.path.normcase(str(orch)))
+
+    def test_serve_file_rebinds_project_dir_on_query_param(self):
+        """serve_file should rebind SERVER_PROJECT_DIR when ?project= is in the query string."""
+        import io
+        with tempfile.TemporaryDirectory() as root:
+            new_project = os.path.join(root, "another-project")
+            os.makedirs(new_project)
+
+            old_project = SERVER.SERVER_PROJECT_DIR
+            old_orch = SERVER.SERVER_ORCHESTRATOR_DIR
+            try:
+                SERVER.SERVER_PROJECT_DIR = root
+                SERVER.SERVER_ORCHESTRATOR_DIR = None
+
+                # Create a minimal handler mock with just the attributes serve_file uses
+                class FakeHandler:
+                    pass
+
+                handler = FakeHandler()
+                handler.path = "/index.html?project=" + new_project
+                handler.wfile = io.BytesIO()
+                handler.send_response = lambda code: None
+                handler.send_header = lambda k, v: None
+                handler.end_headers = lambda: None
+
+                SERVER.DashboardAPIHandler.serve_file(handler, "index.html", "text/html")
+
+                # After serve_file with ?project=, SERVER_PROJECT_DIR should be updated
+                self.assertEqual(
+                    os.path.normcase(os.path.abspath(SERVER.SERVER_PROJECT_DIR)),
+                    os.path.normcase(os.path.abspath(new_project)),
+                )
+            finally:
+                SERVER.SERVER_PROJECT_DIR = old_project
+                SERVER.SERVER_ORCHESTRATOR_DIR = old_orch
+
+    def test_serve_file_ignores_invalid_project_dir(self):
+        """serve_file should NOT rebind when ?project= points to a non-existent directory."""
+        import io
+        with tempfile.TemporaryDirectory() as root:
+            nonexistent = os.path.join(root, "nonexistent-dir")
+
+            old_project = SERVER.SERVER_PROJECT_DIR
+            old_orch = SERVER.SERVER_ORCHESTRATOR_DIR
+            try:
+                SERVER.SERVER_PROJECT_DIR = root
+                SERVER.SERVER_ORCHESTRATOR_DIR = None
+
+                class FakeHandler:
+                    pass
+
+                handler = FakeHandler()
+                handler.path = "/index.html?project=" + nonexistent
+                handler.wfile = io.BytesIO()
+                handler.send_response = lambda code: None
+                handler.send_header = lambda k, v: None
+                handler.end_headers = lambda: None
+
+                SERVER.DashboardAPIHandler.serve_file(handler, "index.html", "text/html")
+
+                # Project dir should NOT change because the path doesn't exist
+                self.assertEqual(
+                    os.path.normcase(os.path.abspath(SERVER.SERVER_PROJECT_DIR)),
+                    os.path.normcase(os.path.abspath(root)),
+                )
+            finally:
+                SERVER.SERVER_PROJECT_DIR = old_project
+                SERVER.SERVER_ORCHESTRATOR_DIR = old_orch
 
 
 if __name__ == "__main__":
