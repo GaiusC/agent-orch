@@ -19,6 +19,9 @@ test("MCP server starts and exposes bounded tools", async () => {
     assert.ok(names.includes("cc_execute_task"));
     assert.ok(names.includes("agy_verify"));
     assert.ok(names.includes("worker_apply_result"));
+    assert.ok(names.includes("agy_execute_task"));
+    assert.ok(names.includes("agy_continue_task"));
+    assert.ok(names.includes("auto_execute_task"));
     assert.equal(names.includes("run_arbitrary_command"), false);
     const health = await client.callTool({ name: "worker_health", arguments: {} });
     assert.equal(health.isError, false);

@@ -1,15 +1,53 @@
-# Agent Orch
+﻿# Agent Orch
 
-Agent Orch is a local Codex plugin for supervising external coding agents without depending on a Codex MCP server. Codex plans and accepts the work, Claude Code implements, and Antigravity provides targeted investigation or verification when its local auth is usable.
+Agent Orch is a local multi-agent orchestration runtime for supervising external coding agents without depending on a Codex MCP server. Codex is the default planner/accepter, Claude Code or Antigravity implements, and Antigravity provides targeted investigation or verification when its local auth is usable.
+
+Agent Orch is designed to be resumable across hosts. Codex, Claude Desktop/Claude Code, and plain terminal workflows all resume from `.agent-orchestrator/` state before continuing a project. When the current host is Codex, planning and acceptance happen in the current Codex session; Agent Orch must not start Codex CLI just to plan or accept.
 
 The default path is Skill + CLI:
 
-- Claude Code is the primary writer.
-- Antigravity is a non-duplicating specialist and verifier.
 - Codex owns task planning, scope boundaries, and final acceptance.
 - Codex does not author project patches while Agent Orch is active; it plans, delegates, verifies, and accepts or rejects.
 - Worker changes are produced in an isolated Git worktree by default and applied only after acceptance.
 - Sessions are reused by project, provider, task id, and model to keep context stable.
+- Machine continuity is recorded in `events.jsonl`, `current-state.json`, and `handoff.generated.md`.
+
+## Routing
+
+Agent Orch supports three implementation paths:
+
+| Path | Command | Description |
+| --- | --- | --- |
+| CC implementation | `cc-exec` / `cc-continue` | Claude Code as the primary writer (isolated worktree + patch + verify + apply/cleanup) |
+| AGY write | `agy-exec` / `agy-continue` | Antigravity as the primary writer with Thinking models (same worktree/patch/verify/apply cycle) |
+| Automatic | `auto` | Complexity-based routing: low -> CC, medium -> AGY with Claude Sonnet 4.6 (Thinking), high -> AGY with Claude Opus 4.6 (Thinking) |
+
+### Model defaults
+
+CC uses a two-tier default policy:
+- **Low and medium** complexity -> `deepseek-v4-flash` (for cc-exec, cc-continue, low auto routing, and CC fallback)
+- **High** complexity -> `deepseek-v4-pro`
+- Per-contract explicit model overrides take priority over defaults
+
+AGY read-only (investigate/verify): Gemini 3.5 Flash (low) / Gemini 3.1 Pro (medium/high)
+AGY write: Claude Sonnet 4.6 (Thinking) (medium) / Claude Opus 4.6 (Thinking) (high)
+
+### Automatic routing with quota fallback
+
+The `auto` command routes low-complexity contracts directly to CC. For medium and high contracts, it uses AGY with specific Thinking models. If AGY returns a quota/credit/rate-exhaustion error, the router automatically cleans up the failed AGY workspace and retries with CC, recording route and fallback evidence. Other AGY failures (authentication, permission, internal errors) are NOT silently swallowed -- they surface normally so Codex can respond.
+
+Provider-aware calibration: ordinary work estimated as CC-high may generally be treated as AGY-medium/Sonnet. Reserve AGY-high/Opus for exceptional complexity or risk.
+
+### Migration compatibility
+
+The default `routing.auto` policy is `"agy_preferred"` (low -> CC, medium/high -> AGY write). Legacy configs with `routing.auto: "cc"` route all contracts to CC. Legacy configs with `"agy"` behave identically to `"agy_preferred"`. Existing project configs with `primary_writer: "cc"` still work without changes.
+
+## Parallel allocation policy
+
+- Multiple CC workers can run in parallel for read-only contracts or clearly disjoint writable paths.
+- One AGY write worker should be allocated whenever multiple disjoint contracts run in parallel.
+- Retain at most one concurrent AGY by default on this machine.
+- Multiple concurrent AGY write jobs require a successful multi-AGY smoke test.
 
 ## Requirements
 
@@ -17,7 +55,7 @@ The default path is Skill + CLI:
 - Node.js 18.18 or newer.
 - Git.
 - Local `claude` CLI.
-- Local `agy` CLI if AGY verification is desired.
+- Local `agy` CLI if AGY verification or writing is desired.
 
 ## Install
 
@@ -58,17 +96,51 @@ Review `.agent-orchestrator/config.json`, keep `duplicate_implementation` false,
 
 ## Usage
 
+In any host, resume first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
+```
+
+Use `-HostProvider claude_desktop` from Claude/CC hosts and `-HostProvider terminal` from a plain shell.
+
 In a Codex session for a configured project:
 
 ```text
-Use agent-orch. Plan this change, delegate implementation to CC, use AGY only for targeted verification, and apply the patch only after acceptance.
+Use agent-orch. Plan this change, delegate implementation to CC or AGY via the auto router, use AGY for targeted verification, and apply the patch only after acceptance.
 ```
 
 Codex should call `scripts\agent-orch.ps1`, inspect evidence under `.agent-orchestrator\runs`, request same-session repair if needed, and apply the patch only after verification.
 
-For substantial work, Codex should first split the goal into small contracts, route implementation contracts to CC, route required investigation or verification gates to AGY, and record any waived gate or residual risk for the user.
+Open the dashboard without talking to an agent:
 
-Parallel routing is allowed, but bounded: multiple CC workers can run for read-only or disjoint contracts; AGY should be serialized unless the current local AGY account has passed a fresh multi-AGY smoke test. In this environment, a 2026-07-04 smoke test showed parallel CC working, but two concurrent AGY jobs were unstable while sequential AGY recovered successfully.
+```powershell
+powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 dashboard -ProjectDir <project>
+```
+
+For substantial work, Codex should first split the goal into small contracts, route implementation contracts via `auto` (which handles provider and model selection), route required investigation or verification gates to AGY, and record any waived gate or residual risk for the user.
+
+Parallel routing is allowed, but bounded: multiple CC workers can run for read-only or disjoint contracts; AGY write should be serialized unless the current local AGY account has passed a fresh multi-AGY smoke test. In this environment, a 2026-07-04 smoke test showed parallel CC working, but two concurrent AGY jobs were unstable while sequential AGY recovered successfully.
+
+## CLI Commands
+
+```
+agent-orch init      -ProjectDir <project> [-ExistingProject]
+agent-orch health    -ProjectDir <project>
+agent-orch resume    -ProjectDir <project> [-HostProvider codex|claude_desktop|terminal|unknown]
+agent-orch dashboard -ProjectDir <project> [-PreferredPort 15788]
+agent-orch cc-exec   -ProjectDir <project> -Contract <json-or-file>
+agent-orch cc-continue -ProjectDir <project> -Contract <json-or-file>
+agent-orch agy-exec  -ProjectDir <project> -Contract <json-or-file>
+agent-orch agy-continue -ProjectDir <project> -Contract <json-or-file>
+agent-orch agy-investigate -ProjectDir <project> -Contract <json-or-file>
+agent-orch agy-verify -ProjectDir <project> -Contract <json-or-file>
+agent-orch auto      -ProjectDir <project> -Contract <json-or-file>
+agent-orch status    -ProjectDir <project> -JobId <id>
+agent-orch result    -ProjectDir <project> -JobId <id>
+agent-orch apply     -ProjectDir <project> -JobId <id>
+agent-orch cleanup   -ProjectDir <project> -JobId <id>
+```
 
 ## Legacy MCP
 
@@ -81,6 +153,8 @@ The previous MCP server remains in the repository for legacy use, but it is not 
 - Review project-provided `.agent-orchestrator/config.json` before setting `trusted` to true.
 - Treat worker output as a claim; Codex still needs to verify diffs, forbidden paths, and acceptance commands.
 - Do not let Codex become the implementation worker unless the user explicitly leaves Agent Orch mode for that task.
+- AGY write work produces the same isolated worktree + patch + verification evidence as CC. Apply and cleanup work identically.
+- Quota fallback from AGY to CC only triggers for explicit quota/credit/rate-exhaustion errors. Auth, permission, and internal errors are NOT silently swallowed.
 
 ## License
 

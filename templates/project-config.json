@@ -10,6 +10,28 @@
     "specialist": "agy",
     "duplicate_implementation": false
   },
+  "host": {
+    "provider": "unknown",
+    "in_session_roles": ["planner", "accepter"]
+  },
+  "providers": {
+    "codex": {
+      "roles": ["planner", "accepter"],
+      "external_invocation": "disabled_when_host_is_codex"
+    },
+    "cc": {
+      "roles": ["executor"],
+      "invocation": "cli"
+    },
+    "agy": {
+      "roles": ["reviewer", "executor_fallback"],
+      "invocation": "cli"
+    }
+  },
+  "routing": {
+    "auto": "agy_preferred",
+    "agy_write_fallback_to_cc_on_quota": true
+  },
   "cli": {
     "claude": "claude",
     "agy": "agy",
@@ -32,19 +54,25 @@
     "max_cc_repair_rounds": 2,
     "cc_timeout_seconds": 1800,
     "agy_timeout_seconds": 900,
+    "agy_write_timeout_seconds": 1800,
     "max_log_bytes": 4194304,
     "max_result_chars": 8000
   },
   "models": {
     "cc": {
-      "low": null,
-      "medium": null,
-      "high": null
+      "low": "deepseek-v4-flash",
+      "medium": "deepseek-v4-flash",
+      "high": "deepseek-v4-pro"
     },
     "agy": {
       "low": "Gemini 3.5 Flash",
       "medium": "Gemini 3.1 Pro",
       "high": "Gemini 3.1 Pro"
+    },
+    "agy_write": {
+      "low": null,
+      "medium": "Claude Sonnet 4.6 (Thinking)",
+      "high": "Claude Opus 4.6 (Thinking)"
     }
   },
   "scope": {

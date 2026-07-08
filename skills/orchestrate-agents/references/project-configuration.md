@@ -2,6 +2,10 @@
 
 Initialize a project with the Agent Orch CLI or copy `templates/project-config.json` into `<project>/.agent-orchestrator/config.json`, review it, and set `trusted` to `true` only for a trusted repository.
 
+`init` also seeds `.agent-orchestrator/PROJECT.md`, `.agent-orchestrator/TODO.md`, and `.agent-orchestrator/HANDOFF.md` when they do not already exist. Treat these files as the project continuity surface for future Codex, CC, and AGY sessions. Do not overwrite user-maintained versions.
+
+For a new project or early project framing, run a `grill-me` session before implementation if the goal, users, scope, architecture, or definition of done is still unresolved. Record the decisions in `PROJECT.md`, translate next work into `TODO.md` contracts, and keep `HANDOFF.md` accurate after each accepted or abandoned Agent Orch job.
+
 ## Required policy
 
 ```json
@@ -14,26 +18,53 @@ Initialize a project with the Agent Orch CLI or copy `templates/project-config.j
     "primary_writer": "cc",
     "specialist": "agy",
     "duplicate_implementation": false
+  },
+  "host": {
+    "provider": "unknown",
+    "in_session_roles": ["planner", "accepter"]
+  },
+  "providers": {
+    "codex": {
+      "roles": ["planner", "accepter"],
+      "external_invocation": "disabled_when_host_is_codex"
+    },
+    "cc": { "roles": ["executor"], "invocation": "cli" },
+    "agy": { "roles": ["reviewer", "executor_fallback"], "invocation": "cli" }
   }
 }
 ```
 
-Keep `duplicate_implementation` false. Codex should reject CC implementation if CC is not the primary writer.
+Keep `duplicate_implementation` false. Codex should reject implementation if duplication is enabled.
+
+When the current host is Codex, `providers.codex.external_invocation` must disable planner/accepter self-invocation. Planning and acceptance happen in the current Codex session, while the CLI records state and launches external workers.
+
+## Continuity and generated state
+
+- `agent-orch resume -ProjectDir <project> -HostProvider <host>` is the first command for every host.
+- `.agent-orchestrator/events.jsonl` is the append-only machine timeline.
+- `.agent-orchestrator/current-state.json` is the latest resumable state.
+- `.agent-orchestrator/handoff.generated.md` is generated from machine state and should be read before handwritten handoff notes.
+- `.agent-orchestrator/open-dashboard.ps1` is seeded by `init` for direct dashboard access.
+
+## Routing
+
+- `routing.auto`: `"agy_preferred"` (default) routes low complexity to CC and medium/high to AGY write with Thinking models. Legacy values `"cc"` (all to CC) and `"agy"` (same as agy_preferred) remain compatible.
+- `routing.agy_write_fallback_to_cc_on_quota`: default `true`. When AGY write fails with a quota/credit/rate-exhaustion error, the auto router cleans up the AGY workspace and retries with CC. Set to `false` only when you want quota errors to surface directly.
 
 ## Execution
 
 - `workspace_mode`: use `isolated` by default. It creates a detached Git worktree and produces a patch.
 - `allow_dirty_in_place`: keep false. Isolated execution requires a clean Git tree.
-- `max_cc_repair_rounds`: deterministic failure repair rounds in the same CC session; default 2.
-- `cc_timeout_seconds`, `agy_timeout_seconds`: hard worker limits.
+- `max_cc_repair_rounds`: deterministic failure repair rounds in the same session; default 2.
+- `cc_timeout_seconds`, `agy_timeout_seconds`, `agy_write_timeout_seconds`: hard worker limits.
 - `max_log_bytes`: per-stream disk and memory cap.
-- `max_result_chars`: maximum AGY result returned to Codex.
+- `max_result_chars`: maximum result returned to Codex.
 - `.agent-orchestrator/state`: session registry and local state.
 - `.agent-orchestrator/runs`: job evidence, logs, and patches.
 
 ## Antigravity CLI
 
-- `agy.enabled`: keep true when AGY should remain available as a verifier.
+- `agy.enabled`: keep true when AGY should remain available as a verifier or writer.
 - `agy.auth_probe_required`: keep true by default. The CLI checks AGY availability before launching longer work.
 - `agy.fail_fast_on_auth_window`: documents that Codex should stop quickly if AGY cannot use silent auth.
 - `cli.agy_sandbox`: default false for local desktop workflows where sandboxed print mode cannot access normal silent-auth state.
@@ -52,17 +83,26 @@ Set provider model names per complexity only when the installed CLI and current 
 ```json
 {
   "models": {
-    "cc": { "low": null, "medium": null, "high": null },
+    "cc": { "low": "deepseek-v4-flash", "medium": "deepseek-v4-flash", "high": "deepseek-v4-pro" },
     "agy": {
       "low": "Gemini 3.5 Flash",
       "medium": "Gemini 3.1 Pro",
       "high": "Gemini 3.1 Pro"
+    },
+    "agy_write": {
+      "low": null,
+      "medium": "Claude Sonnet 4.6 (Thinking)",
+      "high": "Claude Opus 4.6 (Thinking)"
     }
   }
 }
 ```
 
-Do not force a Claude model name when ccswitch should select GLM, DeepSeek, or another configured backend. Record an explicit override only when the user requests it. Use AGY CLI model names, not UI labels with effort suffixes, because labels such as `Gemini 3.5 Flash (Medium)` can fail in `--new-project` print mode.
+- `models.cc`: two-tier policy. Low and medium complexity use `deepseek-v4-flash`; high complexity uses `deepseek-v4-pro`. An explicit per-contract model override takes precedence over these defaults. All CC paths use this tiering: direct cc-exec/cc-continue, low auto routing, and CC fallback after AGY quota exhaustion. **Migration**: legacy configs with `null` CC model values are automatically normalized to these two-tier defaults at load time and on `init`; any non-empty user model string is preserved.
+- `models.agy`: read-only investigation/verification models. Use AGY CLI model names, not UI labels with effort suffixes.
+- `models.agy_write`: separate write-mode model configuration. Defaults to Thinking models: `Claude Sonnet 4.6 (Thinking)` for medium, `Claude Opus 4.6 (Thinking)` for high. These are the exact model names passed to `agy --model`.
+
+AGY write models are independent of AGY investigation models. Read-only defaults (Gemini 3.5 Flash / Pro) are not affected by agy_write configuration.
 
 ## Scope and verification
 

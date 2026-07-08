@@ -40,6 +40,13 @@ test("CLI initializes a project and runs a CC implementation to apply", async (t
   const init = run(["init", "-ProjectDir", project, "-ExistingProject"]);
   assert.equal(init.ok, true);
   assert.equal(init.mode, "cli");
+  assert.ok(init.dashboard_launcher.endsWith("open-dashboard.ps1"));
+  assert.ok(await fs.stat(init.dashboard_launcher));
+
+  const resumed = run(["resume", "-ProjectDir", project, "-HostProvider", "codex"]);
+  assert.equal(resumed.host_provider, "codex");
+  assert.equal(resumed.external_invocation_allowed.codex, false);
+  assert.ok(resumed.in_session_roles.includes("planner"));
 
   const configPath = path.join(project, ".agent-orchestrator", "config.json");
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));

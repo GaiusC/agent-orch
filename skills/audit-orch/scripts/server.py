@@ -473,50 +473,8 @@ def discover_projects():
             continue
         seen[key] = (source_kind, os.path.abspath(source_path))
 
-    projects = []
     _, process_text = get_active_processes_snapshot()
-
-    for _, (src, abs_path) in seen.items():
-        orch_dir = os.path.join(abs_path, ".agent-orchestrator")
-        has_orchestrator = os.path.isdir(orch_dir)
-        total_jobs = 0
-        active_jobs = 0
-        if has_orchestrator:
-            runs_dir = os.path.join(orch_dir, "runs")
-            if os.path.isdir(runs_dir):
-                for run_folder in os.listdir(runs_dir):
-                    job_file = os.path.join(runs_dir, run_folder, "job.json")
-                    if not os.path.isfile(job_file):
-                        continue
-                    total_jobs += 1
-                    try:
-                        with open(job_file, "r", encoding="utf-8-sig") as fh:
-                            job = json.load(fh)
-                        status = job.get("status", "unknown")
-                        if status in ("queued", "running"):
-                            if status == "running":
-                                needles = [
-                                    job.get("id", ""),
-                                    job.get("session_id", ""),
-                                    job.get("task_id", ""),
-                                    job.get("project_dir", ""),
-                                    ((job.get("workspace") or {}).get("path") or ""),
-                                ]
-                                needles = [n for n in needles if n]
-                                if not any(needle and needle in process_text for needle in needles):
-                                    continue
-                            active_jobs += 1
-                    except Exception:
-                        pass
-
-        projects.append({
-            "path": abs_path,
-            "display_name": project_display_name(abs_path),
-            "has_orchestrator": has_orchestrator,
-            "total_jobs": total_jobs,
-            "active_jobs": active_jobs,
-            "source": src,
-        })
+    projects = [project_summary(abs_path, src, process_text) for src, abs_path in seen.values()]
 
     # sort: projects with orchestrator first, then by active/total jobs desc
     projects.sort(key=lambda p: (
@@ -526,6 +484,55 @@ def discover_projects():
         p["display_name"].lower(),
     ))
     return projects
+
+
+def project_summary(project_path, source="manual", process_text=None):
+    abs_path = os.path.abspath(project_path)
+    if not os.path.isdir(abs_path):
+        raise ValueError(f"Project directory does not exist: {project_path}")
+    if process_text is None:
+        _, process_text = get_active_processes_snapshot()
+
+    orch_dir = os.path.join(abs_path, ".agent-orchestrator")
+    has_orchestrator = os.path.isdir(orch_dir)
+    total_jobs = 0
+    active_jobs = 0
+    if has_orchestrator:
+        runs_dir = os.path.join(orch_dir, "runs")
+        if os.path.isdir(runs_dir):
+            for run_folder in os.listdir(runs_dir):
+                job_file = os.path.join(runs_dir, run_folder, "job.json")
+                if not os.path.isfile(job_file):
+                    continue
+                total_jobs += 1
+                try:
+                    with open(job_file, "r", encoding="utf-8-sig") as fh:
+                        job = json.load(fh)
+                    status = job.get("status", "unknown")
+                    if status in ("queued", "running"):
+                        if status == "running":
+                            needles = [
+                                job.get("id", ""),
+                                job.get("session_id", ""),
+                                job.get("task_id", ""),
+                                job.get("project_dir", ""),
+                                ((job.get("workspace") or {}).get("path") or ""),
+                            ]
+                            needles = [n for n in needles if n]
+                            if not any(needle and needle in process_text for needle in needles):
+                                continue
+                        active_jobs += 1
+                except Exception:
+                    pass
+
+    return {
+        "path": abs_path,
+        "display_name": project_display_name(abs_path),
+        "has_orchestrator": has_orchestrator,
+        "total_jobs": total_jobs,
+        "active_jobs": active_jobs,
+        "source": source,
+    }
 
 
 def write_conclusion(orchestrator_dir, job_id, payload):
@@ -882,6 +889,8 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/" or path == "/index.html":
             self.serve_file("index.html", "text/html")
+        elif path.startswith("/vendor/"):
+            self.serve_vendor(path)
         elif path.startswith("/api/"):
             self.serve_api(parsed_url)
         else:
@@ -934,6 +943,26 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, f"{filename} Not Found")
 
+    def serve_vendor(self, path):
+        # Strict allowlist — only these two files may be served from vendor/.
+        allowed = {"marked.min.js", "purify.min.js"}
+        name = path[len("/vendor/"):]
+        # Reject anything that is not a simple file name in the allowlist.
+        if name not in allowed:
+            self.send_error(403, "Forbidden")
+            return
+        vendor_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor")
+        file_path = os.path.join(vendor_dir, name)
+        if not os.path.isfile(file_path):
+            self.send_error(404, "Not Found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/javascript")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        with open(file_path, "rb") as fh:
+            self.wfile.write(fh.read())
+
     def serve_api(self, parsed_url):
         path = parsed_url.path
         project_dir, orchestrator_dir = request_project_context(parsed_url)
@@ -947,6 +976,12 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                     "current_project": project_dir,
                     "current_orchestrator": orchestrator_dir,
                 }
+            elif path == "/api/project-info":
+                params = parse_qs(parsed_url.query)
+                requested = (params.get("project") or [""])[0]
+                if not requested:
+                    raise ValueError("Project path is required.")
+                response_data = project_summary(requested)
             elif path == "/api/runs":
                 response_data = self.get_runs_list(orchestrator_dir)
             elif path.startswith("/api/conclusion/"):

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -71,6 +71,45 @@ const tools = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
   {
+    name: "agy_execute_task",
+    description: "Delegate a Codex-approved coding task to Antigravity as the primary writer. Runs asynchronously in an isolated Git worktree, verifies it, and preserves the AGY session. Supports apply/cleanup semantics.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...commonTaskProperties,
+        acceptance_commands: { type: "array", items: { type: "string" }, description: "Deterministic commands the broker must run after implementation." },
+      },
+      required: ["project_dir", "task_id", "goal", "plan"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
+    name: "agy_continue_task",
+    description: "Continue the exact Antigravity write session for an existing project/task with incremental Codex feedback. Never use for an unrelated goal or after changing the underlying model.",
+    inputSchema: {
+      type: "object",
+      properties: { ...commonTaskProperties, acceptance_commands: { type: "array", items: { type: "string" } } },
+      required: ["project_dir", "task_id", "goal", "plan"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
+    name: "auto_execute_task",
+    description: "Delegate a Codex-approved task with automatic routing: low complexity -> CC, medium/high -> AGY write with Thinking models. Falls back to CC on AGY quota exhaustion. Route and fallback evidence is recorded.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...commonTaskProperties,
+        acceptance_commands: { type: "array", items: { type: "string" }, description: "Deterministic commands the broker must run after implementation." },
+      },
+      required: ["project_dir", "task_id", "goal", "plan"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
     name: "worker_status",
     description: "Return compact status for an asynchronous CC or AGY job.",
     inputSchema: { type: "object", properties: { job_id: { type: "string" } }, required: ["job_id"], additionalProperties: false },
@@ -131,6 +170,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "agy_investigate": return response(await orchestrator.startAgy(args, "investigate"));
       case "agy_verify": return response(await orchestrator.startAgy(args, "verify"));
       case "agy_execute_disjoint_subtask": return response(await orchestrator.startAgy(args, "disjoint_subtask"));
+      case "agy_execute_task": return response(await orchestrator.startAgyWrite(args, false));
+      case "agy_continue_task": return response(await orchestrator.startAgyWrite(args, true));
+      case "auto_execute_task": return response(await orchestrator.startAuto(args));
       case "worker_status": return response(await orchestrator.status(requireString(args, "job_id")));
       case "worker_result": return response(await orchestrator.result(requireString(args, "job_id")));
       case "worker_cancel": return response(await orchestrator.cancel(requireString(args, "job_id")));

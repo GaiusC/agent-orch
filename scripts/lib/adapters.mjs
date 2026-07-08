@@ -1,4 +1,4 @@
-import crypto from "node:crypto";
+﻿import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -39,9 +39,10 @@ function parseClaudeOutput(stdout, fallbackSessionId) {
       is_error: Boolean(parsed.is_error),
       usage: parsed.usage || null,
       cost_usd: parsed.total_cost_usd ?? null,
+      model: parsed.model || null,
     };
   } catch {
-    return { session_id: fallbackSessionId, result: trimmed, is_error: false, usage: null, cost_usd: null };
+    return { session_id: fallbackSessionId, result: trimmed, is_error: false, usage: null, cost_usd: null, model: null };
   }
 }
 
@@ -312,6 +313,145 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, taskSessio
   return {
     ...processResult,
     session_id: sessionId || taskSession?.session_id || null,
+    model: model || null,
+    result: truncate(resultText, config.execution.max_result_chars),
+    result_source: processResult.stdout.trim() ? "stdout" : transcriptResult ? "transcript" : storeResult ? "conversation_store" : "none",
+    cli_log_path: cliLogPath,
+    cli_log_tail: cliLogTail,
+    launch,
+  };
+}
+
+// -- AGY write-mode execution (isolated worktree + patch + verification) --
+
+export function classifyAgyQuotaError(output, stderr = "") {
+  if (!output && !stderr) return false;
+  const combined = [output, stderr].filter(Boolean).join(" ");
+  const quotaPatterns = [
+    /429/i,
+    /RESOURCE_EXHAUSTED/i,
+    /quota\s+exceeded/i,
+    /rate\s+limit/i,
+    /credit[s]?\s+(exhausted|depleted|insufficient|expired)/i,
+    /billing\s+limit/i,
+    /usage\s+(limit|quota|exceeded|capped)/i,
+    /too\s+many\s+requests/i,
+    /usage\s+exceeded/i,
+    /payment\s+required/i,
+    /insufficient\s+(credits?|quota|balance)/i,
+    /exceeded\s+(your\s+)?(current\s+)?quota/i,
+    /quota\s+(has\s+been|was)\s+(reached|exhausted|exceeded)/i,
+    /limit[s]?\s+(have\s+been\s+)?reached/i,
+    /daily\s+(usage\s+)?limit/i,
+    /monthly\s+(usage\s+)?limit/i,
+    /try\s+again\s+later.*(?:quota|limit|rate)/i,
+  ];
+  const nonQuotaPatterns = [
+    /authentication\s+(required|failed|error)/i,
+    /unauthorized/i,
+    /permission\s+denied/i,
+    /access\s+denied/i,
+    /forbidden/i,
+    /failed\s+to\s+construct\s+executor/i,
+    /neither\s+PlanModel\s+nor\s+RequestedModel\s+specified/i,
+    /model\s+output\s+error/i,
+    /invalid\s+tool\s+call\s+error/i,
+    /internal\s+(server\s+)?error/i,
+    /sandbox\s+error/i,
+  ];
+
+  // Non-quota errors take priority -- if we see those, never classify as quota
+  if (nonQuotaPatterns.some((re) => re.test(combined))) return false;
+  return quotaPatterns.some((re) => re.test(combined));
+}
+
+export function contractPromptAgyWrite({ goal, plan, acceptance, writablePaths, forbiddenPaths }) {
+  return [
+    "Role: Primary implementation worker reporting to Codex",
+    `Goal: ${goal}`,
+    plan ? `Approved plan:\n${plan}` : null,
+    writablePaths?.length ? `Writable paths: ${writablePaths.join(", ")}` : null,
+    forbiddenPaths?.length ? `Forbidden paths: ${forbiddenPaths.join(", ")}` : null,
+    acceptance?.length ? `Acceptance commands: ${acceptance.join("; ")}` : null,
+    "Obey CLAUDE.md/AGENTS.md project rules when they do not conflict with this contract.",
+    "Do not commit, push, publish, deploy, rotate credentials, or change remote systems.",
+    "Implement the approved plan completely, add or update tests as appropriate, and run relevant checks.",
+    "At the end, summarize files changed, commands run, test results, deviations, and unresolved risks.",
+  ].filter(Boolean).join("\n\n");
+}
+
+export async function runAgyWrite({ config, workspace, jobDir, goal, plan, acceptance, taskSession, model, repairContext, signal, round = 0 }) {
+  const sessionId = taskSession?.session_id || crypto.randomUUID();
+  const basePrompt = contractPromptAgyWrite({
+    goal,
+    plan,
+    acceptance,
+    writablePaths: config.scope.writable,
+    forbiddenPaths: config.scope.forbidden,
+  });
+  const prompt = repairContext
+    ? `${basePrompt}\n\nThis is a continuation. Fix only the following verified failures without redesigning the approved plan:\n${repairContext}`
+    : basePrompt;
+  const cachedBefore = await cachedAgyConversation(workspace);
+  const cliLogPath = path.join(jobDir, `agy-write-round-${round}.cli.log`);
+  const projectId = agyProjectId(config);
+  const sandbox = config.cli.agy_sandbox === true;
+  const timeoutSeconds = config.execution.agy_write_timeout_seconds || config.execution.agy_timeout_seconds;
+  const args = buildAgyArgs({
+    prompt,
+    conversationId: taskSession?.session_id,
+    model,
+    timeoutSeconds,
+    sandbox,
+    projectId,
+    workspace,
+  });
+  args.unshift(...(config.cli.agy_prefix_args || []));
+  args.push("--log-file", cliLogPath);
+
+  const launch = {
+    command: config.cli.agy,
+    args: sanitizedAgyArgs(args),
+    cwd: workspace,
+    sandbox,
+    project_id: projectId,
+    env: safeAgyEnvSnapshot(),
+  };
+
+  const processResult = await runProcess({
+    command: config.cli.agy,
+    args,
+    cwd: workspace,
+    timeoutSeconds: timeoutSeconds + 30,
+    logDir: jobDir,
+    logPrefix: `agy-write-round-${round}`,
+    maxLogBytes: config.execution.max_log_bytes,
+    signal,
+  });
+
+  const resultSessionId = await discoverAgyConversation({
+    workspace,
+    stdout: processResult.stdout,
+    cliLogPath,
+    existingSessionId: taskSession?.session_id,
+    cachedBefore,
+  });
+
+  const transcriptResult = await readAgyTranscript(resultSessionId || taskSession?.session_id);
+  const storeResult = processResult.stdout.trim() || transcriptResult ? "" : await readAgyConversationStore(resultSessionId || taskSession?.session_id);
+  const cliLogTail = await readTail(cliLogPath, 4000);
+  const resultText = processResult.stdout.trim() || transcriptResult || storeResult;
+
+  return {
+    ...processResult,
+    parsed: {
+      session_id: resultSessionId || taskSession?.session_id || sessionId,
+      result: truncate(resultText, config.execution.max_result_chars),
+      is_error: processResult.exit_code !== 0,
+      usage: null,
+      cost_usd: null,
+    },
+    session_id: resultSessionId || taskSession?.session_id || sessionId,
     model: model || null,
     result: truncate(resultText, config.execution.max_result_chars),
     result_source: processResult.stdout.trim() ? "stdout" : transcriptResult ? "transcript" : storeResult ? "conversation_store" : "none",

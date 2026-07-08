@@ -5,6 +5,8 @@ const args = process.argv.slice(2);
 const sessionIndex = args.indexOf("--session-id");
 const resumeIndex = args.indexOf("--resume");
 const sessionId = sessionIndex >= 0 ? args[sessionIndex + 1] : args[resumeIndex + 1];
+const modelIndex = args.indexOf("--model");
+const passedModel = modelIndex >= 0 ? args[modelIndex + 1] : null;
 const target = path.join(process.cwd(), "feature.txt");
 const isRepair = fs.existsSync(target);
 fs.writeFileSync(target, isRepair ? "good" : "bad", "utf8");
@@ -13,5 +15,6 @@ process.stdout.write(JSON.stringify({
   is_error: false,
   result: isRepair ? "repaired implementation" : "initial implementation",
   total_cost_usd: 0.01,
-  usage: { input_tokens: 10, output_tokens: 5 }
+  usage: { input_tokens: 10, output_tokens: 5 },
+  model: passedModel || null,
 }));

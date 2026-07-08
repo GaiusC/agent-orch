@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import os
+import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -650,6 +652,28 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertIn("project-card", html)
         self.assertIn("backToProjectsBtn", html)
 
+    def test_frontend_persists_manual_project_preferences(self):
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("agentOrchAuditProjectPreferences", html)
+        self.assertIn("customPaths", html)
+        self.assertIn("hiddenPaths", html)
+        self.assertIn("localStorage.setItem(PROJECT_PREFS_KEY", html)
+
+    def test_frontend_can_add_remove_and_reset_projects(self):
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("addProjectPath()", html)
+        self.assertIn("removeProjectPath(", html)
+        self.assertIn("resetProjectDisplay()", html)
+        self.assertIn("data-remove-project", html)
+        self.assertIn("/api/project-info", html)
+
+    def test_reset_only_restores_hidden_projects(self):
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        start = html.index("function resetProjectDisplay()")
+        body = html[start:html.index("}", start) + 1]
+        self.assertIn("hiddenPaths = []", body)
+        self.assertNotIn("customPaths = []", body)
+
     def test_frontend_has_process_column_collapse(self):
         """The frontend should have a collapsible right-side process column."""
         html = INDEX_PATH.read_text(encoding="utf-8")
@@ -739,6 +763,22 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertIn('"projects": projects_list', server_source)
         self.assertIn('"current_project":', server_source)
         self.assertIn('"current_orchestrator":', server_source)
+
+    def test_project_summary_accepts_manual_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            summary = SERVER.project_summary(root, process_text="")
+            self.assertEqual(summary["path"], os.path.abspath(root))
+            self.assertEqual(summary["source"], "manual")
+            self.assertFalse(summary["has_orchestrator"])
+
+    def test_project_summary_rejects_missing_directory(self):
+        with self.assertRaises(ValueError):
+            SERVER.project_summary("Z:/definitely/missing/agent-orch-project", process_text="")
+
+    def test_api_has_manual_project_info_endpoint(self):
+        server_source = SERVER_PATH.read_text(encoding="utf-8")
+        self.assertIn('path == "/api/project-info"', server_source)
+        self.assertIn("project_summary(requested)", server_source)
 
     def test_frontend_handles_new_projects_response(self):
         """The frontend should handle the new object-format /api/projects response."""
@@ -899,6 +939,339 @@ class AuditDashboardTests(unittest.TestCase):
             finally:
                 SERVER.SERVER_PROJECT_DIR = old_project
                 SERVER.SERVER_ORCHESTRATOR_DIR = old_orch
+
+    # -- Markdown rendering and vendor asset tests --
+
+    def test_vendor_directory_contains_marked_and_dompurify(self):
+        """Vendor directory must contain local browser builds of marked and DOMPurify."""
+        vendor = ROOT / "skills" / "audit-orch" / "scripts" / "vendor"
+        self.assertTrue(vendor.is_dir(), "vendor directory must exist")
+        marked_js = vendor / "marked.min.js"
+        purify_js = vendor / "purify.min.js"
+        self.assertTrue(marked_js.is_file(), "marked.min.js must be in vendor/")
+        self.assertTrue(purify_js.is_file(), "purify.min.js must be in vendor/")
+        # Files should be non-empty
+        self.assertGreater(marked_js.stat().st_size, 0, "marked.min.js must not be empty")
+        self.assertGreater(purify_js.stat().st_size, 0, "purify.min.js must not be empty")
+
+    def test_server_has_vendor_route(self):
+        """Server must serve vendor files via /vendor/ route."""
+        server_source = SERVER_PATH.read_text(encoding="utf-8")
+        self.assertIn("/vendor/", server_source)
+        self.assertIn("serve_vendor", server_source)
+
+    @staticmethod
+    def _serve_vendor(path):
+        """Call serve_vendor with a minimal fake handler, return (status, headers)."""
+        import io
+
+        class FakeHandler:
+            def __init__(self):
+                self.status = None
+                self.headers = []
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers.append((k, v))
+            def end_headers(self):
+                pass
+            def send_error(self, code, msg=None):
+                self.status = code
+            def log_message(self, *args):
+                pass
+
+        handler = FakeHandler()
+        handler.wfile = io.BytesIO()
+        SERVER.DashboardAPIHandler.serve_vendor(handler, path)
+        return handler.status, handler.headers
+
+    # -- Allowlist: success paths --
+
+    def test_serve_vendor_allows_marked_min_js(self):
+        """serve_vendor must serve /vendor/marked.min.js with status 200 and JS content type."""
+        status, headers = self._serve_vendor("/vendor/marked.min.js")
+        self.assertEqual(status, 200)
+        content_types = [v for k, v in headers if k.lower() == "content-type"]
+        self.assertIn("application/javascript", content_types)
+
+    def test_serve_vendor_allows_purify_min_js(self):
+        """serve_vendor must serve /vendor/purify.min.js with status 200 and JS content type."""
+        status, headers = self._serve_vendor("/vendor/purify.min.js")
+        self.assertEqual(status, 200)
+        content_types = [v for k, v in headers if k.lower() == "content-type"]
+        self.assertIn("application/javascript", content_types)
+
+    # -- Allowlist: rejection paths --
+
+    def test_serve_vendor_rejects_unknown_file(self):
+        """serve_vendor must reject a file name not in the allowlist."""
+        status, _ = self._serve_vendor("/vendor/unknown-file.js")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_nested_path(self):
+        """serve_vendor must reject paths with directory separators."""
+        status, _ = self._serve_vendor("/vendor/sub/marked.min.js")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_forward_slash_traversal(self):
+        """serve_vendor must reject ../ traversal with forward slashes."""
+        status, _ = self._serve_vendor("/vendor/../../secret.txt")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_backslash_traversal(self):
+        """serve_vendor must reject ..\\ traversal with backslashes."""
+        status, _ = self._serve_vendor("/vendor/..\\..\\secret.txt")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_absolute_windows_path(self):
+        """serve_vendor must NOT serve C:/Windows/win.ini via the vendor route."""
+        status, _ = self._serve_vendor("/vendor/C:/Windows/win.ini")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_drive_relative_backslash(self):
+        """serve_vendor must reject a drive-relative backslash path."""
+        status, _ = self._serve_vendor("/vendor/C:..\\..\\Windows\\win.ini")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_drive_relative_forward_slash(self):
+        """serve_vendor must reject a drive-relative forward-slash path."""
+        status, _ = self._serve_vendor("/vendor/C:../../Windows/win.ini")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_percent_encoded_slash(self):
+        """serve_vendor must reject percent-encoded slashes in the file name."""
+        status, _ = self._serve_vendor("/vendor/..%2f..%2fsecret.txt")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_percent_encoded_backslash(self):
+        """serve_vendor must reject percent-encoded backslashes in the file name."""
+        status, _ = self._serve_vendor("/vendor/..%5c..%5csecret.txt")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_empty_name(self):
+        """serve_vendor must reject an empty file name."""
+        status, _ = self._serve_vendor("/vendor/")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_only_prefix(self):
+        """serve_vendor must reject /vendor with no trailing file name."""
+        status, _ = self._serve_vendor("/vendor")
+        self.assertEqual(status, 403)
+
+    def test_serve_vendor_rejects_null_byte(self):
+        """serve_vendor must reject a name containing a null byte."""
+        status, _ = self._serve_vendor("/vendor/marked.min.js\x00.html")
+        self.assertEqual(status, 403)
+
+    def test_server_vendor_route_is_allowlist_based(self):
+        """The server source must contain the allowlist set literal."""
+        server_source = SERVER_PATH.read_text(encoding="utf-8")
+        self.assertIn("allowed", server_source)
+        self.assertIn("marked.min.js", server_source)
+        self.assertIn("purify.min.js", server_source)
+
+    def test_frontend_imports_vendor_scripts(self):
+        """Frontend must load marked and DOMPurify from vendor/."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn('src="/vendor/marked.min.js"', html)
+        self.assertIn('src="/vendor/purify.min.js"', html)
+
+    def test_frontend_uses_marked_and_dompurify_for_conclusion(self):
+        """renderConclusionState must call marked.parse and DOMPurify.sanitize."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("marked.parse", html)
+        self.assertIn("DOMPurify.sanitize", html)
+        self.assertIn("ALLOWED_TAGS", html)
+        self.assertIn("ALLOWED_ATTR", html)
+
+    def test_frontend_conclusion_is_div_not_pre(self):
+        """Conclusion pane must use a div.conclusion-md, not a pre element."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn('class="conclusion-md"', html)
+        self.assertIn('data-field="conclusionText"', html)
+        # Should NOT have <pre data-field="conclusionText"
+        self.assertNotIn('<pre data-field="conclusionText"', html)
+
+    def test_frontend_has_conclusion_markdown_css(self):
+        """Frontend CSS must include styles for all Markdown elements rendered from AGY output."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn(".conclusion-md", html)
+        # Check for key Markdown element styles
+        for selector in [
+            ".conclusion-md h1",
+            ".conclusion-md h2",
+            ".conclusion-md h3",
+            ".conclusion-md h4",
+            ".conclusion-md ul",
+            ".conclusion-md ol",
+            ".conclusion-md li",
+            ".conclusion-md a",
+            ".conclusion-md blockquote",
+            ".conclusion-md table",
+            ".conclusion-md th",
+            ".conclusion-md td",
+            ".conclusion-md code",
+            ".conclusion-md pre",
+            ".conclusion-md pre code",
+            ".conclusion-md hr",
+            ".conclusion-md strong",
+            ".conclusion-md em",
+            ".conclusion-md img",
+        ]:
+            self.assertIn(selector, html, f"CSS must contain {selector}")
+
+    def test_frontend_conversation_events_still_escaped(self):
+        """Conversation event rendering must use textContent/escapeHtml, not marked."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        # Conversation event body still uses escapeHtml for plain text
+        self.assertIn("escapeHtml(text)", html)
+        # The event-body div must not use innerHTML from marked output
+        self.assertIn("event-body", html)
+        # No <think> Markdown interpretation
+        self.assertNotIn("<think>", html.lower() if False else html)
+        # The marked/DOMPurify path is ONLY for conclusion
+        marked_count = html.count("marked.parse")
+        self.assertEqual(marked_count, 1, "marked.parse should only be called in renderConclusionState")
+
+    def test_dompurify_blocks_xss_via_node(self):
+        """DOMPurify must sanitize out dangerous HTML from conclusion content (verify via Node.js)."""
+        purify_path = ROOT / "skills" / "audit-orch" / "scripts" / "vendor" / "purify.min.js"
+        node_script = (
+            "const fs = require('fs');"
+            "const { JSDOM } = require(" + json.dumps(str(ROOT / "node_modules" / "jsdom" / "lib" / "api.js")) + ");"
+            "const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', { runScripts: 'dangerously' });"
+            "const window = dom.window;"
+            "const scriptEl = window.document.createElement('script');"
+            "scriptEl.textContent = fs.readFileSync(" + json.dumps(str(purify_path)) + ", 'utf-8');"
+            "window.document.body.appendChild(scriptEl);"
+            "const DOMPurify = window.DOMPurify;"
+            "if (!DOMPurify) throw new Error('DOMPurify not found');"
+            "const malicious = '<p>Safe text</p><script>alert(\"xss\")</script><img src=x onerror=alert(1)>';"
+            "const clean = DOMPurify.sanitize(malicious);"
+            "if (!clean.includes('Safe text')) throw new Error('Missing safe text');"
+            "if (clean.includes('<script>')) throw new Error('Script tag not removed');"
+            "if (clean.includes('onerror')) throw new Error('onerror attribute not removed');"
+            "console.log('OK');"
+        )
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(ROOT),
+            )
+            self.assertIn("OK", result.stdout, f"DOMPurify XSS test failed: {result.stderr}")
+        except FileNotFoundError:
+            self.skipTest("Node.js not available")
+
+    def test_marked_parses_commonmark_via_node(self):
+        """marked must convert standard Markdown to HTML (verify via Node.js)."""
+        marked_path = ROOT / "skills" / "audit-orch" / "scripts" / "vendor" / "marked.min.js"
+        node_script = (
+            "const fs = require('fs');"
+            "const { JSDOM } = require(" + json.dumps(str(ROOT / "node_modules" / "jsdom" / "lib" / "api.js")) + ");"
+            "const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', { runScripts: 'dangerously' });"
+            "const window = dom.window;"
+            "const scriptEl = window.document.createElement('script');"
+            "scriptEl.textContent = fs.readFileSync(" + json.dumps(str(marked_path)) + ", 'utf-8');"
+            "window.document.body.appendChild(scriptEl);"
+            "const marked = window.marked;"
+            "if (!marked) throw new Error('marked not found');"
+            "const md = '# Title\\n\\nThis is **bold** and *italic*.\\n\\n* item 1\\n* item 2\\n';"
+            "const html = marked.parse(md, { breaks: true });"
+            "if (!html.includes('<h1')) throw new Error('Missing h1');"
+            "if (!html.includes('<strong>')) throw new Error('Missing strong');"
+            "if (!html.includes('<em>')) throw new Error('Missing em');"
+            "if (!html.includes('<li>')) throw new Error('Missing li');"
+            "if (!html.includes('<p>')) throw new Error('Missing p');"
+            "console.log('OK');"
+        )
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(ROOT),
+            )
+            self.assertIn("OK", result.stdout, f"marked test failed: {result.stderr}")
+        except FileNotFoundError:
+            self.skipTest("Node.js not available")
+
+    def test_marked_and_dompurify_integration_via_node(self):
+        """marked output piped through DOMPurify must produce clean HTML (verify via Node.js)."""
+        marked_path = ROOT / "skills" / "audit-orch" / "scripts" / "vendor" / "marked.min.js"
+        purify_path = ROOT / "skills" / "audit-orch" / "scripts" / "vendor" / "purify.min.js"
+        node_script = (
+            "const fs = require('fs');"
+            "const { JSDOM } = require(" + json.dumps(str(ROOT / "node_modules" / "jsdom" / "lib" / "api.js")) + ");"
+            "const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', { runScripts: 'dangerously' });"
+            "const window = dom.window;"
+            "let scriptEl = window.document.createElement('script');"
+            "scriptEl.textContent = fs.readFileSync(" + json.dumps(str(marked_path)) + ", 'utf-8');"
+            "window.document.body.appendChild(scriptEl);"
+            "scriptEl = window.document.createElement('script');"
+            "scriptEl.textContent = fs.readFileSync(" + json.dumps(str(purify_path)) + ", 'utf-8');"
+            "window.document.body.appendChild(scriptEl);"
+            "const marked = window.marked;"
+            "const DOMPurify = window.DOMPurify;"
+            "const md = '## Conclusion\\n\\nSafe paragraph with `inline code`.\\n\\n```python\\nprint(\"hello\")\\n```\\n\\nMalicious: <script>evil()</script>\\n\\n* item A\\n* item B';"
+            "const rawHtml = marked.parse(md, { breaks: true });"
+            "const clean = DOMPurify.sanitize(rawHtml);"
+            "if (!clean.includes('Conclusion')) throw new Error('Missing heading text');"
+            "if (!clean.includes('<h2')) throw new Error('Missing h2 tag');"
+            "if (!clean.includes('<code>inline code</code>')) throw new Error('Missing inline code');"
+            "if (!clean.includes('<pre><code')) throw new Error('Missing fenced code block');"
+            "if (!clean.includes('<li>item A</li>')) throw new Error('Missing list item');"
+            "if (clean.includes('<script>')) throw new Error('Script tag should be removed');"
+            "if (clean.includes('onerror')) throw new Error('Event handlers should be removed');"
+            "console.log('OK');"
+        )
+        try:
+            result = subprocess.run(
+                ["node", "-e", node_script],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(ROOT),
+            )
+            self.assertIn("OK", result.stdout, f"Integration test failed: {result.stderr}")
+        except FileNotFoundError:
+            self.skipTest("Node.js not available")
+
+    def test_frontend_loading_state_preserved(self):
+        """Conclusion must show readable loading state while AGY is running."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("Waiting for AGY output...", html)
+        self.assertIn("Summarizing...", html)
+
+    def test_frontend_empty_state_preserved(self):
+        """Conclusion must show readable empty state when no conclusion exists."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("No conclusion has been generated.", html)
+
+    # -- Dependency pinning tests --
+
+    def test_marked_dompurify_jsdom_are_pinned_exact(self):
+        """marked, dompurify, and jsdom must use exact versions (no caret/tilde ranges)."""
+        pkg_path = ROOT / "package.json"
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        deps = pkg.get("dependencies", {})
+        dev_deps = pkg.get("devDependencies", {})
+        self.assertEqual(deps.get("marked"), "15.0.12",
+                         "marked must be pinned to exact version 15.0.12")
+        self.assertEqual(deps.get("dompurify"), "3.3.0",
+                         "dompurify must be pinned to exact version 3.3.0")
+        self.assertEqual(dev_deps.get("jsdom"), "26.0.0",
+                         "jsdom must be pinned to exact version 26.0.0")
+
+    def test_package_json_has_no_caret_deps_for_marked_dompurify_jsdom(self):
+        """The raw package.json text must not contain caret ranges for the three deps."""
+        raw = (ROOT / "package.json").read_text(encoding="utf-8")
+        # Look for caret-prefixed versions of our three packages
+        caret_patterns = [
+            re.compile(r'"marked"\s*:\s*"\^'),
+            re.compile(r'"dompurify"\s*:\s*"\^'),
+            re.compile(r'"jsdom"\s*:\s*"\^'),
+        ]
+        for pat in caret_patterns:
+            self.assertIsNone(pat.search(raw),
+                              f"Caret range found in package.json: {pat.pattern}")
 
 
 if __name__ == "__main__":

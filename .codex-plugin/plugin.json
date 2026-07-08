@@ -1,6 +1,6 @@
 {
   "name": "agent-orch",
-  "version": "0.3.0+codex.20260703202149",
+  "version": "0.3.0+codex.20260703221931",
   "description": "CLI-driven Codex workflow for delegating implementation to Claude Code, targeted verification to Antigravity, and read-only monitoring of Agent Orch runs.",
   "author": {
     "name": "Jieli Chen"

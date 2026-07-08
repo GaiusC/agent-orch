@@ -7,6 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="/vendor/marked.min.js" defer></script>
+  <script src="/vendor/purify.min.js" defer></script>
   <style>
     :root {
       --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -284,7 +286,52 @@
     .project-view .subtitle {
       font-size: 0.85rem;
       color: var(--text-secondary);
-      margin-bottom: 20px;
+      margin-bottom: 12px;
+    }
+
+    .project-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .project-path-input {
+      min-width: 0;
+      flex: 1;
+      height: 34px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 0 10px;
+      background: var(--bg-card);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+
+    .project-path-input:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+    .project-toolbar-button,
+    .project-remove-button {
+      border: 1px solid var(--border-color);
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .project-toolbar-button { height: 34px; min-width: 34px; border-radius: 6px; padding: 0 10px; }
+    .project-toolbar-button:hover,
+    .project-remove-button:hover { color: var(--text-primary); border-color: var(--primary); background: var(--bg-card-hover); }
+
+    .project-feedback {
+      min-height: 18px;
+      margin: -10px 0 10px;
+      color: var(--status-failed);
+      font-size: 0.75rem;
     }
 
     .project-grid {
@@ -303,9 +350,22 @@
       display: flex;
       flex-direction: column;
       gap: 8px;
+      position: relative;
+      padding-right: 44px;
     }
 
     .project-card:hover { background-color: var(--bg-card-hover); border-color: var(--primary); }
+
+    .project-remove-button {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      font-size: 1rem;
+      line-height: 1;
+    }
 
     .project-card-name {
       font-size: 1rem;
@@ -860,6 +920,111 @@
     .md-text p { font-size: 0.85rem; margin-bottom: 10px; line-height: 1.4; }
     .md-text ul { margin-left: 20px; margin-bottom: 10px; font-size: 0.85rem; }
 
+    /* -- Conclusion Markdown (rendered via marked + DOMPurify) -- */
+    .conclusion-md { color: var(--text-primary); line-height: 1.6; font-size: 0.88rem; }
+
+    .conclusion-md h1,
+    .conclusion-md h2,
+    .conclusion-md h3,
+    .conclusion-md h4,
+    .conclusion-md h5,
+    .conclusion-md h6 {
+      color: var(--text-primary);
+      margin: 16px 0 8px 0;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+    .conclusion-md h1 { font-size: 1.3rem; border-bottom: 1px solid var(--border-color); padding-bottom: 6px; }
+    .conclusion-md h2 { font-size: 1.15rem; }
+    .conclusion-md h3 { font-size: 1.05rem; }
+    .conclusion-md h4 { font-size: 0.95rem; color: var(--primary); }
+    .conclusion-md h5 { font-size: 0.88rem; }
+    .conclusion-md h6 { font-size: 0.82rem; color: var(--text-muted); }
+
+    .conclusion-md p { margin-bottom: 10px; }
+
+    .conclusion-md ul,
+    .conclusion-md ol {
+      margin: 6px 0 12px 24px;
+      padding: 0;
+    }
+    .conclusion-md li { margin-bottom: 4px; }
+
+    .conclusion-md a {
+      color: var(--primary);
+      text-decoration: underline;
+    }
+    .conclusion-md a:hover { color: var(--primary-hover); }
+
+    .conclusion-md blockquote {
+      border-left: 3px solid var(--primary);
+      margin: 10px 0;
+      padding: 6px 14px;
+      background: var(--primary-bg);
+      border-radius: 0 6px 6px 0;
+      color: var(--text-secondary);
+    }
+
+    .conclusion-md table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0 16px 0;
+      font-size: 0.82rem;
+    }
+    .conclusion-md th,
+    .conclusion-md td {
+      border: 1px solid var(--border-color);
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .conclusion-md th {
+      background-color: var(--bg-sidebar);
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .conclusion-md tr:nth-child(even) { background-color: rgba(128, 128, 128, 0.05); }
+
+    .conclusion-md code {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      background-color: var(--bg-app);
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid var(--border-color);
+    }
+
+    .conclusion-md pre {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      background-color: var(--bg-app);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 12px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      margin: 10px 0 16px 0;
+    }
+    .conclusion-md pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      font-size: inherit;
+    }
+
+    .conclusion-md hr {
+      border: none;
+      border-top: 1px solid var(--border-color);
+      margin: 16px 0;
+    }
+
+    .conclusion-md strong { font-weight: 600; }
+    .conclusion-md em { font-style: italic; }
+
+    .conclusion-md img {
+      max-width: 100%;
+      border-radius: 6px;
+    }
+
     .empty-state { text-align: center; padding: 50px 20px; color: var(--text-secondary); }
 
     /* -- Responsive -- */
@@ -958,6 +1123,8 @@
     let processesCollapsed = localStorage.getItem('agentOrchAuditProcessesCollapsed') === 'true';
     let metadataExpanded = false;
     const TOOL_LINE_LIMIT = 3;
+    const PROJECT_PREFS_KEY = 'agentOrchAuditProjectPreferences';
+    let projectPreferences = readProjectPreferences();
 
     // -- Init --
     (function init() {
@@ -1007,6 +1174,70 @@
       return url.pathname + url.search;
     }
 
+    function projectKey(path) {
+      return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    }
+
+    function readProjectPreferences() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(PROJECT_PREFS_KEY) || '{}');
+        return {
+          customPaths: Array.isArray(saved.customPaths) ? saved.customPaths : [],
+          hiddenPaths: Array.isArray(saved.hiddenPaths) ? saved.hiddenPaths : [],
+        };
+      } catch {
+        return { customPaths: [], hiddenPaths: [] };
+      }
+    }
+
+    function saveProjectPreferences() {
+      localStorage.setItem(PROJECT_PREFS_KEY, JSON.stringify(projectPreferences));
+    }
+
+    function setProjectFeedback(message) {
+      const feedback = document.getElementById('projectFeedback');
+      if (feedback) feedback.textContent = message || '';
+    }
+
+    async function addProjectPath() {
+      const input = document.getElementById('projectPathInput');
+      const projectPath = input?.value.trim();
+      if (!projectPath) return;
+      setProjectFeedback('');
+      try {
+        const url = new URL('/api/project-info', window.location.origin);
+        url.searchParams.set('project', projectPath);
+        const res = await fetch(url.pathname + url.search);
+        const info = await res.json();
+        if (!res.ok || info.error) throw new Error(info.error || `HTTP ${res.status}`);
+        const key = projectKey(info.path);
+        projectPreferences.customPaths = projectPreferences.customPaths.filter(path => projectKey(path) !== key);
+        projectPreferences.customPaths.push(info.path);
+        projectPreferences.hiddenPaths = projectPreferences.hiddenPaths.filter(path => projectKey(path) !== key);
+        saveProjectPreferences();
+        input.value = '';
+        loadProjects();
+      } catch (err) {
+        setProjectFeedback(String(err));
+      }
+    }
+
+    function removeProjectPath(projectPath) {
+      const key = projectKey(projectPath);
+      projectPreferences.customPaths = projectPreferences.customPaths.filter(path => projectKey(path) !== key);
+      if (!projectPreferences.hiddenPaths.some(path => projectKey(path) === key)) {
+        projectPreferences.hiddenPaths.push(projectPath);
+      }
+      saveProjectPreferences();
+      loadProjects();
+    }
+
+    function resetProjectDisplay() {
+      projectPreferences.hiddenPaths = [];
+      saveProjectPreferences();
+      loadProjects();
+    }
+
     // -- Project List --
     async function loadProjects() {
       const container = document.getElementById('dashboardView');
@@ -1014,18 +1245,40 @@
       try {
         const projRes = await fetch('/api/projects');
         const data = await projRes.json();
-        const projects = data.projects || data;
+        const discovered = data.projects || data;
+        const customResults = await Promise.all(projectPreferences.customPaths.map(async projectPath => {
+          try {
+            const url = new URL('/api/project-info', window.location.origin);
+            url.searchParams.set('project', projectPath);
+            const res = await fetch(url.pathname + url.search);
+            const info = await res.json();
+            return res.ok && !info.error ? { ...info, manual: true } : null;
+          } catch {
+            return null;
+          }
+        }));
+        const merged = new Map();
+        discovered.forEach(project => merged.set(projectKey(project.path), project));
+        customResults.filter(Boolean).forEach(project => merged.set(projectKey(project.path), { ...merged.get(projectKey(project.path)), ...project }));
+        const hidden = new Set(projectPreferences.hiddenPaths.map(projectKey));
+        const projects = Array.from(merged.values()).filter(project => !hidden.has(projectKey(project.path)));
         if (!projects || projects.length === 0) {
-          container.innerHTML = '<div class="empty-state">No projects discovered.</div>';
+          container.innerHTML = `<div class="project-view">
+            <h2>Known Projects</h2>
+            ${projectToolbarHtml()}
+            <div class="empty-state">No projects displayed.</div>
+          </div>`;
           return;
         }
 
         container.innerHTML = `<div class="project-view">
           <h2>Known Projects</h2>
-          <p class="subtitle">${projects.length} project(s) discovered. Click to open dashboard.</p>
+          <p class="subtitle">${projects.length} project(s) displayed.</p>
+          ${projectToolbarHtml()}
           <div class="project-grid">
             ${projects.map(p => {
               return `<div class="project-card" data-project-path="${escapeHtml(p.path)}" title="${escapeHtml(p.path)}">
+                <button class="project-remove-button" data-remove-project="${escapeHtml(p.path)}" title="Remove project" aria-label="Remove project">&times;</button>
                 <div class="project-card-name">
                   ${escapeHtml(p.display_name || p.path)}
                   ${p.active_jobs > 0 ? '<span class="running-badge">running</span>' : ''}
@@ -1043,6 +1296,14 @@
       } catch (err) {
         container.innerHTML = `<div class="empty-state">Failed to load projects: ${escapeHtml(String(err))}</div>`;
       }
+    }
+
+    function projectToolbarHtml() {
+      return `<div class="project-toolbar">
+        <input class="project-path-input" id="projectPathInput" type="text" placeholder="C:\\path\\to\\project" aria-label="Project path">
+        <button class="project-toolbar-button" onclick="addProjectPath()" title="Add project" aria-label="Add project">+</button>
+        <button class="project-toolbar-button" onclick="resetProjectDisplay()" title="Restore rule-discovered projects" aria-label="Restore rule-discovered projects">Reset</button>
+      </div><div class="project-feedback" id="projectFeedback" role="status"></div>`;
     }
 
     // -- Dashboard Load --
@@ -1441,7 +1702,19 @@
           : state === 'failed'
             ? `Failed: ${data.error || 'Unknown error'}`
             : 'No conclusion has been generated.';
-      output.textContent = data?.conclusion || (state === 'running' ? 'Waiting for AGY output...' : '');
+      const raw = data?.conclusion || (state === 'running' ? 'Waiting for AGY output...' : '');
+      if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+        const html = marked.parse(raw, { breaks: true });
+        output.innerHTML = DOMPurify.sanitize(html, { ALLOWED_TAGS: [
+          'h1','h2','h3','h4','h5','h6','p','br','hr',
+          'ul','ol','li','dl','dt','dd',
+          'table','thead','tbody','tr','th','td',
+          'blockquote','pre','code','em','strong','del','ins',
+          'a','img','span','div',
+        ], ALLOWED_ATTR: ['href','title','alt','src','width','height','class','id','target'] });
+      } else {
+        output.textContent = raw;
+      }
     }
 
     async function loadConclusion() {
@@ -1475,7 +1748,7 @@
           <button class="conclusion-button" data-action="runConclusion" onclick="requestConclusion()">Generate Conclusion</button>
           <span class="conclusion-status" data-field="conclusionStatus">No conclusion has been generated.</span>
         </div>
-        <pre data-field="conclusionText"></pre>
+        <div class="conclusion-md" data-field="conclusionText"></div>
       </div>`;
     }
 
@@ -1731,11 +2004,20 @@
 
     // -- Delegated project card click handler --
     document.getElementById('dashboardView').addEventListener('click', function(e) {
+      const removeButton = e.target.closest('[data-remove-project]');
+      if (removeButton) {
+        e.stopPropagation();
+        removeProjectPath(removeButton.getAttribute('data-remove-project'));
+        return;
+      }
       const card = e.target.closest('.project-card');
       if (card) {
         const projectPath = card.getAttribute('data-project-path');
         if (projectPath) navigateToProject(projectPath);
       }
+    });
+    document.getElementById('dashboardView').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && e.target.id === 'projectPathInput') addProjectPath();
     });
   </script>
 </body>
