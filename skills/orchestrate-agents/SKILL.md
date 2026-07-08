@@ -76,7 +76,7 @@ Make architecture, dependency, schema, security, and scope decisions in Codex. L
 
 Do not ask CC and AGY to implement the same solution. AGY write is a primary writer, not a duplicate. Use AGY investigation/verify as a real workflow gate for high-risk, user-facing, remote-runtime, database, authentication, migration, security, or ambiguous behavior changes. If AGY is unavailable, report the missing gate and either reduce scope to low-risk deterministic checks or ask the user before accepting higher-risk work.
 
-Read [routing-and-sessions.md](references/routing-and-sessions.md) for session rollover, model escalation, failure routing, and quota fallback.
+Read [routing-and-sessions.md](references/routing-and-sessions.md) for session rollover, model escalation, CC-first auto routing, CC-to-AGY escalation on verify failure, and quota fallback.
 
 ## Accept or reject
 

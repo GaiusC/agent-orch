@@ -34,8 +34,9 @@ export const DEFAULT_CONFIG = {
     },
   },
   routing: {
-    auto: "agy_preferred",
+    auto: "cc_first",
     agy_write_fallback_to_cc_on_quota: true,
+    cc_verify_fail_escalate_to_agy: true,
   },
   cli: {
     claude: process.env.AGENT_ORCH_CLAUDE_BIN || process.env.EAO_CLAUDE_BIN || "claude",
@@ -160,10 +161,12 @@ export function chooseAgyWriteModel(config, complexity = "medium") {
 }
 
 export function autoRouteProvider(config, complexity) {
-  const policy = config.routing?.auto || "agy_preferred";
-  // agy_preferred (default): low -> CC, medium/high -> AGY write.
-  // Legacy values: "agy" is the same as agy_preferred. "cc" sends
-  // everything through CC (no AGY write at any complexity).
+  const policy = config.routing?.auto || "cc_first";
+  // cc_first (default): all complexities start with CC; AGY escalation after CC verify failure.
+  // Legacy values: "agy_preferred" (low -> CC, medium/high -> AGY write) and "cc" (all -> CC).
+  if (policy === "cc_first") {
+    return "cc";
+  }
   if (policy === "agy_preferred" || policy === "agy") {
     if (complexity === "low") return "cc";
     return "agy";

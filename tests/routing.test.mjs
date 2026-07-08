@@ -65,14 +65,21 @@ async function createProject(root, overrides = {}) {
 
 // -- Config unit tests --
 
-test("autoRouteProvider default (no routing.auto) is agy_preferred", () => {
+test("autoRouteProvider default (no routing.auto) is cc_first", () => {
   const config = {};
   assert.equal(autoRouteProvider(config, "low"), "cc");
-  assert.equal(autoRouteProvider(config, "medium"), "agy");
-  assert.equal(autoRouteProvider(config, "high"), "agy");
+  assert.equal(autoRouteProvider(config, "medium"), "cc");
+  assert.equal(autoRouteProvider(config, "high"), "cc");
 });
 
-test("autoRouteProvider with agy_preferred routes low->cc, medium/high->agy", () => {
+test("autoRouteProvider with cc_first routes all complexities to CC", () => {
+  const config = { routing: { auto: "cc_first" } };
+  assert.equal(autoRouteProvider(config, "low"), "cc");
+  assert.equal(autoRouteProvider(config, "medium"), "cc");
+  assert.equal(autoRouteProvider(config, "high"), "cc");
+});
+
+test("autoRouteProvider with agy_preferred routes low->cc, medium/high->agy (legacy)", () => {
   const config = { routing: { auto: "agy_preferred" } };
   assert.equal(autoRouteProvider(config, "low"), "cc");
   assert.equal(autoRouteProvider(config, "medium"), "agy");
@@ -108,7 +115,7 @@ test("chooseAgyWriteModel respects config override", () => {
 
 // -- CLI integration: auto routes low -> CC --
 
-test("auto CLI command routes low complexity to CC", async (t) => {
+test("auto CLI command routes low complexity to CC with deepseek-v4-flash", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-auto-low-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
@@ -123,20 +130,15 @@ test("auto CLI command routes low complexity to CC", async (t) => {
 
   const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
   assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.auto_route, "cc");
   assert.equal(result.job.status, "completed", result.job.error);
   assert.equal(result.evidence.status, "ready_for_acceptance");
+  assert.equal(result.evidence.model, "deepseek-v4-flash");
 });
 
-// -- CLI integration: auto routes medium -> AGY write --
+// -- CLI integration: auto routes medium -> CC with cc_first default --
 
-test("auto CLI command routes medium complexity to AGY write", async (t) => {
-  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
-  t.after(() => {
-    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
-  });
-
+test("auto CLI command routes medium complexity to CC with deepseek-v4-flash", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-auto-med-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
@@ -150,22 +152,16 @@ test("auto CLI command routes medium complexity to AGY write", async (t) => {
   }, null, 2));
 
   const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "agy_write");
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.auto_route, "cc");
   assert.equal(result.job.status, "completed", result.job.error);
   assert.equal(result.evidence.status, "ready_for_acceptance");
-  assert.equal(result.evidence.model, "Claude Sonnet 4.6 (Thinking)");
+  assert.equal(result.evidence.model, "deepseek-v4-flash");
 });
 
-// -- CLI integration: auto routes high -> AGY write with Opus --
+// -- CLI integration: auto routes high -> CC with deepseek-v4-pro --
 
-test("auto CLI command routes high complexity to AGY write with Opus model", async (t) => {
-  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
-  t.after(() => {
-    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
-  });
-
+test("auto CLI command routes high complexity to CC with deepseek-v4-pro", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-auto-high-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
@@ -179,6 +175,64 @@ test("auto CLI command routes high complexity to AGY write with Opus model", asy
   }, null, 2));
 
   const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.auto_route, "cc");
+  assert.equal(result.job.status, "completed", result.job.error);
+  assert.equal(result.evidence.model, "deepseek-v4-pro");
+});
+
+// -- Legacy agy_preferred: medium/high routes to AGY write --
+
+test("auto CLI command with agy_preferred routes medium to AGY write", async (t) => {
+  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
+  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
+  t.after(() => {
+    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
+    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
+  });
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-legacy-agy-med-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root, { routing: { auto: "agy_preferred", agy_write_fallback_to_cc_on_quota: true } });
+
+  const contractPath = path.join(root, "contract.json");
+  await fs.writeFile(contractPath, JSON.stringify({
+    task_id: "legacy-agy-med",
+    goal: "Create feature.txt containing good",
+    plan: "Implement and verify",
+    complexity: "medium",
+  }, null, 2));
+
+  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
+  assert.equal(result.job.provider, "agy_write");
+  assert.equal(result.job.status, "completed", result.job.error);
+  assert.equal(result.evidence.status, "ready_for_acceptance");
+  assert.equal(result.evidence.model, "Claude Sonnet 4.6 (Thinking)");
+});
+
+// -- Legacy agy_preferred: high routes to AGY write with Opus --
+
+test("auto CLI command with agy_preferred routes high to AGY write with Opus", async (t) => {
+  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
+  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
+  t.after(() => {
+    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
+    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
+  });
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-legacy-agy-high-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root, { routing: { auto: "agy_preferred", agy_write_fallback_to_cc_on_quota: true } });
+
+  const contractPath = path.join(root, "contract.json");
+  await fs.writeFile(contractPath, JSON.stringify({
+    task_id: "legacy-agy-high",
+    goal: "Create feature.txt containing good",
+    plan: "Implement and verify",
+    complexity: "high",
+  }, null, 2));
+
+  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
   assert.equal(result.job.provider, "agy_write");
   assert.equal(result.job.status, "completed", result.job.error);
   assert.equal(result.evidence.model, "Claude Opus 4.6 (Thinking)");
@@ -186,7 +240,7 @@ test("auto CLI command routes high complexity to AGY write with Opus model", asy
 
 // -- Legacy config compatibility: primary_writer=cc still works with auto --
 
-test("auto command works with legacy primary_writer=cc config", async (t) => {
+test("auto command works with legacy primary_writer=cc config (agy_preferred routing)", async (t) => {
   const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
   process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
   t.after(() => {
@@ -196,8 +250,8 @@ test("auto command works with legacy primary_writer=cc config", async (t) => {
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-legacy-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  // Create config without routing section (simulating legacy config)
-  const project = await createProject(root, { routing: undefined });
+  // Create config with explicit agy_preferred routing (simulating legacy config)
+  const project = await createProject(root, { routing: { auto: "agy_preferred", agy_write_fallback_to_cc_on_quota: true } });
   // Manually remove routing field to simulate pre-upgrade config
   const configPath = path.join(project, ".agent-orchestrator", "config.json");
   let config = JSON.parse(await fs.readFile(configPath, "utf8"));
@@ -214,8 +268,169 @@ test("auto command works with legacy primary_writer=cc config", async (t) => {
   }, null, 2));
 
   const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "agy_write");
+  // With no routing section and cc_first default, medium routes to CC
+  assert.equal(result.job.provider, "cc");
   assert.equal(result.job.status, "completed", result.job.error);
+});
+
+// -- CC verification failure escalates to AGY write --
+
+test("CC verification failure escalates to AGY write with Claude Sonnet 4.6 (Thinking)", async (t) => {
+  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
+  const previousAgyMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
+  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
+  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
+  t.after(() => {
+    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
+    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
+    if (previousAgyMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
+    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousAgyMode;
+  });
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-cc-fail-agy-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root, {
+    routing: { auto: "cc_first", cc_verify_fail_escalate_to_agy: true, agy_write_fallback_to_cc_on_quota: true },
+  });
+  // Disable auth probe so fake AGY write works
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.agy.auth_probe_required = false;
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const contractPath = path.join(root, "contract.json");
+  await fs.writeFile(contractPath, JSON.stringify({
+    task_id: "cc-fail-agy",
+    goal: "Create feature.txt containing good",
+    plan: "Implement and verify",
+    complexity: "medium",
+  }, null, 2));
+
+  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
+  // Should have escalated to AGY write after CC failed verification
+  assert.equal(result.job.provider, "agy_write");
+  assert.equal(result.job.auto_route, "cc_then_agy_escalation");
+  assert.equal(result.job.auto_fallback_classifier, "cc_verification_failed");
+  assert.equal(result.job.status, "completed", result.job.error);
+  assert.equal(result.evidence.model, "Claude Sonnet 4.6 (Thinking)");
+  assert.equal(result.evidence.auto_route.provider, "agy_write");
+  assert.equal(result.evidence.auto_route.fallback_occurred, true);
+  assert.equal(result.evidence.auto_route.original_provider, "cc");
+  assert.equal(result.evidence.auto_route.reason, "cc_verification_failed");
+  assert.ok(result.evidence.auto_route.cc_attempts >= 2, "should have at least 2 CC attempts");
+});
+
+// -- AGY quota during CC verification escalation falls back to CC high --
+
+test("AGY quota during escalation falls back to CC high with deepseek-v4-pro", async (t) => {
+  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
+  const previousAgyMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
+  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
+  process.env.AGENT_ORCH_FAKE_AGY_MODE = "quota-error";
+  t.after(() => {
+    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
+    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
+    if (previousAgyMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
+    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousAgyMode;
+  });
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-agyquota-esc-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root, {
+    routing: { auto: "cc_first", cc_verify_fail_escalate_to_agy: true, agy_write_fallback_to_cc_on_quota: true },
+  });
+  // Disable auth probe so fake AGY works (to get the quota error)
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.agy.auth_probe_required = false;
+  config.models = config.models || {};
+  config.models.cc = { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const contractPath = path.join(root, "contract.json");
+  await fs.writeFile(contractPath, JSON.stringify({
+    task_id: "agyquota-esc",
+    goal: "Create feature.txt containing good",
+    plan: "Implement and verify",
+    complexity: "medium",
+  }, null, 2));
+
+  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
+  // CC failed -> AGY escalation hit quota -> fell back to CC high
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.auto_route, "cc_fallback_after_agy_quota");
+  assert.equal(result.job.auto_fallback_classifier, "agy_quota_during_escalation");
+  assert.equal(result.evidence.model, "deepseek-v4-pro");
+  assert.equal(result.job.status, "completed", result.job.error);
+  assert.equal(result.evidence.auto_route.provider, "cc");
+  assert.equal(result.evidence.auto_route.fallback_occurred, true);
+  assert.equal(result.evidence.auto_route.reason, "agy_quota_during_escalation");
+  assert.deepEqual(result.evidence.auto_route.escalation_chain, ["cc", "agy_write", "cc_high"]);
+});
+
+// -- No silent escalation when CC disable escalation --
+
+test("auto does NOT escalate to AGY when cc_verify_fail_escalate_to_agy is false", async (t) => {
+  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
+  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
+  t.after(() => {
+    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
+    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
+  });
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-noesc-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root, {
+    routing: { auto: "cc_first", cc_verify_fail_escalate_to_agy: false, agy_write_fallback_to_cc_on_quota: true },
+  });
+
+  const contractPath = path.join(root, "contract.json");
+  await fs.writeFile(contractPath, JSON.stringify({
+    task_id: "noesc",
+    goal: "Create feature.txt containing good",
+    plan: "Implement and verify",
+    complexity: "medium",
+  }, null, 2));
+
+  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
+  // Escalation disabled - CC failure should stand as is
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.status, "failed", "CC should remain failed when escalation is disabled");
+});
+
+// -- No escalation when attempts < 2 --
+
+test("auto does NOT escalate to AGY when CC makes only 1 attempt (insufficient cycles)", async (t) => {
+  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
+  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
+  t.after(() => {
+    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
+    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
+  });
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-nocycle-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root, {
+    routing: { auto: "cc_first", cc_verify_fail_escalate_to_agy: true, agy_write_fallback_to_cc_on_quota: true },
+  });
+  // Reduce repair rounds to 0 so CC makes only 1 attempt
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.execution.max_cc_repair_rounds = 0;
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const contractPath = path.join(root, "contract.json");
+  await fs.writeFile(contractPath, JSON.stringify({
+    task_id: "nocycle",
+    goal: "Create feature.txt containing good",
+    plan: "Implement and verify",
+    complexity: "medium",
+  }, null, 2));
+
+  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
+  // Only 1 attempt - no escalation
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.status, "failed", "CC should remain failed with only 1 attempt");
 });
 
 // -- AGY exec/continue CLI commands --

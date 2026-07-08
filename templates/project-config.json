@@ -29,8 +29,9 @@
     }
   },
   "routing": {
-    "auto": "agy_preferred",
-    "agy_write_fallback_to_cc_on_quota": true
+    "auto": "cc_first",
+    "agy_write_fallback_to_cc_on_quota": true,
+    "cc_verify_fail_escalate_to_agy": true
   },
   "cli": {
     "claude": "claude",

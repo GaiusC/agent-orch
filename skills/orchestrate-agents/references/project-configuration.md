@@ -48,8 +48,9 @@ When the current host is Codex, `providers.codex.external_invocation` must disab
 
 ## Routing
 
-- `routing.auto`: `"agy_preferred"` (default) routes low complexity to CC and medium/high to AGY write with Thinking models. Legacy values `"cc"` (all to CC) and `"agy"` (same as agy_preferred) remain compatible.
+- `routing.auto`: `"cc_first"` (default) routes all complexities to CC. After two failed CC verification/review cycles, escalates to AGY write with `Claude Sonnet 4.6 (Thinking)`. Legacy values: `"agy_preferred"` (low to CC, medium/high to AGY write with Thinking models) and `"cc"` (all to CC without escalation) remain compatible.
 - `routing.agy_write_fallback_to_cc_on_quota`: default `true`. When AGY write fails with a quota/credit/rate-exhaustion error, the auto router cleans up the AGY workspace and retries with CC. Set to `false` only when you want quota errors to surface directly.
+- `routing.cc_verify_fail_escalate_to_agy`: default `true`. When CC completes with `verification_failed` after at least two verification/review cycles, the auto router escalates the contract to AGY write using `Claude Sonnet 4.6 (Thinking)`. Set to `false` to disable this escalation and let CC failures stand as-is.
 
 ## Execution
 

@@ -20,27 +20,29 @@ Agent Orch supports three implementation paths:
 | --- | --- | --- |
 | CC implementation | `cc-exec` / `cc-continue` | Claude Code as the primary writer (isolated worktree + patch + verify + apply/cleanup) |
 | AGY write | `agy-exec` / `agy-continue` | Antigravity as the primary writer with Thinking models (same worktree/patch/verify/apply cycle) |
-| Automatic | `auto` | Complexity-based routing: low -> CC, medium -> AGY with Claude Sonnet 4.6 (Thinking), high -> AGY with Claude Opus 4.6 (Thinking) |
+| Automatic | `auto` | CC-first routing: all complexities start with CC. Low/medium use deepseek-v4-flash, high uses deepseek-v4-pro. After two failed CC verification cycles, escalates to AGY write with Claude Sonnet 4.6 (Thinking). |
 
 ### Model defaults
 
 CC uses a two-tier default policy:
-- **Low and medium** complexity -> `deepseek-v4-flash` (for cc-exec, cc-continue, low auto routing, and CC fallback)
+- **Low and medium** complexity -> `deepseek-v4-flash` (for cc-exec, cc-continue, and all auto routing)
 - **High** complexity -> `deepseek-v4-pro`
 - Per-contract explicit model overrides take priority over defaults
 
 AGY read-only (investigate/verify): Gemini 3.5 Flash (low) / Gemini 3.1 Pro (medium/high)
 AGY write: Claude Sonnet 4.6 (Thinking) (medium) / Claude Opus 4.6 (Thinking) (high)
 
-### Automatic routing with quota fallback
+### Automatic routing with CC-first + AGY escalation
 
-The `auto` command routes low-complexity contracts directly to CC. For medium and high contracts, it uses AGY with specific Thinking models. If AGY returns a quota/credit/rate-exhaustion error, the router automatically cleans up the failed AGY workspace and retries with CC, recording route and fallback evidence. Other AGY failures (authentication, permission, internal errors) are NOT silently swallowed -- they surface normally so Codex can respond.
+The `auto` command routes all implementation contracts to CC by default. Low and medium complexity use `deepseek-v4-flash`; high complexity uses `deepseek-v4-pro`. If CC completes with `verification_failed` after at least two verification/review cycles (the initial attempt plus at least one repair), the router escalates the contract to AGY write using the exact model `Claude Sonnet 4.6 (Thinking)`. If AGY write fails with a quota/credit/rate-exhaustion error during escalation, the router cleans up the AGY workspace and retries with CC at high complexity using `deepseek-v4-pro`, recording the full escalation chain as evidence. Other AGY failures (authentication, permission, internal errors) are NOT silently swallowed - they surface normally so Codex can respond.
+
+Direct `agy-exec` and `agy-continue` commands bypass the auto router and write with AGY directly.
 
 Provider-aware calibration: ordinary work estimated as CC-high may generally be treated as AGY-medium/Sonnet. Reserve AGY-high/Opus for exceptional complexity or risk.
 
 ### Migration compatibility
 
-The default `routing.auto` policy is `"agy_preferred"` (low -> CC, medium/high -> AGY write). Legacy configs with `routing.auto: "cc"` route all contracts to CC. Legacy configs with `"agy"` behave identically to `"agy_preferred"`. Existing project configs with `primary_writer: "cc"` still work without changes.
+The default `routing.auto` policy is `"cc_first"` (all complexities route to CC; AGY escalation after CC verification failure). Legacy configs with `routing.auto: "agy_preferred"` route low to CC and medium/high to AGY write. Legacy configs with `"cc"` route all contracts to CC without escalation. Existing project configs with `primary_writer: "cc"` still work without changes.
 
 ## Parallel allocation policy
 

@@ -345,98 +345,223 @@ export class WorkerOrchestrator {
     });
   }
 
-  // -- Auto routing execution (complexity -> provider + quota fallback to CC) --
+  // -- Auto routing execution (CC-first with AGY escalation on verify failure) --
 
   async executeAuto(job, config, signal) {
     const jobDir = this.store.jobDir(job.id);
     const provider = job.auto_route || "cc";
 
-    if (provider === "cc") {
-      // Low complexity -> CC directly
-      await this.store.updateJob(job.id, { provider: "cc", status: "running", phase: "executing", started_at: nowIso(), auto_route: "cc" });
+    if (provider === "agy") {
+      // Legacy agy_preferred path for medium/high: AGY write with quota fallback.
+      await this.store.updateJob(job.id, { provider: "agy_write", status: "running", phase: "executing", started_at: nowIso(), auto_route: "agy_write" });
       try {
-        await this.executeCcImpl(job, config, signal, jobDir);
+        await this.executeAgyWriteImpl(job, config, signal, jobDir);
+        const evidencePath = path.join(jobDir, "evidence.json");
+        if (await pathExists(evidencePath)) {
+          const evidence = JSON.parse(await fs.readFile(evidencePath, "utf8"));
+          evidence.auto_route = { provider: "agy_write", fallback_occurred: false };
+          await writeJsonAtomic(evidencePath, evidence);
+        }
       } catch (error) {
-        // CC failures bubble up normally -- no fallback
-        throw error;
+        const errorText = error?.stack || error?.message || String(error);
+        const isQuotaError = classifyAgyQuotaError(errorText);
+        if (isQuotaError && config.routing?.agy_write_fallback_to_cc_on_quota !== false) {
+          const runningJob = await this.store.getJob(job.id);
+          const jobWorkspace = runningJob?.workspace;
+          const agySession = await this.store.getSession(job.project_dir, "agy_write", job.task_id);
+          const workspaceToClean = jobWorkspace?.path || agySession?.workspace_path;
+          if (workspaceToClean) {
+            await cleanupWorkspace({
+              originalProjectDir: job.project_dir,
+              workspacePath: workspaceToClean,
+              mode: jobWorkspace?.mode || agySession?.workspace_mode || "isolated",
+              logDir: jobDir,
+            }).catch(() => {});
+          }
+          try { await this.store.clearSession(job.project_dir, "agy_write", job.task_id); } catch {}
+          await this.store.updateJob(job.id, {
+            provider: "cc",
+            phase: "executing",
+            auto_route: "cc_fallback",
+            auto_fallback_reason: truncate(errorText, 500),
+            auto_fallback_classifier: "quota_exhaustion",
+          });
+          try {
+            await this.executeCcImpl({
+              ...job,
+              provider: "cc",
+              auto_route: "cc_fallback",
+              auto_fallback_classifier: "quota_exhaustion",
+              auto_fallback_reason: truncate(errorText, 500),
+              auto_route_evidence: {
+                provider: "cc",
+                fallback_occurred: true,
+                original_provider: "agy_write",
+                reason: "quota_exhaustion",
+                original_error: truncate(errorText, 500),
+              },
+            }, config, signal, jobDir);
+            const fbEvidencePath = path.join(jobDir, "evidence.json");
+            if (await pathExists(fbEvidencePath)) {
+              const fbEvidence = JSON.parse(await fs.readFile(fbEvidencePath, "utf8"));
+              fbEvidence.auto_route = fbEvidence.auto_route || job.auto_route_evidence || {
+                provider: "cc",
+                fallback_occurred: true,
+                original_provider: "agy_write",
+                reason: "quota_exhaustion",
+                original_error: truncate(errorText, 500),
+              };
+              await writeJsonAtomic(fbEvidencePath, fbEvidence);
+            }
+          } catch (ccError) {
+            throw ccError;
+          }
+          return;
+        }
+        throw error; // Non-quota error - do NOT fall back silently
       }
       return;
     }
 
-    // Medium/high complexity -> AGY write, with quota fallback
-    await this.store.updateJob(job.id, { provider: "agy_write", status: "running", phase: "executing", started_at: nowIso(), auto_route: "agy_write" });
-    try {
-      await this.executeAgyWriteImpl(job, config, signal, jobDir);
-      // Successful AGY write -- record route evidence
-      const evidencePath = path.join(jobDir, "evidence.json");
-      if (await pathExists(evidencePath)) {
-        const evidence = JSON.parse(await fs.readFile(evidencePath, "utf8"));
-        evidence.auto_route = { provider: "agy_write", fallback_occurred: false };
-        await writeJsonAtomic(evidencePath, evidence);
-      }
-    } catch (error) {
-      const errorText = error?.stack || error?.message || String(error);
-      const isQuotaError = classifyAgyQuotaError(errorText);
+    // CC-first path (default): all complexities start with CC.
+    await this.store.updateJob(job.id, { provider: "cc", status: "running", phase: "executing", started_at: nowIso(), auto_route: "cc" });
 
-      if (isQuotaError && config.routing?.agy_write_fallback_to_cc_on_quota !== false) {
-        // Quota exhausted -- clean up failed AGY workspace and fall back to CC.
-        // Use the job's stored workspace as the primary source; the session
-        // workspace is a secondary fallback for pre-session failures.
-        const runningJob = await this.store.getJob(job.id);
-        const jobWorkspace = runningJob?.workspace;
-        const agySession = await this.store.getSession(job.project_dir, "agy_write", job.task_id);
-        const workspaceToClean = jobWorkspace?.path || agySession?.workspace_path;
-        if (workspaceToClean) {
-          await cleanupWorkspace({
-            originalProjectDir: job.project_dir,
-            workspacePath: workspaceToClean,
-            mode: jobWorkspace?.mode || agySession?.workspace_mode || "isolated",
-            logDir: jobDir,
-          }).catch(() => {});
-        }
-        try { await this.store.clearSession(job.project_dir, "agy_write", job.task_id); } catch {}
-        await this.store.updateJob(job.id, {
-          provider: "cc",
-          phase: "executing",
-          auto_route: "cc_fallback",
-          auto_fallback_reason: truncate(errorText, 500),
-          auto_fallback_classifier: "quota_exhaustion",
-        });
-        try {
-          await this.executeCcImpl({
-            ...job,
-            provider: "cc",
-            auto_route: "cc_fallback",
-            auto_fallback_classifier: "quota_exhaustion",
-            auto_fallback_reason: truncate(errorText, 500),
-            auto_route_evidence: {
-              provider: "cc",
-              fallback_occurred: true,
-              original_provider: "agy_write",
-              reason: "quota_exhaustion",
-              original_error: truncate(errorText, 500),
-            },
-          }, config, signal, jobDir);
-          const evidencePath = path.join(jobDir, "evidence.json");
-          if (await pathExists(evidencePath)) {
-            const evidence = JSON.parse(await fs.readFile(evidencePath, "utf8"));
-            evidence.auto_route = evidence.auto_route || job.auto_route_evidence || {
-              provider: "cc",
-              fallback_occurred: true,
-              original_provider: "agy_write",
-              reason: "quota_exhaustion",
-              original_error: truncate(errorText, 500),
-            };
-            await writeJsonAtomic(evidencePath, evidence);
-          }
-        } catch (ccError) {
-          throw ccError; // Both AGY and CC failed
-        }
-        return;
-      }
-      // Non-quota error -- do NOT fall back silently
+    // Run CC implementation
+    try {
+      await this.executeCcImpl(job, config, signal, jobDir);
+    } catch (error) {
+      // CC execution error (timeout, cancellation, execution failure) - bubble up.
       throw error;
     }
+
+    // Check CC result for verification failure that warrants AGY escalation
+    const ccJob = await this.store.getJob(job.id);
+    let ccEvidence = null;
+    if (ccJob?.evidence_path && await pathExists(ccJob.evidence_path)) {
+      ccEvidence = JSON.parse(await fs.readFile(ccJob.evidence_path, "utf8"));
+    }
+
+    // Escalate to AGY write only when:
+    // - CC completed with verification_failed (not execution error)
+    // - At least 2 verification cycles were attempted (initial + at least one repair)
+    // - Escalation is enabled in config
+    // - AGY is enabled and available
+    if (
+      ccEvidence &&
+      ccEvidence.status === "verification_failed" &&
+      ccEvidence.attempts &&
+      ccEvidence.attempts.length >= 2 &&
+      config.routing?.cc_verify_fail_escalate_to_agy !== false &&
+      config.agy?.enabled !== false
+    ) {
+      const ccAttemptCount = ccEvidence.attempts.length;
+
+      // Clean up CC workspace before AGY write
+      const ccWorkspace = ccJob?.workspace;
+      if (ccWorkspace?.path) {
+        await cleanupWorkspace({
+          originalProjectDir: job.project_dir,
+          workspacePath: ccWorkspace.path,
+          mode: ccWorkspace.mode || "isolated",
+          logDir: jobDir,
+        }).catch(() => {});
+      }
+      try { await this.store.clearSession(job.project_dir, "cc", job.task_id); } catch {}
+
+      const agyModel = "Claude Sonnet 4.6 (Thinking)";
+      await this.store.updateJob(job.id, {
+        provider: "agy_write",
+        phase: "executing",
+        auto_route: "cc_then_agy_escalation",
+        auto_fallback_reason: `CC verification failed after ${ccAttemptCount} cycles; escalating to AGY write`,
+        auto_fallback_classifier: "cc_verification_failed",
+      });
+
+      try {
+        await this.executeAgyWriteImpl({
+          ...job,
+          provider: "agy_write",
+          auto_route: "cc_then_agy_escalation",
+          model_override: agyModel,
+        }, config, signal, jobDir);
+
+        // Record escalation evidence
+        const agyEvidencePath = path.join(jobDir, "evidence.json");
+        if (await pathExists(agyEvidencePath)) {
+          const agyEvidence = JSON.parse(await fs.readFile(agyEvidencePath, "utf8"));
+          agyEvidence.auto_route = {
+            provider: "agy_write",
+            fallback_occurred: true,
+            original_provider: "cc",
+            reason: "cc_verification_failed",
+            cc_attempts: ccAttemptCount,
+            escalation_model: agyModel,
+            cc_evidence_status: ccEvidence.status,
+          };
+          await writeJsonAtomic(agyEvidencePath, agyEvidence);
+        }
+      } catch (agyError) {
+        const agyErrorText = agyError?.stack || agyError?.message || String(agyError);
+        const isQuotaError = classifyAgyQuotaError(agyErrorText);
+
+        if (isQuotaError && config.routing?.agy_write_fallback_to_cc_on_quota !== false) {
+          // AGY quota exhausted during escalation -> fall back to CC high/deepseek-v4-pro
+          const runningJob = await this.store.getJob(job.id);
+          const jobWorkspace = runningJob?.workspace;
+          const agySession = await this.store.getSession(job.project_dir, "agy_write", job.task_id);
+          const workspaceToClean = jobWorkspace?.path || agySession?.workspace_path;
+          if (workspaceToClean) {
+            await cleanupWorkspace({
+              originalProjectDir: job.project_dir,
+              workspacePath: workspaceToClean,
+              mode: jobWorkspace?.mode || agySession?.workspace_mode || "isolated",
+              logDir: jobDir,
+            }).catch(() => {});
+          }
+          try { await this.store.clearSession(job.project_dir, "agy_write", job.task_id); } catch {}
+
+          await this.store.updateJob(job.id, {
+            provider: "cc",
+            phase: "executing",
+            auto_route: "cc_fallback_after_agy_quota",
+            auto_fallback_reason: truncate(agyErrorText, 500),
+            auto_fallback_classifier: "agy_quota_during_escalation",
+          });
+
+          try {
+            await this.executeCcImpl({
+              ...job,
+              provider: "cc",
+              complexity: "high",
+              auto_route: "cc_fallback_after_agy_quota",
+            }, config, signal, jobDir);
+
+            // Record full escalation chain evidence
+            const ccFbEvidencePath = path.join(jobDir, "evidence.json");
+            if (await pathExists(ccFbEvidencePath)) {
+              const fbEvidence = JSON.parse(await fs.readFile(ccFbEvidencePath, "utf8"));
+              fbEvidence.auto_route = {
+                provider: "cc",
+                fallback_occurred: true,
+                original_provider: "agy_write",
+                reason: "agy_quota_during_escalation",
+                escalation_chain: ["cc", "agy_write", "cc_high"],
+                cc_attempts: ccAttemptCount,
+                agy_model: agyModel,
+                agy_quota_error: truncate(agyErrorText, 500),
+              };
+              await writeJsonAtomic(ccFbEvidencePath, fbEvidence);
+            }
+          } catch (ccError) {
+            throw ccError; // Both AGY and CC fallback failed
+          }
+          return;
+        }
+        // Non-quota AGY error during escalation - surface it; do NOT silently fall back
+        throw agyError;
+      }
+    }
+    // If CC passed verification or wasn't eligible for escalation, the CC result stands.
   }
 
   // -- Shared implementation helpers (used by both executeCc and executeAuto) --

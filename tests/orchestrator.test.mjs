@@ -530,8 +530,6 @@ test("quota fallback cleans AGY worktree and clears session before CC fallback",
   config.cli.agy_prefix_args = [fakeAgy];
   config.routing = { auto: "agy_preferred", agy_write_fallback_to_cc_on_quota: true };
   await fs.writeFile(configPath, JSON.stringify(config, null, 2));
-
-  // AGY will fail with quota error (no session persisted first)
   process.env.AGENT_ORCH_FAKE_AGY_MODE = "quota-error";
   t.after(() => { delete process.env.AGENT_ORCH_FAKE_AGY_MODE; });
 
@@ -850,4 +848,203 @@ test("legacy config with null CC models: fallback after AGY quota uses normalize
   // CC fallback for medium complexity should use the normalized flash model
   assert.equal(result.evidence.model, "deepseek-v4-flash");
   assert.equal(result.job.status, "completed", result.job.error);
+});
+
+// -- CC-first routing: low/medium/high all start with CC --
+
+test("auto low complexity routes to CC with deepseek-v4-flash (cc_first default)", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-ccfirst-low-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.models = config.models || {};
+  config.models.cc = { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "ccfirst-low",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+  });
+  await waitFor(orchestrator, started.id);
+  const result = await orchestrator.result(started.id);
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.auto_route, "cc");
+  assert.equal(result.evidence.model, "deepseek-v4-flash");
+  assert.equal(result.evidence.status, "ready_for_acceptance");
+});
+
+test("auto medium complexity routes to CC with deepseek-v4-flash (cc_first default)", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-ccfirst-med-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.models = config.models || {};
+  config.models.cc = { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "ccfirst-med",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "medium",
+  });
+  await waitFor(orchestrator, started.id);
+  const result = await orchestrator.result(started.id);
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.auto_route, "cc");
+  assert.equal(result.evidence.model, "deepseek-v4-flash");
+  assert.equal(result.evidence.status, "ready_for_acceptance");
+});
+
+test("auto high complexity routes to CC with deepseek-v4-pro (cc_first default)", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-ccfirst-high-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.models = config.models || {};
+  config.models.cc = { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "ccfirst-high",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "high",
+  });
+  await waitFor(orchestrator, started.id);
+  const result = await orchestrator.result(started.id);
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.auto_route, "cc");
+  assert.equal(result.evidence.model, "deepseek-v4-pro");
+  assert.equal(result.evidence.status, "ready_for_acceptance");
+});
+
+// -- CC verification fail escalates to AGY write (integration) --
+
+test("auto escalates to AGY write after CC verification failure with 2+ cycles", async (t) => {
+  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
+  const previousAgyMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
+  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
+  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
+  t.after(() => {
+    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
+    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
+    if (previousAgyMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
+    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousAgyMode;
+  });
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-ccfail-agy-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.agy.auth_probe_required = false;
+  config.cli.agy_prefix_args = [fakeAgy];
+  config.routing = { auto: "cc_first", cc_verify_fail_escalate_to_agy: true, agy_write_fallback_to_cc_on_quota: true };
+  config.execution.max_cc_repair_rounds = 2;
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "ccfail-agy",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "medium",
+  });
+  // Use wait() instead of waitFor() because the job transitions through
+  // failed (CC verification_failed) -> running (AGY escalation) -> completed
+  await orchestrator.wait(started.id);
+  const result = await orchestrator.result(started.id);
+
+  // Escalated to AGY write
+  assert.equal(result.job.provider, "agy_write");
+  assert.equal(result.job.auto_route, "cc_then_agy_escalation");
+  assert.equal(result.job.auto_fallback_classifier, "cc_verification_failed");
+  assert.equal(result.job.status, "completed", result.job.error);
+  assert.equal(result.evidence.model, "Claude Sonnet 4.6 (Thinking)");
+  assert.equal(result.evidence.auto_route.provider, "agy_write");
+  assert.equal(result.evidence.auto_route.fallback_occurred, true);
+  assert.equal(result.evidence.auto_route.original_provider, "cc");
+  assert.equal(result.evidence.auto_route.reason, "cc_verification_failed");
+  assert.equal(result.evidence.auto_route.escalation_model, "Claude Sonnet 4.6 (Thinking)");
+  assert.ok(result.evidence.auto_route.cc_attempts >= 2);
+});
+
+// -- AGY quota during CC escalation falls back to CC high --
+
+test("auto falls back to CC high after AGY quota during escalation", async (t) => {
+  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
+  const previousAgyMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
+  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
+  process.env.AGENT_ORCH_FAKE_AGY_MODE = "quota-error";
+  t.after(() => {
+    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
+    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
+    if (previousAgyMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
+    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousAgyMode;
+  });
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-esc-quota-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.agy.auth_probe_required = false;
+  config.cli.agy_prefix_args = [fakeAgy];
+  config.routing = { auto: "cc_first", cc_verify_fail_escalate_to_agy: true, agy_write_fallback_to_cc_on_quota: true };
+  config.models = config.models || {};
+  config.models.cc = { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" };
+  config.execution.max_cc_repair_rounds = 2;
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "esc-quota",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "medium",
+  });
+  // Use wait() - the job transitions through multiple states during escalation chain
+  await orchestrator.wait(started.id);
+  const result = await orchestrator.result(started.id);
+
+  // CC failed -> AGY escalation hit quota -> CC high fallback
+  assert.equal(result.job.provider, "cc");
+  assert.equal(result.job.auto_route, "cc_fallback_after_agy_quota");
+  assert.equal(result.job.auto_fallback_classifier, "agy_quota_during_escalation");
+  assert.equal(result.evidence.model, "deepseek-v4-pro");
+  assert.equal(result.job.status, "completed", result.job.error);
+  assert.equal(result.evidence.auto_route.provider, "cc");
+  assert.equal(result.evidence.auto_route.fallback_occurred, true);
+  assert.equal(result.evidence.auto_route.reason, "agy_quota_during_escalation");
+  assert.deepEqual(result.evidence.auto_route.escalation_chain, ["cc", "agy_write", "cc_high"]);
+  assert.equal(result.evidence.auto_route.agy_model, "Claude Sonnet 4.6 (Thinking)");
 });
