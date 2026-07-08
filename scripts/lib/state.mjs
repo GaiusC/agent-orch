@@ -218,9 +218,32 @@ function normalizeHostProvider(value) {
 }
 
 function buildCurrentState({ projectDir, jobs, events, sessions }) {
-  const activeJobs = jobs.filter((job) => ["queued", "running"].includes(job.status));
-  const ready = jobs.filter((job) => job.status === "completed" && job.phase === "ready_for_acceptance");
-  const failed = jobs.filter((job) => job.status === "failed");
+  let filteredJobs = jobs;
+  let filteredEvents = events;
+  let filteredSessions = sessions;
+
+  if (projectDir && String(projectDir).trim()) {
+    const normalized = path.resolve(String(projectDir).trim()).toLowerCase();
+    filteredJobs = jobs.filter((job) => {
+      if (!job.project_dir) return false;
+      return path.resolve(job.project_dir).toLowerCase() === normalized;
+    });
+    filteredEvents = events.filter((event) => {
+      if (!event.project_dir) return false;
+      return path.resolve(event.project_dir).toLowerCase() === normalized;
+    });
+    const projKey = projectKey(normalized);
+    filteredSessions = { sessions: {} };
+    for (const [key, value] of Object.entries(sessions.sessions || {})) {
+      if (key.startsWith(`${projKey}:`)) {
+        filteredSessions.sessions[key] = value;
+      }
+    }
+  }
+
+  const activeJobs = filteredJobs.filter((job) => ["queued", "running"].includes(job.status));
+  const ready = filteredJobs.filter((job) => job.status === "completed" && job.phase === "ready_for_acceptance");
+  const failed = filteredJobs.filter((job) => job.status === "failed");
   return {
     version: 1,
     project_dir: projectDir || jobs[0]?.project_dir || null,
@@ -228,9 +251,9 @@ function buildCurrentState({ projectDir, jobs, events, sessions }) {
     active_jobs: activeJobs.map(publicJobSnapshot),
     ready_for_acceptance: ready.map(publicJobSnapshot),
     failed_jobs: failed.map(publicJobSnapshot),
-    recent_jobs: jobs.slice(0, 20).map(publicJobSnapshot),
-    recent_events: events,
-    sessions: sessions.sessions || {},
+    recent_jobs: filteredJobs.slice(0, 20).map(publicJobSnapshot),
+    recent_events: filteredEvents,
+    sessions: filteredSessions.sessions || {},
   };
 }
 
