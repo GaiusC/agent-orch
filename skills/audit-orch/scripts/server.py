@@ -486,6 +486,40 @@ def discover_projects():
     return projects
 
 
+def job_role(job):
+    """Map job fields to a dashboard role: Planner, Executor, Reviewer, Accepter, Coordinator."""
+    provider = job.get("provider", "")
+    job_type = job.get("type", "")
+    phase = job.get("phase", "")
+    if provider == "agy" and ("verify" in job_type or "investigate" in job_type):
+        return "reviewer"
+    # Accepter: applied jobs checked before executor since applied CC jobs
+    # still carry cc provider and cc_execute type
+    if phase in ("applied", "applied_and_cleaned"):
+        return "accepter"
+    if provider in ("agy_write",) or (provider == "cc" and ("exec" in job_type or "cont" in job_type or "auto" in job_type)):
+        return "executor"
+    if provider == "codex":
+        return "planner"
+    return "coordinator"
+
+
+def job_stage(job):
+    """Map job phase/type to a lifecycle stage: plan, execute, review, repair, accept, cleanup."""
+    text = str(job.get("phase") or job.get("type") or "")
+    if "verify" in text or "review" in text or "investigate" in text:
+        return "review"
+    if "applied" in text or "accepted" in text:
+        return "accept"
+    if "repair" in text:
+        return "repair"
+    if "clean" in text:
+        return "cleanup"
+    if any(k in text for k in ("queue", "prepar", "execut", "ready", "fail", "complet", "session", "job")):
+        return "execute"
+    return "plan"
+
+
 def project_summary(project_path, source="manual", process_text=None):
     abs_path = os.path.abspath(project_path)
     if not os.path.isdir(abs_path):
@@ -497,6 +531,16 @@ def project_summary(project_path, source="manual", process_text=None):
     has_orchestrator = os.path.isdir(orch_dir)
     total_jobs = 0
     active_jobs = 0
+    stale_jobs = 0
+    review_blocked = 0
+    provider_counts = {"cc": 0, "agy": 0, "agy_write": 0, "codex": 0}
+    role_counts = {"planner": 0, "executor": 0, "reviewer": 0, "accepter": 0, "coordinator": 0}
+    stage_counts = {"plan": 0, "execute": 0, "review": 0, "repair": 0, "accept": 0, "cleanup": 0}
+    fallback_chains = []
+
+    now_ts = time.time()
+    STALE_SECONDS = 900  # 15 minutes
+
     if has_orchestrator:
         runs_dir = os.path.join(orch_dir, "runs")
         if os.path.isdir(runs_dir):
@@ -509,6 +553,26 @@ def project_summary(project_path, source="manual", process_text=None):
                     with open(job_file, "r", encoding="utf-8-sig") as fh:
                         job = json.load(fh)
                     status = job.get("status", "unknown")
+
+                    # Count by provider
+                    provider = job.get("provider", "")
+                    if provider in provider_counts:
+                        provider_counts[provider] += 1
+                    elif provider:
+                        provider_counts[provider] = provider_counts.get(provider, 0) + 1
+
+                    # Count by role
+                    role = job_role(job)
+                    role_counts[role] = role_counts.get(role, 0) + 1
+
+                    # Count by stage
+                    stage = job_stage(job)
+                    stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+                    # Review-gate status
+                    if job.get("requires_agy_review") and not job.get("review_waiver") and status == "completed" and job.get("phase") == "ready_for_acceptance":
+                        review_blocked += 1
+
                     if status in ("queued", "running"):
                         if status == "running":
                             needles = [
@@ -519,9 +583,31 @@ def project_summary(project_path, source="manual", process_text=None):
                                 ((job.get("workspace") or {}).get("path") or ""),
                             ]
                             needles = [n for n in needles if n]
-                            if not any(needle and needle in process_text for needle in needles):
+                            has_live = any(needle and needle in process_text for needle in needles)
+                            if not has_live:
+                                # Check also for stale (no update > 15 min)
+                                updated = job.get("updated_at", "")
+                                if updated:
+                                    try:
+                                        updated_ts = time.mktime(time.strptime(updated[:19], "%Y-%m-%dT%H:%M:%S"))
+                                        if now_ts - updated_ts > STALE_SECONDS:
+                                            stale_jobs += 1
+                                    except Exception:
+                                        pass
                                 continue
                         active_jobs += 1
+
+                    # Track fallback chains
+                    if job.get("auto_fallback_classifier"):
+                        fallback_chains.append({
+                            "job_id": job.get("id"),
+                            "task_id": job.get("task_id"),
+                            "provider": job.get("provider"),
+                            "auto_route": job.get("auto_route"),
+                            "classifier": job.get("auto_fallback_classifier"),
+                            "reason": (job.get("auto_fallback_reason") or "")[:200],
+                        })
+
                 except Exception:
                     pass
 
@@ -531,6 +617,12 @@ def project_summary(project_path, source="manual", process_text=None):
         "has_orchestrator": has_orchestrator,
         "total_jobs": total_jobs,
         "active_jobs": active_jobs,
+        "stale_jobs": stale_jobs,
+        "review_blocked": review_blocked,
+        "provider_counts": provider_counts,
+        "role_counts": role_counts,
+        "stage_counts": stage_counts,
+        "fallback_chains": fallback_chains[:20],
         "source": source,
     }
 
@@ -944,7 +1036,7 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
             self.send_error(404, f"{filename} Not Found")
 
     def serve_vendor(self, path):
-        # Strict allowlist — only these two files may be served from vendor/.
+        # Strict allowlist - only these two files may be served from vendor/.
         allowed = {"marked.min.js", "purify.min.js"}
         name = path[len("/vendor/"):]
         # Reject anything that is not a simple file name in the allowlist.
@@ -1046,6 +1138,8 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                 runs_list.append({
                     "job_id": job.get("id", folder),
                     "provider": job.get("provider", "cc"),
+                    "role": job_role(job),
+                    "stage": job_stage(job),
                     "type": job.get("type", ""),
                     "task_id": job.get("task_id", ""),
                     "status": status,
@@ -1053,6 +1147,11 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                     "started_at": job.get("started_at"),
                     "finished_at": job.get("finished_at"),
                     "model": observed_model,
+                    "requires_agy_review": job.get("requires_agy_review", False),
+                    "review_waiver": job.get("review_waiver", False),
+                    "auto_route": job.get("auto_route"),
+                    "auto_fallback_classifier": job.get("auto_fallback_classifier"),
+                    "auto_fallback_reason": (job.get("auto_fallback_reason") or "")[:200],
                 })
             except Exception:
                 pass

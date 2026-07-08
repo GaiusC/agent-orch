@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { WorkerOrchestrator } from "../scripts/lib/orchestrator.mjs";
 import { StateStore } from "../scripts/lib/state.mjs";
+import { nowIso } from "../scripts/lib/utils.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, "$1"));
 const fakeCc = path.join(here, "fixtures", "fake-cc.mjs");
@@ -48,6 +49,7 @@ async function createProject(root) {
       forbidden: [".git/", ".env", ".env.*"],
     },
     verification: { commands: ["node verify.cjs"] },
+    review_gate: { require_agy_verify_for_implementation: false, allow_waiver: true },
   };
   await fs.writeFile(path.join(project, ".agent-orchestrator", "config.json"), JSON.stringify(config, null, 2));
   await fs.writeFile(path.join(project, "verify.cjs"), "const fs=require('fs'); process.exit(fs.existsSync('feature.txt') && fs.readFileSync('feature.txt','utf8') === 'good' ? 0 : 1);\n");
@@ -1047,4 +1049,386 @@ test("auto falls back to CC high after AGY quota during escalation", async (t) =
   assert.equal(result.evidence.auto_route.reason, "agy_quota_during_escalation");
   assert.deepEqual(result.evidence.auto_route.escalation_chain, ["cc", "agy_write", "cc_high"]);
   assert.equal(result.evidence.auto_route.agy_model, "Claude Sonnet 4.6 (Thinking)");
+});
+
+// -- Review-gate policy and enforcement --
+
+test("implementation jobs are marked with requires_agy_review by default", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-review-gate-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  // Ensure review_gate is enabled (default in createProject doesn't include it, so add it)
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "review-gate-cc",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+  });
+  const ccJob = await waitFor(orchestrator, cc.id);
+  assert.equal(ccJob.requires_agy_review, true, "CC implementation should require AGY review");
+  assert.equal(ccJob.review_waiver, false, "CC implementation should not have waiver by default");
+});
+
+test("implementation jobs with explicit waiver skip review gate", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-review-waiver-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "waiver-test",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+    review_waiver: true,
+  });
+  const ccJob = await waitFor(orchestrator, cc.id);
+  assert.equal(ccJob.review_waiver, true, "Job should have review_waiver=true");
+});
+
+test("apply rejects implementation job without AGY verify evidence and no waiver", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-apply-reject-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "apply-reject",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+  });
+  await waitFor(orchestrator, cc.id);
+
+  // Apply should be rejected because no AGY verify evidence exists
+  await assert.rejects(
+    () => orchestrator.apply(cc.id),
+    /requires AGY verify evidence/,
+    "Apply should reject when AGY verify is required but missing",
+  );
+});
+
+test("apply allows job with waiver even without AGY verify evidence", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-apply-waiver-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "apply-waiver",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+    review_waiver: true,
+  });
+  await waitFor(orchestrator, cc.id);
+
+  // Apply should succeed because waiver is present
+  const result = await orchestrator.apply(cc.id);
+  assert.equal(result.applied, true, "Should apply when review_waiver is present");
+  assert.equal(await fs.readFile(path.join(project, "feature.txt"), "utf8"), "good");
+});
+
+test("apply succeeds when AGY verify evidence exists for the same task", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-apply-verify-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  // First run the CC implementation
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "apply-verify",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+  });
+  await waitFor(orchestrator, cc.id);
+
+  // Create an AGY verify job with matching task_id directly in the store
+  await store.createJob({
+    id: "agy-verify-test",
+    type: "agy_verify",
+    provider: "agy",
+    status: "completed",
+    phase: "completed",
+    project_dir: project,
+    task_id: "apply-verify",
+    goal: "Verify implementation",
+    plan: "",
+    complexity: "low",
+    model_override: null,
+    acceptance_commands: [],
+    evidence_path: path.join(store.jobDir("agy-verify-test"), "evidence.json"),
+    finished_at: nowIso(),
+  });
+  // Create a minimal evidence file
+  await fs.mkdir(store.jobDir("agy-verify-test"), { recursive: true });
+  await fs.writeFile(path.join(store.jobDir("agy-verify-test"), "evidence.json"), JSON.stringify({ status: "completed" }));
+
+  // Apply should succeed because AGY verify evidence exists
+  const result = await orchestrator.apply(cc.id);
+  assert.equal(result.applied, true, "Should apply when AGY verify evidence exists");
+
+  // Verify the AGY verify job was recorded
+  const appliedJob = await orchestrator.status(cc.id);
+  assert.equal(appliedJob.agy_verify_job_id, "agy-verify-test");
+});
+
+test("auto implementation jobs also get review gate metadata", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-auto-review-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  config.routing = { auto: "cc_first", cc_verify_fail_escalate_to_agy: false };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const auto = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "auto-review",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+  });
+  await waitFor(orchestrator, auto.id);
+  assert.equal(auto.provider, "cc");
+  assert.equal(auto.requires_agy_review, true);
+});
+
+test("review_gate disabled in config means no review requirement", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-review-disabled-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: false, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "review-disabled",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+  });
+  await waitFor(orchestrator, cc.id);
+  assert.equal(cc.requires_agy_review, false, "Disabled review gate should mean no review required");
+
+  // Apply should work without AGY verify evidence
+  const result = await orchestrator.apply(cc.id);
+  assert.equal(result.applied, true);
+});
+
+test("AGY investigate/verify jobs are not implementation: no review gate", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-agy-verify-nogate-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  // AGY investigate should NOT have requires_agy_review because it's not an implementation job
+  const agy = await orchestrator.startAgy(
+    { project_dir: project, task_id: "investigate-no-gate", goal: "Investigate only" },
+    "investigate",
+  );
+  await waitFor(orchestrator, agy.id);
+  // AGY investigate jobs don't go through computeReviewGate
+  assert.equal(agy.requires_agy_review, false);
+});
+
+// -- State snapshot includes review-gate fields --
+
+test("publicJobSnapshot includes review gate and role/stage fields", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-snapshot-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "snapshot",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+  });
+  await waitFor(orchestrator, cc.id);
+
+  // Check the job object has all expected fields
+  assert.equal(cc.requires_agy_review, true);
+  assert.equal(cc.review_waiver, false);
+  assert.ok(typeof cc.agy_verify_job_id === "string" || cc.agy_verify_job_id === null);
+
+  // Rebuild state and check role is set
+  const state = await store.rebuildCurrentState(project);
+  const jobInState = state.recent_jobs.find((j) => j.id === cc.id);
+  assert.ok(jobInState, "Job should appear in rebuilt state");
+  assert.equal(jobInState.role, "executor", "CC job should be executor role");
+  assert.equal(jobInState.stage, "execute", "CC job should be in execute stage");
+  assert.equal(jobInState.requires_agy_review, true);
+});
+
+// -- Waiver enforcement: allow_waiver=false ignores review_waiver=true --
+
+test("waiver is ignored when allow_waiver is false -- apply rejects", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-no-waiver-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: false };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  // Even though the contract requests review_waiver: true, allow_waiver: false
+  // should cause the waiver to be ignored and the job to require AGY review.
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "no-waiver-allowed",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+    review_waiver: true,
+  });
+  await waitFor(orchestrator, cc.id);
+
+  // The job metadata should reflect the ignored waiver
+  assert.equal(cc.review_waiver, false, "Waiver should be forced to false when allow_waiver is false");
+
+  // Apply should be rejected because the waiver was ignored
+  await assert.rejects(
+    () => orchestrator.apply(cc.id),
+    /requires AGY verify evidence/,
+    "Apply should reject when allow_waiver is false, even with review_waiver request",
+  );
+});
+
+test("waiver works normally when allow_waiver is true (regression guard)", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-waiver-ok-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: true, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "waiver-ok",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+    review_waiver: true,
+  });
+  await waitFor(orchestrator, cc.id);
+
+  // Waiver should be honored when allow_waiver is true
+  assert.equal(cc.review_waiver, true, "Waiver should be honored when allow_waiver is true");
+
+  // Apply should succeed
+  await orchestrator.apply(cc.id);
+  assert.equal(await fs.readFile(path.join(project, "feature.txt"), "utf8"), "good");
+});
+
+// -- Applied jobs classified as accepter role and accept stage --
+
+test("applied CC job is classified as accepter role in state snapshot", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-accepter-"));
+  t.after(() => removeTempRoot(root));
+  const project = await createProject(root);
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.review_gate = { require_agy_verify_for_implementation: false, allow_waiver: true };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+
+  const cc = await orchestrator.startCc({
+    project_dir: project,
+    task_id: "accepter-test",
+    goal: "Create feature.txt containing good",
+    plan: "Implement",
+    complexity: "low",
+  });
+  await waitFor(orchestrator, cc.id);
+  await orchestrator.apply(cc.id);
+
+  // After apply, the job should be classified as accepter
+  const state = await store.rebuildCurrentState(project);
+  const jobInState = state.recent_jobs.find((j) => j.id === cc.id);
+  assert.ok(jobInState, "Applied job should appear in state");
+  assert.equal(jobInState.role, "accepter", "Applied CC job should be accepter role");
+  assert.equal(jobInState.stage, "accept", "Applied CC job should be accept stage");
 });

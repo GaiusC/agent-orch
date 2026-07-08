@@ -38,6 +38,10 @@ export const DEFAULT_CONFIG = {
     agy_write_fallback_to_cc_on_quota: true,
     cc_verify_fail_escalate_to_agy: true,
   },
+  review_gate: {
+    require_agy_verify_for_implementation: true,
+    allow_waiver: true,
+  },
   cli: {
     claude: process.env.AGENT_ORCH_CLAUDE_BIN || process.env.EAO_CLAUDE_BIN || "claude",
     agy: process.env.AGENT_ORCH_AGY_BIN || process.env.EAO_AGY_BIN || "agy",

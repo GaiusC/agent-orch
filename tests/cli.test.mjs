@@ -57,6 +57,7 @@ test("CLI initializes a project and runs a CC implementation to apply", async (t
   config.execution.cc_timeout_seconds = 20;
   config.execution.max_cc_repair_rounds = 2;
   config.verification.commands = ["node verify.cjs"];
+  config.review_gate = { require_agy_verify_for_implementation: false, allow_waiver: true };
   await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
   const health = run(["health", "-ProjectDir", project]);

@@ -33,6 +33,10 @@
     "agy_write_fallback_to_cc_on_quota": true,
     "cc_verify_fail_escalate_to_agy": true
   },
+  "review_gate": {
+    "require_agy_verify_for_implementation": true,
+    "allow_waiver": true
+  },
   "cli": {
     "claude": "claude",
     "agy": "agy",

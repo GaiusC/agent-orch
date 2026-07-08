@@ -111,6 +111,30 @@ AGY write models are independent of AGY investigation models. Read-only defaults
 
 Treat configuration as executable policy because verification commands run in a shell. Review repository-provided configuration before setting `trusted` to true.
 
+## Review gate
+
+The review gate ensures implementation jobs receive independent verification before changes are applied. It is enabled by default.
+
+```json
+{
+  "review_gate": {
+    "require_agy_verify_for_implementation": true,
+    "allow_waiver": true
+  }
+}
+```
+
+- **`require_agy_verify_for_implementation`** (default `true`): When enabled, CC execute/continue, AGY execute/continue, and auto-execute jobs are marked `requires_agy_review: true`. The `apply` command requires a completed AGY verify job for the same `project_dir` and `task_id` before the patch can land. AGY investigate/verify jobs are exempt.
+- **`allow_waiver`** (default `true`): When enabled, a job can bypass the review gate by setting `review_waiver: true` in the contract metadata. Waived jobs record the waiver in job metadata and the dashboard. Set to `false` to require AGY verify evidence on every implementation without exception.
+
+**Disabling the gate**: Set `require_agy_verify_for_implementation` to `false` to disable review-gate enforcement entirely. All implementation jobs will apply without requiring AGY verification evidence.
+
+**Dashboard visibility**: The review-gate status appears in:
+- Project summary (`review_blocked` count, per-job `requires_agy_review` / `review_waiver` fields)
+- Current state (`review_gate_summary` with blocked job IDs)
+- Handoff generation (recommends `agy-verify` for blocked jobs)
+
+
 ## Workflow policy
 
 For substantial changes, create small contracts and require an AGY gate for high-risk behavior. See [role-boundaries-and-workflow.md](role-boundaries-and-workflow.md).

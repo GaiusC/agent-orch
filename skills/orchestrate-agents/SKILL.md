@@ -87,6 +87,7 @@ Treat worker prose as a claim, not proof. Verify:
 - diff implements the approved plan without hidden redesign;
 - deterministic commands passed;
 - required AGY gate passed or was explicitly waived;
+- review-gate status is visible in the dashboard: apply requires AGY verify evidence or an explicit `review_waiver` for implementation jobs;
 - unresolved risks are acceptable;
 - evidence corresponds to the current Git baseline.
 

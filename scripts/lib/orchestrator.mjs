@@ -7,6 +7,50 @@ import { applyPatch, captureChanges, cleanupWorkspace, inspectGit, prepareWorksp
 import { runVerification, verificationFailureContext } from "./verify.mjs";
 import { asStringArray, newId, nowIso, pathExists, requireString, truncate, writeJsonAtomic } from "./utils.mjs";
 
+function collectAgyVerifyEvidence(jobs, projectDir, taskId) {
+  // Find a completed AGY verify job for the same project and task
+  if (!jobs || !jobs.length) return null;
+  const candidates = jobs.filter((j) => {
+    const jProj = j.project_dir ? path.resolve(j.project_dir) : "";
+    const targetProj = projectDir ? path.resolve(projectDir) : "";
+    return (
+      j.provider === "agy" &&
+      j.type === "agy_verify" &&
+      j.task_id === taskId &&
+      j.status === "completed" &&
+      jProj === targetProj
+    );
+  });
+  if (!candidates.length) return null;
+  candidates.sort((a, b) =>
+    String(b.finished_at || b.updated_at || "").localeCompare(
+      String(a.finished_at || a.updated_at || "")
+    )
+  );
+  return candidates[0];
+}
+
+function computeReviewGate(config, jobType, jobMetadata) {
+  const gate = config?.review_gate || {};
+  const requireGate = gate.require_agy_verify_for_implementation !== false;
+  const allowWaiver = gate.allow_waiver !== false;
+  const requestedWaiver = jobMetadata?.review_waiver === true;
+  // Only implementation job types require the review gate
+  const isImplementation =
+    jobType === "auto_execute" ||
+    jobType === "cc_execute" ||
+    jobType === "cc_continue" ||
+    jobType === "agy_execute" ||
+    jobType === "agy_continue";
+  // When allow_waiver is false, ignore any requested waiver.
+  const effectiveWaiver = requestedWaiver && allowWaiver;
+  return {
+    requires_agy_review: isImplementation && requireGate,
+    review_waiver: effectiveWaiver,
+    allow_waiver: allowWaiver,
+  };
+}
+
 export class WorkerOrchestrator {
   constructor(store) {
     this.store = store;
@@ -37,6 +81,7 @@ export class WorkerOrchestrator {
     if (config.roles.duplicate_implementation !== false) throw new Error("duplicate_implementation must remain false for this workflow.");
     const acceptance = asStringArray(args.acceptance_commands, "acceptance_commands") || config.verification.commands || [];
     const id = newId("cc");
+    const reviewGate = computeReviewGate(config, continuation ? "cc_continue" : "cc_execute", args);
     const job = await this.store.createJob({
       id,
       type: continuation ? "cc_continue" : "cc_execute",
@@ -51,6 +96,8 @@ export class WorkerOrchestrator {
       model_override: typeof args.model === "string" ? args.model : null,
       acceptance_commands: acceptance,
       continuation,
+      requires_agy_review: reviewGate.requires_agy_review,
+      review_waiver: reviewGate.review_waiver,
     });
     this.launch(job, (signal) => this.executeCc(job, config, signal));
     return this.publicJob(job);
@@ -93,6 +140,7 @@ export class WorkerOrchestrator {
     if (config.roles.duplicate_implementation !== false) throw new Error("duplicate_implementation must remain false for this workflow.");
     const acceptance = asStringArray(args.acceptance_commands, "acceptance_commands") || config.verification.commands || [];
     const id = newId("agy");
+    const reviewGate = computeReviewGate(config, continuation ? "agy_continue" : "agy_execute", args);
     const job = await this.store.createJob({
       id,
       type: continuation ? "agy_continue" : "agy_execute",
@@ -107,6 +155,8 @@ export class WorkerOrchestrator {
       model_override: typeof args.model === "string" ? args.model : null,
       acceptance_commands: acceptance,
       continuation,
+      requires_agy_review: reviewGate.requires_agy_review,
+      review_waiver: reviewGate.review_waiver,
     });
     this.launch(job, (signal) => this.executeAgyWrite(job, config, signal));
     return this.publicJob(job);
@@ -124,6 +174,7 @@ export class WorkerOrchestrator {
     const provider = autoRouteProvider(config, complexity);
     const acceptance = asStringArray(args.acceptance_commands, "acceptance_commands") || config.verification.commands || [];
     const id = newId("auto");
+    const reviewGate = computeReviewGate(config, "auto_execute", args);
     const job = await this.store.createJob({
       id,
       type: "auto_execute",
@@ -138,6 +189,8 @@ export class WorkerOrchestrator {
       model_override: typeof args.model === "string" ? args.model : null,
       acceptance_commands: acceptance,
       auto_route: provider,
+      requires_agy_review: reviewGate.requires_agy_review,
+      review_waiver: reviewGate.review_waiver,
     });
     this.launch(job, (signal) => this.executeAuto(job, config, signal));
     return this.publicJob(job);
@@ -809,6 +862,26 @@ export class WorkerOrchestrator {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
     if (job.status !== "completed" || job.phase !== "ready_for_acceptance") throw new Error("Only a completed job ready for acceptance can be applied.");
+
+    // Review-gate enforcement: implementation jobs that require AGY review
+    // must have a completed AGY verify job unless explicitly waived.
+    if (job.requires_agy_review && !job.review_waiver) {
+      const allJobs = await this.store.listJobs();
+      const agyEvidence = collectAgyVerifyEvidence(allJobs, job.project_dir, job.task_id);
+      if (!agyEvidence) {
+        throw new Error(
+          `Job requires AGY verify evidence before apply. ` +
+          `Run agy-verify for task "${job.task_id}" or set review_waiver: true ` +
+          `on the job contract to bypass this gate.`
+        );
+      }
+      // Record the matching AGY evidence reference
+      await this.store.updateJob(jobId, {
+        agy_verify_job_id: agyEvidence.id,
+        agy_verify_evidence_path: agyEvidence.evidence_path || null,
+      });
+    }
+
     const evidence = JSON.parse(await fs.readFile(job.evidence_path, "utf8"));
     if (evidence.changes.forbidden_changes.length) throw new Error("Cannot apply a patch containing forbidden-path changes.");
     if (job.workspace.mode === "in_place") return { applied: false, already_in_place: true, project_dir: job.project_dir };
@@ -850,6 +923,10 @@ export class WorkerOrchestrator {
       auto_route: job.auto_route || null,
       auto_fallback_reason: job.auto_fallback_reason || null,
       auto_fallback_classifier: job.auto_fallback_classifier || null,
+      requires_agy_review: job.requires_agy_review || false,
+      review_waiver: job.review_waiver || false,
+      agy_verify_job_id: job.agy_verify_job_id || null,
+      agy_verify_evidence_path: job.agy_verify_evidence_path || null,
       created_at: job.created_at,
       updated_at: job.updated_at,
       started_at: job.started_at || null,

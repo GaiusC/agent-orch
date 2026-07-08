@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { autoRouteProvider, chooseAgyWriteModel } from "../scripts/lib/config.mjs";
+import { autoRouteProvider, chooseAgyWriteModel, DEFAULT_CONFIG } from "../scripts/lib/config.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, "$1"));
 const cli = path.join(path.resolve(here, ".."), "scripts", "agent-orch.mjs");
@@ -490,4 +490,27 @@ test("agy-continue CLI command works with same task_id", async (t) => {
 
   const second = runCli(["agy-continue", "-ProjectDir", project, "-Contract", contractPath]);
   assert.equal(second.job.provider, "agy_write");
+});
+
+// -- Review-gate policy defaults --
+
+test("DEFAULT_CONFIG includes review_gate with require_agy_verify_for_implementation=true", () => {
+  assert.ok(DEFAULT_CONFIG.review_gate, "DEFAULT_CONFIG must have review_gate section");
+  assert.equal(DEFAULT_CONFIG.review_gate.require_agy_verify_for_implementation, true);
+  assert.equal(DEFAULT_CONFIG.review_gate.allow_waiver, true);
+});
+
+test("review_gate defaults are present in loaded config even without project override", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-reviewcfg-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+  // createProject doesn't set review_gate, so it should inherit from DEFAULT_CONFIG
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  // The createProject helper doesn't include review_gate
+  // Reloading from loadProjectConfig would fill in defaults
+  const module = await import("../scripts/lib/config.mjs");
+  const loaded = await module.loadProjectConfig(project);
+  assert.equal(loaded.review_gate.require_agy_verify_for_implementation, true);
+  assert.equal(loaded.review_gate.allow_waiver, true);
 });

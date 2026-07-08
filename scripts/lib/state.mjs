@@ -241,19 +241,69 @@ function buildCurrentState({ projectDir, jobs, events, sessions }) {
     }
   }
 
+  const now = Date.now();
+  const STALE_MS = 900_000; // 15 minutes without update = stale
+
   const activeJobs = filteredJobs.filter((job) => ["queued", "running"].includes(job.status));
   const ready = filteredJobs.filter((job) => job.status === "completed" && job.phase === "ready_for_acceptance");
   const failed = filteredJobs.filter((job) => job.status === "failed");
+
+  // Detect stale running jobs: started > STALE_MS ago with no update in STALE_MS
+  const staleJobs = activeJobs.filter((job) => {
+    const startedAt = job.started_at ? new Date(job.started_at).getTime() : null;
+    const updatedAt = job.updated_at ? new Date(job.updated_at).getTime() : null;
+    const checkpoint = startedAt || updatedAt;
+    if (!checkpoint) return false;
+    return (now - checkpoint) > STALE_MS;
+  });
+
+  // Detect fallback/escalation chains across jobs for the same task
+  const fallbackChains = [];
+  const taskJobMap = new Map();
+  for (const job of filteredJobs) {
+    const key = `${job.task_id || ""}`;
+    if (!taskJobMap.has(key)) taskJobMap.set(key, []);
+    taskJobMap.get(key).push(job);
+  }
+  for (const [taskId, taskJobs] of taskJobMap) {
+    const fallbackJobs = taskJobs.filter((j) => j.auto_fallback_classifier);
+    if (fallbackJobs.length > 0) {
+      fallbackChains.push({
+        task_id: taskId,
+        chain: fallbackJobs.map((j) => ({
+          job_id: j.id,
+          provider: j.provider,
+          auto_route: j.auto_route,
+          fallback_classifier: j.auto_fallback_classifier,
+          fallback_reason: truncate(j.auto_fallback_reason || "", 500),
+        })),
+      });
+    }
+  }
+
+  // Review-gate summary
+  const jobsRequiringReview = filteredJobs.filter((j) => j.requires_agy_review && !j.review_waiver);
+  const reviewGateBlocked = jobsRequiringReview.filter((j) =>
+    j.status === "completed" && j.phase === "ready_for_acceptance"
+  );
+
   return {
     version: 1,
     project_dir: projectDir || jobs[0]?.project_dir || null,
     generated_at: nowIso(),
     active_jobs: activeJobs.map(publicJobSnapshot),
+    stale_jobs: staleJobs.map(publicJobSnapshot),
     ready_for_acceptance: ready.map(publicJobSnapshot),
     failed_jobs: failed.map(publicJobSnapshot),
     recent_jobs: filteredJobs.slice(0, 20).map(publicJobSnapshot),
     recent_events: filteredEvents,
     sessions: filteredSessions.sessions || {},
+    fallback_chains: fallbackChains,
+    review_gate_summary: {
+      total_requiring_review: jobsRequiringReview.length,
+      ready_blocked_by_review: reviewGateBlocked.length,
+      blocked_job_ids: reviewGateBlocked.map((j) => j.id),
+    },
   };
 }
 
@@ -264,12 +314,18 @@ function publicJobSnapshot(job) {
     provider: job.provider,
     status: job.status,
     phase: job.phase,
+    role: roleFor(job.provider, job.type, job.phase),
+    stage: stageFor(job.phase || job.type),
     project_dir: job.project_dir,
     task_id: job.task_id,
     model: job.model || job.model_override || null,
     session_id: job.session_id || null,
     auto_route: job.auto_route || null,
     auto_fallback_classifier: job.auto_fallback_classifier || null,
+    auto_fallback_reason: truncate(job.auto_fallback_reason || "", 500),
+    requires_agy_review: job.requires_agy_review || false,
+    review_waiver: job.review_waiver || false,
+    agy_verify_job_id: job.agy_verify_job_id || null,
     evidence_path: job.evidence_path || null,
     patch_path: job.patch_path || null,
     error: job.error || null,
@@ -280,6 +336,14 @@ function publicJobSnapshot(job) {
 }
 
 function recommendNextAction(state, hostProvider) {
+  if (state.stale_jobs?.length) {
+    const staleIds = state.stale_jobs.map((j) => j.id).join(", ");
+    return `Stale running jobs detected: ${staleIds}. Investigate these jobs and cancel or restart them with focused repair feedback.`;
+  }
+  if (state.review_gate_summary?.ready_blocked_by_review > 0) {
+    const blockedIds = state.review_gate_summary.blocked_job_ids.join(", ");
+    return `Jobs ready for acceptance but blocked by AGY review gate: ${blockedIds}. Run agy-verify for each task or explicitly waive the review gate.`;
+  }
   if (state.ready_for_acceptance?.length) {
     if (hostProvider === "codex") return "Current Codex session should inspect evidence/diff and accept, reject, or continue the same task_id. Do not invoke Codex CLI.";
     return "Ask the configured accepter to inspect ready_for_acceptance evidence before applying.";
@@ -304,16 +368,23 @@ function executionModeFor(provider) {
 }
 
 function roleFor(provider, type = "", phase = "") {
+  // Reviewer role: AGY read-only investigation/verification jobs
   if (provider === "agy" && /verify|investigate/.test(type)) return "reviewer";
-  if (provider === "agy_write" || provider === "cc") return "executor";
-  if (provider === "codex" && /accept/.test(phase)) return "accepter";
+  // Accepter role: applied/accepted jobs (checked before executor since
+  // applied CC jobs still carry cc provider and cc_execute type)
+  if (phase === "applied" || phase === "applied_and_cleaned") return "accepter";
+  // Executor role: CC or AGY write implementation jobs
+  if (provider === "agy_write" || (provider === "cc" && /exec|cont/.test(type))) return "executor";
+  if (provider === "cc" && /auto/.test(type)) return "executor";
+  // Planner/coordinator: Codex in-session or unknown
+  if (provider === "codex") return "planner";
   return "coordinator";
 }
 
 function stageFor(value) {
   const text = String(value || "");
-  if (/verify|review/.test(text)) return "review";
-  if (/accept|appl/.test(text)) return "accept";
+  if (/verify|review|investigate/.test(text)) return "review";
+  if (/\bappl/i.test(text) || /\baccept(ed|ance)?\b/i.test(text)) return "accept";
   if (/repair/.test(text)) return "repair";
   if (/clean/.test(text)) return "cleanup";
   if (/handoff/.test(text)) return "handoff";

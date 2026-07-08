@@ -44,6 +44,42 @@ Provider-aware calibration: ordinary work estimated as CC-high may generally be 
 
 The default `routing.auto` policy is `"cc_first"` (all complexities route to CC; AGY escalation after CC verification failure). Legacy configs with `routing.auto: "agy_preferred"` route low to CC and medium/high to AGY write. Legacy configs with `"cc"` route all contracts to CC without escalation. Existing project configs with `primary_writer: "cc"` still work without changes.
 
+### Review gate
+
+Agent Orch enforces a review gate for implementation jobs by default. After a CC or AGY write implementation completes, the `apply` command requires one of:
+
+- A completed AGY verify job (`agy-verify`) for the same project and `task_id`, confirming the implementation evidence; or
+- An explicit `review_waiver: true` set on the job contract metadata.
+
+Configurable in `.agent-orchestrator/config.json`:
+
+```json
+{
+  "review_gate": {
+    "require_agy_verify_for_implementation": true,
+    "allow_waiver": true
+  }
+}
+```
+
+- Set `require_agy_verify_for_implementation` to `false` to disable the gate entirely.
+- Set `allow_waiver` to `false` to require AGY verify evidence on every implementation apply - no exceptions.
+- AGY `investigate` and `verify` jobs are exempt (they are read-only review work, not implementation).
+- Review-gate status, blocked jobs, and explicit waivers are visible in the audit dashboard and in `current-state.json`.
+
+### Audit dashboard views
+
+The audit dashboard (launched via `agent-orch dashboard`) exposes role/provider/stage views for every project:
+
+- **Role lanes**: Planner (Codex), Executor (CC/AGY write), Reviewer (AGY verify/investigate), Accepter/Coordinator.
+- **Provider counts**: CC, AGY, AGY write, Codex.
+- **Lifecycle stages**: plan, execute, review, repair, accept, cleanup.
+- **Stale running jobs**: jobs running but with no recent update (15-minute threshold), flagged in project summary and handoff.
+- **Fallback/escalation chains**: jobs that triggered quota fallback or CC-to-AGY escalation, with chain evidence.
+- **Review-gate status**: jobs blocked by the review gate (ready for acceptance but missing AGY verify evidence).
+
+Dashboard data is read-only and served from `.agent-orchestrator/runs/` and `current-state.json`.
+
 ## Parallel allocation policy
 
 - Multiple CC workers can run in parallel for read-only contracts or clearly disjoint writable paths.

@@ -108,3 +108,35 @@ The default `routing.auto` value is `"cc_first"` (all complexities route to CC; 
 - Provider-aware calibration: CC-high ~ AGY-medium/Sonnet. Reserve AGY-high/Opus for exceptional complexity or risk.
 - Keep Codex tool results compact. Raw logs remain on disk.
 - Avoid agent debate and duplicate implementations. Parallelize only independent, non-writing work.
+
+## Review gate
+
+Implementation jobs (CC or AGY write) require AGY verification evidence before `apply` by default. This additional gate ensures an independent review has examined the implementation output before changes land in the project.
+
+### Default behavior
+
+When `review_gate.require_agy_verify_for_implementation` is `true` (the default):
+
+1. Every CC execute/continue, AGY execute/continue, and auto-execute job is created with `requires_agy_review: true`.
+2. Before `apply`, the orchestrator searches for a completed AGY verify job with the same `project_dir` and `task_id`.
+3. If no matching AGY verify evidence exists, `apply` is rejected with a clear error message.
+4. AGY investigate/verify jobs are exempt - they are review work, not implementation.
+
+### Waivers
+
+When `review_gate.allow_waiver` is `true` (the default), a job can bypass the review gate by setting `review_waiver: true` in the contract metadata. Waived jobs record the waiver in their job metadata and in the dashboard.
+
+To enforce the gate without exception, set `allow_waiver: false` in the project config.
+
+### Disabling the gate
+
+Set `require_agy_verify_for_implementation: false` to disable the review gate entirely. All implementation jobs will apply without requiring AGY verification evidence.
+
+### Dashboard visibility
+
+The review-gate status is visible at multiple levels:
+
+- **Project summary**: `review_blocked` count shows ready-for-acceptance jobs still requiring AGY verify.
+- **Job detail**: `requires_agy_review`, `review_waiver`, and `agy_verify_job_id` fields show the gate status for each job.
+- **Current state**: `review_gate_summary` lists total jobs requiring review and jobs ready but blocked.
+- **Handoff**: recommends running `agy-verify` when blocked jobs are detected.
