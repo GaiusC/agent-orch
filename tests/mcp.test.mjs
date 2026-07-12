@@ -137,6 +137,60 @@ test("codex host is blocked from codex-exec via policy", async () => {
   }
 });
 
+test("codex host can persist an in-session Planner contract without external invocation", async () => {
+  const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-codex-plan-"));
+  await fs.mkdir(path.join(projectDir, ".agent-orchestrator"), { recursive: true });
+  await fs.writeFile(
+    path.join(projectDir, ".agent-orchestrator", "config.json"),
+    JSON.stringify({ trusted: true, host: { provider: "codex" }, mcp: { enabled: true } }),
+  );
+
+  const client = new Client({ name: "agent-orch-test", version: "1.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(pluginRoot, "scripts", "server.mjs")],
+  });
+  await client.connect(transport);
+  try {
+    const result = await client.callTool({
+      name: "planner-plan",
+      arguments: {
+        project_dir: projectDir,
+        task_id: "codex-persist-only",
+        planner_session_id: "in-session-codex-test",
+        contract: {
+          contract_id: "codex-persist-only",
+          contract_version: 1,
+          executor_subtasks: [{
+            subtask_id: "foundation",
+            role: "executor",
+            objective: "Persist the current Codex-owned plan",
+            complexity: "low",
+            writable_paths: ["src/"],
+            forbidden_paths: [".git/"],
+            required_tests: ["node --test"],
+            acceptance_criteria: ["contract is persisted"],
+            fallback_policy: { enabled: false },
+          }],
+        },
+      },
+    });
+    assert.equal(result.isError, false);
+    const body = JSON.parse(result.content[0].text);
+    assert.equal(body.task_id, "codex-persist-only");
+    assert.equal(body.planner_session_id, "in-session-codex-test");
+    assert.equal(body.contract_id, "codex-persist-only");
+    assert.ok(body.contract_digest);
+    assert.equal(
+      await fs.stat(path.join(projectDir, ".agent-orchestrator", "contracts", "codex-persist-only.json")).then(() => true),
+      true,
+    );
+  } finally {
+    await client.close();
+    await fs.rm(projectDir, { recursive: true, force: true });
+  }
+});
+
 // -- Host allow-list: cc_desktop blocked from cc-exec but allowed codex-exec --
 
 test("cc_desktop coordinator can drive the MCP workflow", async () => {

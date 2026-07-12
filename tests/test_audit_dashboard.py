@@ -9,8 +9,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER_PATH = ROOT / "skills" / "audit-orch" / "scripts" / "server.py"
-INDEX_PATH = ROOT / "skills" / "audit-orch" / "scripts" / "index.html"
+SERVER_PATH = ROOT / "dashboard" / "scripts" / "server.py"
+INDEX_PATH = ROOT / "dashboard" / "scripts" / "index.html"
 
 SPEC = importlib.util.spec_from_file_location("audit_orch_server", SERVER_PATH)
 SERVER = importlib.util.module_from_spec(SPEC)
@@ -944,7 +944,7 @@ class AuditDashboardTests(unittest.TestCase):
 
     def test_vendor_directory_contains_marked_and_dompurify(self):
         """Vendor directory must contain local browser builds of marked and DOMPurify."""
-        vendor = ROOT / "skills" / "audit-orch" / "scripts" / "vendor"
+        vendor = ROOT / "dashboard" / "scripts" / "vendor"
         self.assertTrue(vendor.is_dir(), "vendor directory must exist")
         marked_js = vendor / "marked.min.js"
         purify_js = vendor / "purify.min.js"
@@ -1135,7 +1135,7 @@ class AuditDashboardTests(unittest.TestCase):
 
     def test_dompurify_blocks_xss_via_node(self):
         """DOMPurify must sanitize out dangerous HTML from conclusion content (verify via Node.js)."""
-        purify_path = ROOT / "skills" / "audit-orch" / "scripts" / "vendor" / "purify.min.js"
+        purify_path = ROOT / "dashboard" / "scripts" / "vendor" / "purify.min.js"
         node_script = (
             "const fs = require('fs');"
             "const { JSDOM } = require(" + json.dumps(str(ROOT / "node_modules" / "jsdom" / "lib" / "api.js")) + ");"
@@ -1165,7 +1165,7 @@ class AuditDashboardTests(unittest.TestCase):
 
     def test_marked_parses_commonmark_via_node(self):
         """marked must convert standard Markdown to HTML (verify via Node.js)."""
-        marked_path = ROOT / "skills" / "audit-orch" / "scripts" / "vendor" / "marked.min.js"
+        marked_path = ROOT / "dashboard" / "scripts" / "vendor" / "marked.min.js"
         node_script = (
             "const fs = require('fs');"
             "const { JSDOM } = require(" + json.dumps(str(ROOT / "node_modules" / "jsdom" / "lib" / "api.js")) + ");"
@@ -1197,8 +1197,8 @@ class AuditDashboardTests(unittest.TestCase):
 
     def test_marked_and_dompurify_integration_via_node(self):
         """marked output piped through DOMPurify must produce clean HTML (verify via Node.js)."""
-        marked_path = ROOT / "skills" / "audit-orch" / "scripts" / "vendor" / "marked.min.js"
-        purify_path = ROOT / "skills" / "audit-orch" / "scripts" / "vendor" / "purify.min.js"
+        marked_path = ROOT / "dashboard" / "scripts" / "vendor" / "marked.min.js"
+        purify_path = ROOT / "dashboard" / "scripts" / "vendor" / "purify.min.js"
         node_script = (
             "const fs = require('fs');"
             "const { JSDOM } = require(" + json.dumps(str(ROOT / "node_modules" / "jsdom" / "lib" / "api.js")) + ");"

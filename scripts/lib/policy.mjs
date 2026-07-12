@@ -52,8 +52,10 @@ const SAFE_DIAGNOSTIC_TOOLS = [
   "cancel",
 ];
 
-// Codex may use CC/AGY workers, auto, reviewers, job controls, and diag tools.
-// Codex must NOT self-invoke (codex-exec / codex-continue) or use planner-plan.
+// Codex may persist its in-session plan, use CC/AGY workers, auto, reviewers,
+// job controls, and diagnostic tools. planner-plan is persist-only: it records
+// the contract produced by the current Codex host and does not invoke Codex CLI.
+// Codex must NOT self-invoke via codex-exec / codex-continue.
 // MCP maintenance (mcp status|install|repair|remove) is CLI-only.
 const CODEX_TOOLS = [
   "cc-exec",
@@ -63,6 +65,7 @@ const CODEX_TOOLS = [
   "auto",
   "reviewer-investigate",
   "reviewer-verify",
+  "planner-plan",
   "accepter-accept",
   "status",
   "result",

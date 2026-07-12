@@ -40,7 +40,7 @@ Agent Orch must be resumed with the current host before routing work. Use `-Host
 
 Each host has a specific set of MCP tools it is permitted to use via the shared policy module:
 
-- **Codex**: cc-exec, cc-continue, agy-exec, agy-continue, auto, reviewer-investigate, reviewer-verify, status, result, cancel, apply, cleanup, health. Codex must NOT self-invoke via codex-exec/codex-continue or use planner-plan.
+- **Codex**: planner-plan, cc-exec, cc-continue, agy-exec, agy-continue, auto, reviewer-investigate, reviewer-verify, accepter-accept, status, result, cancel, apply, cleanup, health. Codex uses planner-plan only to persist the contract it produced in the current session; this does not invoke an external planner. Codex must NOT self-invoke via codex-exec/codex-continue.
 - **CC Desktop**: health, codex-exec, codex-continue, planner-plan, status, result, cleanup, cancel. CC Desktop must NOT launch workers, reviewers, auto, or apply.
 - **Terminal**: health, status, result, cleanup, cancel (minimum maintenance set).
 
@@ -91,7 +91,7 @@ Worker implementation, reviewer, and job-control operations are ONLY available t
 | `reviewer-verify` | codex | Read-only review/verification via AGY |
 | `codex-exec` | cc_desktop | External Codex planner/accepter (NOT for codex hosts) |
 | `codex-continue` | cc_desktop | Continue external Codex session |
-| `planner-plan` | cc_desktop | AGY Opus planning evidence |
+| `planner-plan` | codex, cc_desktop | Persist the fixed Planner contract; for a Codex host this records the current in-session plan without invoking Codex CLI |
 | `status` | all* | Compact job status, including `progress` with at most two newest assistant-only messages (no tool calls, no raw logs). Use `result` for full evidence. |
 | `result` | all* | Job result/evidence |
 | `cancel` | all* | Cancel running job |

@@ -35,11 +35,11 @@ test("every known host has an allow-list entry", () => {
   }
 });
 
-test("codex host cannot call codex-exec or planner-plan", () => {
+test("codex host cannot self-invoke but can persist its in-session plan", () => {
   const codex = HOST_TOOL_ALLOW_LISTS.codex;
   assert.equal(codex.includes("codex-exec"), false, "codex must not self-invoke codex-exec");
   assert.equal(codex.includes("codex-continue"), false, "codex must not self-invoke codex-continue");
-  assert.equal(codex.includes("planner-plan"), false, "codex must not use planner-plan");
+  assert.equal(codex.includes("planner-plan"), true, "codex must be able to persist its in-session plan");
 });
 
 test("codex host can call workers, reviewers, and job controls", () => {

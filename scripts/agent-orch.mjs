@@ -209,7 +209,7 @@ async function initProject() {
   }
   const dashboardLauncher = path.join(orchestratorRoot, "open-dashboard.ps1");
   if (!(await pathExists(dashboardLauncher))) {
-    const pluginLauncher = path.join(scriptDir, "..", "skills", "audit-orch", "scripts", "open-dashboard.ps1");
+    const pluginLauncher = path.join(scriptDir, "..", "dashboard", "scripts", "open-dashboard.ps1");
     const launcher = [
       'param([int]$PreferredPort = 15788, [switch]$Close)',
       '$ErrorActionPreference = "Stop"',
@@ -416,7 +416,7 @@ async function mcpRemove() {
 async function openDashboard() {
   const projectDir = projectDirArg();
   const preferredPort = Number(args.PreferredPort || args.preferredPort || 15788);
-  const launcher = path.resolve(scriptDir, "..", "skills", "audit-orch", "scripts", "open-dashboard.ps1");
+  const launcher = path.resolve(scriptDir, "..", "dashboard", "scripts", "open-dashboard.ps1");
   const result = await runProcess({
     command: "powershell",
     args: ["-ExecutionPolicy", "Bypass", "-File", launcher, "-ProjectDir", projectDir, "-PreferredPort", String(preferredPort)],
@@ -444,7 +444,7 @@ async function openDashboard() {
 async function closeDashboard() {
   const projectDir = projectDirArg();
   const preferredPort = Number(args.PreferredPort || args.preferredPort || 15788);
-  const launcher = path.resolve(scriptDir, "..", "skills", "audit-orch", "scripts", "open-dashboard.ps1");
+  const launcher = path.resolve(scriptDir, "..", "dashboard", "scripts", "open-dashboard.ps1");
   const result = await runProcess({
     command: "powershell",
     args: ["-ExecutionPolicy", "Bypass", "-File", launcher, "-ProjectDir", projectDir, "-PreferredPort", String(preferredPort), "-Close"],

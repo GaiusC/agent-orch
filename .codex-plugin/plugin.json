@@ -1,6 +1,6 @@
 {
   "name": "agent-orch",
-  "version": "0.4.0+codex.20260703221931",
+  "version": "0.4.0+codex.20260712212909",
   "description": "MCP-driven multi-agent orchestration for delegating implementation to CC or AGY, targeted verification, and read-only monitoring of Agent Orch runs.",
   "author": {
     "name": "Jieli Chen"

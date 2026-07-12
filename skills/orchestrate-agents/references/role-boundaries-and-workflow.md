@@ -11,6 +11,7 @@ Read [agent-orch-protocol.md](agent-orch-protocol.md) before changing host/provi
 ### Codex should
 
 - When Codex is the current host, read project rules, inspect existing architecture, and form the initial plan in the current Codex session before worker launch.
+- Persist that in-session plan with `planner-plan` before launching contract-bound work. This operation records the contract and planner session identity only; it does not invoke Codex CLI or another planner.
 - Split broad work into small contracts with stable `task_id` values, narrow writable paths, forbidden paths, acceptance commands, and rollback or risk notes.
 - Decide architecture, dependency, schema, data, security, deployment, and scope boundaries before delegating.
 - Route implementation and repair through MCP tools: `auto` (recommended), `cc-exec`/`cc-continue`, or `agy-exec`/`agy-continue`.
@@ -22,7 +23,7 @@ Read [agent-orch-protocol.md](agent-orch-protocol.md) before changing host/provi
 ### Codex should not
 
 - Invoke Codex CLI or a second Codex worker for planner/accepter work when the current host is already Codex.
-- Use MCP tools `codex-exec`, `codex-continue`, or `planner-plan` — these are blocked for codex hosts by the policy module.
+- Use MCP tools `codex-exec` or `codex-continue` — these are blocked for codex hosts by the policy module because planner/accepter reasoning stays in the current Codex session.
 - Modify project code, tests, migrations, schemas, build files, application configuration, deployment files, or production-facing scripts while this skill is active.
 - Use itself as the fallback implementation worker after a worker fails. If workers are unavailable, report the blocker and ask whether to leave Agent Orch mode.
 - Start coding before creating a plan and at least one explicit contract.
