@@ -69,9 +69,11 @@ Configurable in `.agent-orchestrator/config.json`:
 
 ### AGY proxy injection
 
-Agent Orch automatically injects proxy environment variables into every AGY subprocess (`agy-exec`, `agy-continue`, `reviewer-investigate`, `reviewer-verify`) through the `cli.agy_env` configuration map. This works without modifying WinHTTP, without a wrapper script, and without requiring MCP callers to pass proxy fields.
+Agent Orch can inject proxy environment variables into every AGY subprocess (`agy-exec`, `agy-continue`, `reviewer-investigate`, `reviewer-verify`) through the `cli.agy_env` configuration map. This works without modifying WinHTTP, without a wrapper script, and without requiring MCP callers to pass proxy fields.
 
-Configure in `.agent-orchestrator/config.json`:
+The project template defaults `agy_env` to an empty object `{}`, disabling injection. Set `agy_env` to `{}` explicitly to confirm no proxy is needed.
+
+Configure proxy values in `.agent-orchestrator/config.json` only if your environment requires them:
 
 ```json
 {
@@ -86,11 +88,16 @@ Configure in `.agent-orchestrator/config.json`:
 }
 ```
 
-The defaults template and this project are pre-configured with `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` set to `http://127.0.0.1:10100`, plus `NO_PROXY` for loopback addresses. The process environment is always preserved; explicit `agy_env` values override it. Set `agy_env` to an empty object `{}` to disable injection without removing the key.
+The values shown (`http://127.0.0.1:10100`) are only a localhost example. Adjust host and port to match your actual proxy. The process environment is always preserved; explicit `agy_env` values override it.
 
 ### Audit dashboard views
 
-The audit dashboard (launched via `agent-orch dashboard`) exposes role/provider/stage views for every project:
+> The `audit-orch` standalone skill is disabled in v0.4.0. The dashboard remains
+> available through the CLI (`agent-orch dashboard`). Use the CLI to inspect job
+> state, review-gate status, and run evidence.
+
+The audit dashboard (launched via `agent-orch dashboard`) exposes role/provider/stage
+views for every project:
 
 - **Role lanes**: Planner (Codex or configured planner), Executor (CC/AGY write), Reviewer (configured reviewer, currently AGY-backed), Accepter/Coordinator.
 - **Provider counts**: CC, AGY, AGY write, Codex.

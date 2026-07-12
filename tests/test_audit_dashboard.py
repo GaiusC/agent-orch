@@ -1255,8 +1255,8 @@ class AuditDashboardTests(unittest.TestCase):
         dev_deps = pkg.get("devDependencies", {})
         self.assertEqual(deps.get("marked"), "15.0.12",
                          "marked must be pinned to exact version 15.0.12")
-        self.assertEqual(deps.get("dompurify"), "3.3.0",
-                         "dompurify must be pinned to exact version 3.3.0")
+        self.assertEqual(deps.get("dompurify"), "3.4.12",
+                         "dompurify must be pinned to exact version 3.4.12")
         self.assertEqual(dev_deps.get("jsdom"), "26.0.0",
                          "jsdom must be pinned to exact version 26.0.0")
 

@@ -1,6 +1,6 @@
 {
   "name": "agent-orch",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "MCP-driven Codex workflow for multi-agent orchestration with CC and AGY providers.",
@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
-    "dompurify": "3.3.0",
+    "dompurify": "3.4.12",
     "marked": "15.0.12"
   },
   "devDependencies": {

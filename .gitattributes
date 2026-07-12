@@ -1,0 +1,30 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Node.js
+*.js text eol=lf
+*.mjs text eol=lf
+package.json text eol=lf
+package-lock.json text eol=lf
+
+# Python
+*.py text eol=lf
+
+# PowerShell
+*.ps1 text eol=lf
+
+# Markdown / docs
+*.md text eol=lf diff=markdown
+
+# YAML
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.ico binary
+*.pyc binary

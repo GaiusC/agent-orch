@@ -47,12 +47,7 @@
     "agy_sandbox": false,
     "agy_project": null,
     "agy_project_id": null,
-    "agy_env": {
-      "HTTP_PROXY": "http://127.0.0.1:10100",
-      "HTTPS_PROXY": "http://127.0.0.1:10100",
-      "ALL_PROXY": "http://127.0.0.1:10100",
-      "NO_PROXY": "localhost,127.0.0.1,::1"
-    }
+    "agy_env": {}
   },
   "agy": {
     "enabled": true,
