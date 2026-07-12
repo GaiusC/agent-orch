@@ -1,19 +1,17 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { classifyAgyQuotaError } from "../scripts/lib/adapters.mjs";
+import { WorkerOrchestrator } from "../scripts/lib/orchestrator.mjs";
+import { StateStore } from "../scripts/lib/state.mjs";
+import { createAutoPlannerContract } from "./fixtures/architecture.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, "$1"));
-const cli = path.join(path.resolve(here, ".."), "scripts", "agent-orch.mjs");
 const fakeCc = path.join(here, "fixtures", "fake-cc.mjs");
 const fakeAgy = path.join(here, "fixtures", "fake-agy.mjs");
-
-function runCli(args, cwd) {
-  return JSON.parse(execFileSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 30000 }));
-}
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -34,7 +32,7 @@ async function createProject(root) {
   const config = {
     version: 1,
     trusted: true,
-    routing: { auto: "agy_preferred", agy_write_fallback_to_cc_on_quota: true },
+    routing: { executor_priority: ["agy", "cc"], agy_write_fallback_to_cc_on_quota: true, cc_verify_fail_escalate_to_agy: false },
     cli: {
       claude: process.execPath,
       agy: process.execPath,
@@ -52,10 +50,25 @@ async function createProject(root) {
       max_log_bytes: 1024 * 1024,
       max_result_chars: 8000,
     },
+    scope: {
+      writable: ["."],
+      forbidden: [".git/", ".env", ".env.*"],
+    },
     verification: { commands: ["node verify.cjs"] },
+    review_gate: { require_agy_verify_for_implementation: false, allow_waiver: true },
   };
   await fs.writeFile(path.join(project, ".agent-orchestrator", "config.json"), JSON.stringify(config, null, 2));
   return project;
+}
+
+async function waitFor(orchestrator, jobId, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = await orchestrator.status(jobId);
+    if (["completed", "failed", "cancelled"].includes(job.status)) return job;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${jobId}`);
 }
 
 // -- Unit tests: quota error classifier --
@@ -105,13 +118,12 @@ test("classifyAgyQuotaError returns false for non-quota errors", () => {
 });
 
 test("classifyAgyQuotaError prefers non-quota classification", () => {
-  // Even if "limit" appears, auth takes priority
   assert.equal(classifyAgyQuotaError("authentication failed: usage limit"), false);
 });
 
-// -- Integration: auto with quota fallback to CC --
+// -- Integration: auto with quota fallback to CC (via orchestrator API) --
 
-test("auto falls back to CC on AGY quota exhaustion", async (t) => {
+test("auto falls back to CC on AGY quota exhaustion (orchestrator API)", async (t) => {
   const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
   process.env.AGENT_ORCH_FAKE_AGY_MODE = "quota-error";
   t.after(() => {
@@ -123,27 +135,28 @@ test("auto falls back to CC on AGY quota exhaustion", async (t) => {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
 
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "quota-fallback",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+  await createAutoPlannerContract(project, "quota-fallback", { complexity: "medium" });
 
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  // Should have fallen back to CC
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "quota-fallback",
+    subtask_id: "impl-1",
+  });
+  await waitFor(orchestrator, started.id, 20000);
+  const result = await orchestrator.result(started.id);
+
   assert.equal(result.job.provider, "cc");
   assert.equal(result.job.auto_route, "cc_fallback");
   assert.equal(result.job.auto_fallback_classifier, "quota_exhaustion");
   assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.status, "ready_for_acceptance");
   assert.equal(result.evidence.auto_route.fallback_occurred, true);
   assert.equal(result.evidence.auto_route.original_provider, "agy_write");
-  assert.equal(result.evidence.auto_route.reason, "quota_exhaustion");
 });
 
-test("auto falls back to CC on AGY rate limit", async (t) => {
+test("auto falls back to CC on AGY rate limit (orchestrator API)", async (t) => {
   const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
   process.env.AGENT_ORCH_FAKE_AGY_MODE = "rate-limit";
   t.after(() => {
@@ -155,24 +168,26 @@ test("auto falls back to CC on AGY rate limit", async (t) => {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
 
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "ratelimit-fallback",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "high",
-  }, null, 2));
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+  await createAutoPlannerContract(project, "ratelimit-fallback", { complexity: "high" });
 
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "cc");
-  assert.equal(result.job.auto_route, "cc_fallback");
-  assert.equal(result.job.auto_fallback_classifier, "quota_exhaustion");
-  assert.equal(result.job.status, "completed", result.job.error);
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "ratelimit-fallback",
+    subtask_id: "impl-1",
+  });
+  await waitFor(orchestrator, started.id, 20000);
+  const finished = await orchestrator.status(started.id);
+
+  assert.equal(finished.provider, "cc");
+  assert.equal(finished.auto_route, "cc_fallback");
+  assert.equal(finished.auto_fallback_classifier, "quota_exhaustion");
+  assert.equal(finished.status, "completed", finished.error);
 });
 
-// -- Integration: no silent fallback for non-quota errors --
-
-test("auto does NOT fall back for AGY auth errors", async (t) => {
+test("auto does NOT fall back for AGY auth errors (orchestrator API)", async (t) => {
   const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
   process.env.AGENT_ORCH_FAKE_AGY_MODE = "auth-error";
   t.after(() => {
@@ -184,22 +199,24 @@ test("auto does NOT fall back for AGY auth errors", async (t) => {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
 
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "auth-no-fallback",
-    goal: "Create feature.txt containing good",
-    plan: "Implement",
-    complexity: "medium",
-  }, null, 2));
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+  await createAutoPlannerContract(project, "auth-no-fallback", { complexity: "medium" });
 
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  // Auth error should surface -- job should be failed, not fallback to CC
-  assert.equal(result.job.status, "failed");
-  assert.notEqual(result.job.provider, "cc");
-  assert.equal(result.job.auto_route, "agy_write");
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "auth-no-fallback",
+    subtask_id: "impl-1",
+  });
+  const finished = await waitFor(orchestrator, started.id, 20000);
+
+  assert.equal(finished.status, "failed");
+  assert.notEqual(finished.provider, "cc");
+  assert.equal(finished.auto_route, "agy_write");
 });
 
-test("auto does NOT fall back for AGY internal errors", async (t) => {
+test("auto does NOT fall back for AGY internal errors (orchestrator API)", async (t) => {
   const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
   process.env.AGENT_ORCH_FAKE_AGY_MODE = "internal-error";
   t.after(() => {
@@ -211,16 +228,18 @@ test("auto does NOT fall back for AGY internal errors", async (t) => {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
 
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "internal-no-fallback",
-    goal: "Create feature.txt containing good",
-    plan: "Implement",
-    complexity: "medium",
-  }, null, 2));
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+  await createAutoPlannerContract(project, "internal-no-fallback", { complexity: "medium" });
 
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  // Internal error should surface -- not fall back to CC
-  assert.equal(result.job.status, "failed");
-  assert.notEqual(result.job.provider, "cc");
+  const started = await orchestrator.startAuto({
+    project_dir: project,
+    task_id: "internal-no-fallback",
+    subtask_id: "impl-1",
+  });
+  const finished = await waitFor(orchestrator, started.id, 20000);
+
+  assert.equal(finished.status, "failed");
+  assert.notEqual(finished.provider, "cc");
 });

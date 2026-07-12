@@ -1,18 +1,24 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { autoRouteProvider, chooseAgyWriteModel, DEFAULT_CONFIG } from "../scripts/lib/config.mjs";
+import { ccExecutorModel, agyExecutorFallback, plannerFallback, reviewerModel } from "../scripts/lib/model-registry.mjs";
+import { WorkerOrchestrator } from "../scripts/lib/orchestrator.mjs";
+import { StateStore } from "../scripts/lib/state.mjs";
+import { createPersistedPlannerContract } from "./fixtures/architecture.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, "$1"));
 const cli = path.join(path.resolve(here, ".."), "scripts", "agent-orch.mjs");
-const fakeCc = path.join(here, "fixtures", "fake-cc.mjs");
-const fakeAgy = path.join(here, "fixtures", "fake-agy.mjs");
 
 function runCli(args, cwd) {
   return JSON.parse(execFileSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 30000 }));
+}
+
+function runCliRaw(args, cwd) {
+  return execFileSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 30000 });
 }
 
 function git(cwd, ...args) {
@@ -22,495 +28,335 @@ function git(cwd, ...args) {
 async function createProject(root, overrides = {}) {
   const project = path.join(root, "project");
   await fs.mkdir(project, { recursive: true });
-  await fs.writeFile(path.join(project, "verify.cjs"), "const fs=require('fs'); process.exit(fs.existsSync('feature.txt') && fs.readFileSync('feature.txt','utf8') === 'good' ? 0 : 1);\n");
   await fs.writeFile(path.join(project, "README.md"), "fixture\n");
   git(project, "init");
   git(project, "config", "user.name", "Agent Orch Tests");
   git(project, "config", "user.email", "agent-orch@example.test");
   git(project, "add", ".");
   git(project, "commit", "-m", "fixture");
-
-  await fs.mkdir(path.join(project, ".agent-orchestrator"), { recursive: true });
-  const config = {
-    version: 1,
-    trusted: true,
-    cli: {
-      claude: process.execPath,
-      agy: process.execPath,
-      claude_prefix_args: [fakeCc],
-      agy_prefix_args: [fakeAgy],
-      agy_sandbox: false,
-      agy_project: "fixture-project",
-    },
-    agy: { auth_probe_required: false, enabled: true },
-    execution: {
-      workspace_mode: "isolated",
-      max_cc_repair_rounds: 2,
-      cc_timeout_seconds: 20,
-      agy_timeout_seconds: 20,
-      agy_write_timeout_seconds: 20,
-      max_log_bytes: 1024 * 1024,
-      max_result_chars: 8000,
-    },
-    scope: {
-      writable: ["."],
-      forbidden: [".git/", ".env", ".env.*"],
-    },
-    verification: { commands: ["node verify.cjs"] },
-    ...overrides,
-  };
-  await fs.writeFile(path.join(project, ".agent-orchestrator", "config.json"), JSON.stringify(config, null, 2));
   return project;
 }
 
-// -- Config unit tests --
-
-test("autoRouteProvider default (no routing.auto) is cc_first", () => {
-  const config = {};
-  assert.equal(autoRouteProvider(config, "low"), "cc");
-  assert.equal(autoRouteProvider(config, "medium"), "cc");
-  assert.equal(autoRouteProvider(config, "high"), "cc");
-});
-
-test("autoRouteProvider with cc_first routes all complexities to CC", () => {
-  const config = { routing: { auto: "cc_first" } };
-  assert.equal(autoRouteProvider(config, "low"), "cc");
-  assert.equal(autoRouteProvider(config, "medium"), "cc");
-  assert.equal(autoRouteProvider(config, "high"), "cc");
-});
-
-test("autoRouteProvider with agy_preferred routes low->cc, medium/high->agy (legacy)", () => {
-  const config = { routing: { auto: "agy_preferred" } };
-  assert.equal(autoRouteProvider(config, "low"), "cc");
-  assert.equal(autoRouteProvider(config, "medium"), "agy");
-  assert.equal(autoRouteProvider(config, "high"), "agy");
-});
-
-test("autoRouteProvider with legacy cc routes all to cc", () => {
-  const config = { routing: { auto: "cc" } };
-  assert.equal(autoRouteProvider(config, "low"), "cc");
-  assert.equal(autoRouteProvider(config, "medium"), "cc");
-  assert.equal(autoRouteProvider(config, "high"), "cc");
-});
-
-test("autoRouteProvider with legacy agy preserves agy_preferred behavior", () => {
-  const config = { routing: { auto: "agy" } };
-  assert.equal(autoRouteProvider(config, "low"), "cc");
-  assert.equal(autoRouteProvider(config, "medium"), "agy");
-  assert.equal(autoRouteProvider(config, "high"), "agy");
-});
-
-test("chooseAgyWriteModel returns correct models by complexity", () => {
-  const config = { models: {} };
-  assert.equal(chooseAgyWriteModel(config, "medium"), "Claude Sonnet 4.6 (Thinking)");
-  assert.equal(chooseAgyWriteModel(config, "high"), "Claude Opus 4.6 (Thinking)");
-  assert.equal(chooseAgyWriteModel(config, "low"), null);
-});
-
-test("chooseAgyWriteModel respects config override", () => {
-  const config = { models: { agy_write: { medium: "Custom Medium Model", high: "Custom High Model" } } };
-  assert.equal(chooseAgyWriteModel(config, "medium"), "Custom Medium Model");
-  assert.equal(chooseAgyWriteModel(config, "high"), "Custom High Model");
-});
-
-// -- CLI integration: auto routes low -> CC --
-
-test("auto CLI command routes low complexity to CC with deepseek-v4-flash", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-auto-low-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+async function createAutoProject(root, executorPriority = ["cc", "agy"]) {
   const project = await createProject(root);
+  const orchDir = path.join(project, ".agent-orchestrator");
+  await fs.mkdir(orchDir, { recursive: true });
+  await fs.writeFile(path.join(orchDir, "config.json"), JSON.stringify({
+    trusted: true,
+    routing: { executor_priority: executorPriority },
+    review_gate: { require_reviewer_for_implementation: false, require_agy_verify_for_implementation: false },
+  }));
+  return project;
+}
 
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "auto-low",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "low",
-  }, null, 2));
+// -- Centralized routing and model registry --
 
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "cc");
-  assert.equal(result.job.auto_route, "cc");
-  assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.status, "ready_for_acceptance");
-  assert.equal(result.evidence.model, "deepseek-v4-flash");
+test("autoRouteProvider uses the centralized CC-first executor priority for every Planner tier", () => {
+  for (const tier of ["low", "medium", "high"]) {
+    assert.equal(autoRouteProvider(DEFAULT_CONFIG, tier), "cc");
+  }
 });
 
-// -- CLI integration: auto routes medium -> CC with cc_first default --
+test("autoRouteProvider only honors executor_priority, not retired routing.auto", () => {
+  const ccFirst = { routing: { auto: "agy_preferred", executor_priority: ["cc", "agy"] } };
+  const agyFirst = { routing: { auto: "cc_first", executor_priority: ["agy", "cc"] } };
+  for (const tier of ["low", "medium", "high"]) {
+    assert.equal(autoRouteProvider(ccFirst, tier), "cc");
+    assert.equal(autoRouteProvider(agyFirst, tier), "agy");
+  }
+});
 
-test("auto CLI command routes medium complexity to CC with deepseek-v4-flash", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-auto-med-"));
+test("model registry fallback keys resolve to exact Thinking model strings for AGY CLI", () => {
+  const agyExec = agyExecutorFallback();
+  assert.equal(agyExec.logical_key, "fallback.agy_exec");
+  assert.equal(agyExec.provider, "anthropic");
+  assert.equal(agyExec.canonical_id, "Claude Sonnet 4.6 (Thinking)");
+  assert.equal(agyExec.display_name, "Claude Sonnet 4.6 (Thinking)");
+
+  const planner = plannerFallback();
+  assert.equal(planner.logical_key, "fallback.planner");
+  assert.equal(planner.provider, "anthropic");
+  assert.equal(planner.canonical_id, "Claude Opus 4.6 (Thinking)");
+  assert.equal(planner.display_name, "Claude Opus 4.6 (Thinking)");
+});
+
+test("chooseAgyWriteModel hardcoded fallback returns exact Thinking model strings", () => {
+  // When config has no agy_write models (empty), the hardcoded fallback is used.
+  const emptyConfig = {};
+  assert.equal(chooseAgyWriteModel(emptyConfig, "low"), "Claude Sonnet 4.6 (Thinking)");
+  assert.equal(chooseAgyWriteModel(emptyConfig, "medium"), "Claude Sonnet 4.6 (Thinking)");
+  assert.equal(chooseAgyWriteModel(emptyConfig, "high"), "Claude Opus 4.6 (Thinking)");
+});
+
+test("model registry resolves executor and reviewer identities by role and tier", () => {
+  assert.deepEqual(ccExecutorModel("medium"), {
+    logical_key: "cc.exec.mid",
+    provider: "cc",
+    role: "executor",
+    tier: "mid",
+    display_name: "DeepSeek V4 Flash",
+    canonical_id: "deepseek-v4-flash",
+  });
+  assert.deepEqual(reviewerModel("high"), {
+    logical_key: "agy.review.high",
+    provider: "agy",
+    role: "reviewer",
+    tier: "high",
+    display_name: "Gemini 3.1 Pro",
+    canonical_id: "gemini-3.1-pro",
+  });
+});
+
+test("auto reads the persisted Planner subtask and rejects caller-supplied routing", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-auto-contract-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root);
+  const project = await createAutoProject(root);
+  const persisted = await createPersistedPlannerContract(project, "task-1");
+  const store = new StateStore(path.join(root, "state"));
+  await store.init();
+  const orchestrator = new WorkerOrchestrator(store);
+  orchestrator.launch = () => {};
 
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "auto-med",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
+  const started = await orchestrator.startAuto({ project_dir: project, task_id: "task-1", subtask_id: "impl-1" });
+  assert.equal(started.provider, "cc");
+  const job = await store.getJob(started.id);
+  assert.equal(job.subtask_id, "impl-1");
+  assert.equal(job.complexity, "low");
+  assert.equal(job.contract_digest, persisted.contract_digest);
 
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "cc");
-  assert.equal(result.job.auto_route, "cc");
-  assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.status, "ready_for_acceptance");
-  assert.equal(result.evidence.model, "deepseek-v4-flash");
+  await assert.rejects(
+    () => orchestrator.startAuto({ project_dir: project, task_id: "task-1", subtask_id: "impl-1", complexity: "high" }),
+    /server_managed_complexity/,
+  );
+  await assert.rejects(
+    () => orchestrator.startAuto({ project_dir: project, task_id: "task-1", subtask_id: "impl-1", model: "caller-model" }),
+    /server_managed_routing/,
+  );
 });
 
-// -- CLI integration: auto routes high -> CC with deepseek-v4-pro --
+// -- DEFAULT_CONFIG review_gate --
 
-test("auto CLI command routes high complexity to CC with deepseek-v4-pro", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-auto-high-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root);
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "auto-high",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "high",
-  }, null, 2));
-
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "cc");
-  assert.equal(result.job.auto_route, "cc");
-  assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.model, "deepseek-v4-pro");
-});
-
-// -- Legacy agy_preferred: medium/high routes to AGY write --
-
-test("auto CLI command with agy_preferred routes medium to AGY write", async (t) => {
-  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
-  t.after(() => {
-    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-legacy-agy-med-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root, { routing: { auto: "agy_preferred", agy_write_fallback_to_cc_on_quota: true } });
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "legacy-agy-med",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
-
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "agy_write");
-  assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.status, "ready_for_acceptance");
-  assert.equal(result.evidence.model, "Claude Sonnet 4.6 (Thinking)");
-});
-
-// -- Legacy agy_preferred: high routes to AGY write with Opus --
-
-test("auto CLI command with agy_preferred routes high to AGY write with Opus", async (t) => {
-  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
-  t.after(() => {
-    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-legacy-agy-high-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root, { routing: { auto: "agy_preferred", agy_write_fallback_to_cc_on_quota: true } });
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "legacy-agy-high",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "high",
-  }, null, 2));
-
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "agy_write");
-  assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.model, "Claude Opus 4.6 (Thinking)");
-});
-
-// -- Legacy config compatibility: primary_writer=cc still works with auto --
-
-test("auto command works with legacy primary_writer=cc config (agy_preferred routing)", async (t) => {
-  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
-  t.after(() => {
-    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-legacy-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  // Create config with explicit agy_preferred routing (simulating legacy config)
-  const project = await createProject(root, { routing: { auto: "agy_preferred", agy_write_fallback_to_cc_on_quota: true } });
-  // Manually remove routing field to simulate pre-upgrade config
-  const configPath = path.join(project, ".agent-orchestrator", "config.json");
-  let config = JSON.parse(await fs.readFile(configPath, "utf8"));
-  delete config.routing;
-  config.roles = { primary_writer: "cc", specialist: "agy", duplicate_implementation: false };
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "legacy-auto",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
-
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  // With no routing section and cc_first default, medium routes to CC
-  assert.equal(result.job.provider, "cc");
-  assert.equal(result.job.status, "completed", result.job.error);
-});
-
-// -- CC verification failure escalates to AGY write --
-
-test("CC verification failure escalates to AGY write with Claude Sonnet 4.6 (Thinking)", async (t) => {
-  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
-  const previousAgyMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
-  t.after(() => {
-    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
-    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
-    if (previousAgyMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousAgyMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-cc-fail-agy-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root, {
-    routing: { auto: "cc_first", cc_verify_fail_escalate_to_agy: true, agy_write_fallback_to_cc_on_quota: true },
-  });
-  // Disable auth probe so fake AGY write works
-  const configPath = path.join(project, ".agent-orchestrator", "config.json");
-  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
-  config.agy.auth_probe_required = false;
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "cc-fail-agy",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
-
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  // Should have escalated to AGY write after CC failed verification
-  assert.equal(result.job.provider, "agy_write");
-  assert.equal(result.job.auto_route, "cc_then_agy_escalation");
-  assert.equal(result.job.auto_fallback_classifier, "cc_verification_failed");
-  assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.model, "Claude Sonnet 4.6 (Thinking)");
-  assert.equal(result.evidence.auto_route.provider, "agy_write");
-  assert.equal(result.evidence.auto_route.fallback_occurred, true);
-  assert.equal(result.evidence.auto_route.original_provider, "cc");
-  assert.equal(result.evidence.auto_route.reason, "cc_verification_failed");
-  assert.ok(result.evidence.auto_route.cc_attempts >= 2, "should have at least 2 CC attempts");
-});
-
-// -- AGY quota during CC verification escalation falls back to CC high --
-
-test("AGY quota during escalation falls back to CC high with deepseek-v4-pro", async (t) => {
-  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
-  const previousAgyMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "quota-error";
-  t.after(() => {
-    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
-    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
-    if (previousAgyMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousAgyMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-agyquota-esc-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root, {
-    routing: { auto: "cc_first", cc_verify_fail_escalate_to_agy: true, agy_write_fallback_to_cc_on_quota: true },
-  });
-  // Disable auth probe so fake AGY works (to get the quota error)
-  const configPath = path.join(project, ".agent-orchestrator", "config.json");
-  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
-  config.agy.auth_probe_required = false;
-  config.models = config.models || {};
-  config.models.cc = { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" };
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "agyquota-esc",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
-
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  // CC failed -> AGY escalation hit quota -> fell back to CC high
-  assert.equal(result.job.provider, "cc");
-  assert.equal(result.job.auto_route, "cc_fallback_after_agy_quota");
-  assert.equal(result.job.auto_fallback_classifier, "agy_quota_during_escalation");
-  assert.equal(result.evidence.model, "deepseek-v4-pro");
-  assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.auto_route.provider, "cc");
-  assert.equal(result.evidence.auto_route.fallback_occurred, true);
-  assert.equal(result.evidence.auto_route.reason, "agy_quota_during_escalation");
-  assert.deepEqual(result.evidence.auto_route.escalation_chain, ["cc", "agy_write", "cc_high"]);
-});
-
-// -- No silent escalation when CC disable escalation --
-
-test("auto does NOT escalate to AGY when cc_verify_fail_escalate_to_agy is false", async (t) => {
-  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
-  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
-  t.after(() => {
-    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
-    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-noesc-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root, {
-    routing: { auto: "cc_first", cc_verify_fail_escalate_to_agy: false, agy_write_fallback_to_cc_on_quota: true },
-  });
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "noesc",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
-
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  // Escalation disabled - CC failure should stand as is
-  assert.equal(result.job.provider, "cc");
-  assert.equal(result.job.status, "failed", "CC should remain failed when escalation is disabled");
-});
-
-// -- No escalation when attempts < 2 --
-
-test("auto does NOT escalate to AGY when CC makes only 1 attempt (insufficient cycles)", async (t) => {
-  const previousCcMode = process.env.AGENT_ORCH_FAKE_CC_MODE;
-  process.env.AGENT_ORCH_FAKE_CC_MODE = "always-fail";
-  t.after(() => {
-    if (previousCcMode === undefined) delete process.env.AGENT_ORCH_FAKE_CC_MODE;
-    else process.env.AGENT_ORCH_FAKE_CC_MODE = previousCcMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-nocycle-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root, {
-    routing: { auto: "cc_first", cc_verify_fail_escalate_to_agy: true, agy_write_fallback_to_cc_on_quota: true },
-  });
-  // Reduce repair rounds to 0 so CC makes only 1 attempt
-  const configPath = path.join(project, ".agent-orchestrator", "config.json");
-  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
-  config.execution.max_cc_repair_rounds = 0;
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "nocycle",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
-
-  const result = runCli(["auto", "-ProjectDir", project, "-Contract", contractPath]);
-  // Only 1 attempt - no escalation
-  assert.equal(result.job.provider, "cc");
-  assert.equal(result.job.status, "failed", "CC should remain failed with only 1 attempt");
-});
-
-// -- AGY exec/continue CLI commands --
-
-test("agy-exec CLI command produces ready_for_acceptance patch", async (t) => {
-  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
-  t.after(() => {
-    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-agyexec-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root);
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "agyexec",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
-
-  const result = runCli(["agy-exec", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(result.job.provider, "agy_write");
-  assert.equal(result.job.status, "completed", result.job.error);
-  assert.equal(result.evidence.status, "ready_for_acceptance");
-  assert.equal(result.evidence.provider, "agy_write");
-
-  // Apply and verify
-  await fs.writeFile(path.join(project, "feature.txt"), "good", "utf8");
-});
-
-test("agy-continue CLI command works with same task_id", async (t) => {
-  const previousMode = process.env.AGENT_ORCH_FAKE_AGY_MODE;
-  process.env.AGENT_ORCH_FAKE_AGY_MODE = "write-session";
-  t.after(() => {
-    if (previousMode === undefined) delete process.env.AGENT_ORCH_FAKE_AGY_MODE;
-    else process.env.AGENT_ORCH_FAKE_AGY_MODE = previousMode;
-  });
-
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-agycont-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const project = await createProject(root);
-
-  const contractPath = path.join(root, "contract.json");
-  await fs.writeFile(contractPath, JSON.stringify({
-    task_id: "agycont",
-    goal: "Create feature.txt containing good",
-    plan: "Implement and verify",
-    complexity: "medium",
-  }, null, 2));
-
-  const first = runCli(["agy-exec", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(first.job.status, "completed", first.job.error);
-
-  const second = runCli(["agy-continue", "-ProjectDir", project, "-Contract", contractPath]);
-  assert.equal(second.job.provider, "agy_write");
-});
-
-// -- Review-gate policy defaults --
-
-test("DEFAULT_CONFIG includes review_gate with require_agy_verify_for_implementation=true", () => {
+test("DEFAULT_CONFIG includes review_gate with reviewer gate enabled", () => {
   assert.ok(DEFAULT_CONFIG.review_gate, "DEFAULT_CONFIG must have review_gate section");
+  assert.equal(DEFAULT_CONFIG.review_gate.require_reviewer_for_implementation, true);
   assert.equal(DEFAULT_CONFIG.review_gate.require_agy_verify_for_implementation, true);
   assert.equal(DEFAULT_CONFIG.review_gate.allow_waiver, true);
 });
 
-test("review_gate defaults are present in loaded config even without project override", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-reviewcfg-"));
+// -- DEFAULT_CONFIG agy_env --
+
+test("DEFAULT_CONFIG includes agy_env as empty object in cli section", () => {
+  assert.ok(DEFAULT_CONFIG.cli, "DEFAULT_CONFIG must have cli section");
+  assert.ok(DEFAULT_CONFIG.cli.agy_env, "DEFAULT_CONFIG.cli must have agy_env");
+  assert.equal(typeof DEFAULT_CONFIG.cli.agy_env, "object");
+  assert.equal(Object.keys(DEFAULT_CONFIG.cli.agy_env).length, 0);
+});
+
+test("agy_env merges from project config overriding defaults", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-agyenv-merge-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
-  // createProject doesn't set review_gate, so it should inherit from DEFAULT_CONFIG
+  const orchDir = path.join(project, ".agent-orchestrator");
+  await fs.mkdir(orchDir, { recursive: true });
+  await fs.writeFile(
+    path.join(orchDir, "config.json"),
+    JSON.stringify({
+      cli: {
+        agy_env: {
+          HTTP_PROXY: "http://127.0.0.1:10100",
+          HTTPS_PROXY: "http://127.0.0.1:10100",
+          ALL_PROXY: "http://127.0.0.1:10100",
+          NO_PROXY: "localhost,127.0.0.1,::1",
+        },
+      },
+    }),
+  );
+
+  const { loadProjectConfig } = await import("../scripts/lib/config.mjs");
+  const config = await loadProjectConfig(project);
+  assert.ok(config.cli.agy_env);
+  assert.equal(config.cli.agy_env.HTTP_PROXY, "http://127.0.0.1:10100");
+  assert.equal(config.cli.agy_env.HTTPS_PROXY, "http://127.0.0.1:10100");
+  assert.equal(config.cli.agy_env.ALL_PROXY, "http://127.0.0.1:10100");
+  assert.equal(config.cli.agy_env.NO_PROXY, "localhost,127.0.0.1,::1");
+});
+
+// -- CLI surface: MCP-only errors --
+
+const MCP_ONLY_COMMANDS = [
+  "auto", "cc-exec", "cc-continue", "agy-exec", "agy-continue",
+  "reviewer-investigate", "reviewer-verify", "planner-plan",
+  "status", "result", "apply", "cleanup",
+];
+
+for (const cmd of MCP_ONLY_COMMANDS) {
+  test(`CLI "${cmd}" fails with explicit MCP-only error`, async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `agent-orch-cli-${cmd}-`));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const project = await createProject(root);
+
+    try {
+      runCliRaw([cmd, "-ProjectDir", project], root);
+      assert.fail(`Expected ${cmd} to throw`);
+    } catch (error) {
+      const output = JSON.parse(error.stdout || error.message || "");
+      // The error message should reference MCP
+      const errorText = output.error || JSON.stringify(output);
+      assert.match(errorText, /MCP|no longer available/, `${cmd} should mention MCP in error`);
+    }
+  });
+}
+
+// -- CLI surface: help --
+
+test("CLI help shows new command surface", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-cli-help-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const output = runCliRaw(["--help"], root);
+  assert.match(output, /mcp status/, "help should mention mcp status");
+  assert.match(output, /mcp install/, "help should mention mcp install");
+  assert.match(output, /mcp repair/, "help should mention mcp repair");
+  assert.match(output, /mcp remove/, "help should mention mcp remove");
+  // Worker commands should not be in the help
+  assert.doesNotMatch(output, /^\s+cc-exec\b/m, "help should not list cc-exec as available");
+  assert.doesNotMatch(output, /^\s+auto\b/m, "help should not list auto as available");
+});
+
+// -- CLI surface: init / resume --
+
+test("CLI init creates project with mcp config", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-init-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+
+  const result = runCli(["init", "-ProjectDir", project, "-HostProvider", "codex"]);
+  assert.equal(result.ok, true);
+  assert.equal(result.mcp_enabled, false, "codex init should keep mcp disabled");
+  assert.equal(result.host_provider, "codex");
+
+  // Verify config was written
+  const config = JSON.parse(await fs.readFile(path.join(project, ".agent-orchestrator", "config.json"), "utf8"));
+  assert.equal(config.mcp.enabled, false);
+  assert.equal(config.host.provider, "codex");
+});
+
+test("CLI init with cc_desktop enables mcp", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-init-cc-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+
+  const result = runCli(["init", "-ProjectDir", project, "-HostProvider", "cc_desktop"]);
+  assert.equal(result.ok, true);
+  assert.equal(result.mcp_enabled, true, "cc_desktop init should enable mcp");
+  assert.equal(result.host_provider, "cc_desktop");
+
+  const config = JSON.parse(await fs.readFile(path.join(project, ".agent-orchestrator", "config.json"), "utf8"));
+  assert.equal(config.mcp.enabled, true);
+});
+
+test("CLI resume preserves mcp profile", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-resume-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+
+  // First init as cc_desktop (enables MCP)
+  await runCli(["init", "-ProjectDir", project, "-HostProvider", "cc_desktop"]);
+
+  // Then resume as codex (should preserve mcp.enabled)
+  const result = runCli(["resume", "-ProjectDir", project, "-HostProvider", "codex"]);
+  assert.ok(result.mcp_enabled, "resume should preserve mcp.enabled");
+
+  const config = JSON.parse(await fs.readFile(path.join(project, ".agent-orchestrator", "config.json"), "utf8"));
+  assert.equal(config.mcp.enabled, true, "mcp.enabled should survive resume");
+  assert.equal(config.host.provider, "codex");
+});
+
+// -- CLI surface: mcp maintenance commands --
+
+test("CLI mcp status reports configuration", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-mcpstat-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+  await runCli(["init", "-ProjectDir", project, "-HostProvider", "codex"]);
+
+  const result = runCli(["mcp", "status", "-ProjectDir", project]);
+  assert.equal(result.ok, true);
+  assert.equal(result.mcp_enabled, false);
+  assert.equal(result.host_provider, "codex");
+  assert.equal(result.trusted, true);
+});
+
+test("CLI mcp install enables MCP and writes .mcp.json", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-mcpinst-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+  await runCli(["init", "-ProjectDir", project, "-HostProvider", "codex"]);
+
+  const result = runCli(["mcp", "install", "-ProjectDir", project]);
+  assert.equal(result.ok, true);
+  assert.equal(result.mcp_enabled, true);
+
+  // Verify config
+  const config = JSON.parse(await fs.readFile(path.join(project, ".agent-orchestrator", "config.json"), "utf8"));
+  assert.equal(config.mcp.enabled, true);
+
+  // Verify .mcp.json
+  const mcpJson = JSON.parse(await fs.readFile(path.join(project, ".mcp.json"), "utf8"));
+  assert.ok(mcpJson.mcpServers?.["agent-orch"], ".mcp.json should have agent-orch entry");
+  assert.equal(mcpJson.mcpServers["agent-orch"].command, "node");
+});
+
+test("CLI mcp repair fixes broken configuration", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-mcprep-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+  await runCli(["init", "-ProjectDir", project, "-HostProvider", "codex"]);
+
+  // Simulate broken state
   const configPath = path.join(project, ".agent-orchestrator", "config.json");
-  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
-  // The createProject helper doesn't include review_gate
-  // Reloading from loadProjectConfig would fill in defaults
-  const module = await import("../scripts/lib/config.mjs");
-  const loaded = await module.loadProjectConfig(project);
-  assert.equal(loaded.review_gate.require_agy_verify_for_implementation, true);
-  assert.equal(loaded.review_gate.allow_waiver, true);
+  let config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.mcp = { enabled: false };
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  const result = runCli(["mcp", "repair", "-ProjectDir", project]);
+  assert.equal(result.ok, true);
+  assert.equal(result.mcp_repaired, true);
+  assert.equal(result.mcp_enabled, true);
+
+  config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  assert.equal(config.mcp.enabled, true);
+});
+
+test("CLI mcp remove disables MCP and removes .mcp.json entry", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-mcprm-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+  await runCli(["init", "-ProjectDir", project, "-HostProvider", "codex"]);
+  await runCli(["mcp", "install", "-ProjectDir", project]);
+
+  const result = runCli(["mcp", "remove", "-ProjectDir", project]);
+  assert.equal(result.ok, true);
+  assert.equal(result.mcp_removed, true);
+  assert.equal(result.mcp_enabled, false);
+
+  const config = JSON.parse(await fs.readFile(path.join(project, ".agent-orchestrator", "config.json"), "utf8"));
+  assert.equal(config.mcp.enabled, false);
+
+  const mcpJson = JSON.parse(await fs.readFile(path.join(project, ".mcp.json"), "utf8"));
+  assert.equal(mcpJson.mcpServers?.["agent-orch"], undefined);
+});
+
+// -- CLI surface: health includes mcp_enabled and host_provider --
+
+test("CLI health reports mcp_enabled and host_provider", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-health-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+  await runCli(["init", "-ProjectDir", project, "-HostProvider", "cc_desktop"]);
+
+  const result = runCli(["health", "-ProjectDir", project]);
+  assert.equal(result.ok, true);
+  assert.equal(result.mcp_enabled, true);
+  assert.equal(result.host_provider, "cc_desktop");
 });

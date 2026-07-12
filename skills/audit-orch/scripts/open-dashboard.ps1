@@ -1,6 +1,7 @@
 param(
     [string]$ProjectDir = (Get-Location).Path,
-    [int]$PreferredPort = 15788
+    [int]$PreferredPort = 15788,
+    [switch]$Close
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,7 +24,7 @@ function Resolve-OrchestratorDir {
 function Get-DashboardStatus {
     param([int]$Port)
     try {
-        $res = Invoke-WebRequest -UseBasicParsing -Uri "http://localhost:$Port/api/status" -TimeoutSec 2
+        $res = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec 2
         if ($res.StatusCode -ge 200 -and $res.StatusCode -lt 500) {
             return $res.Content | ConvertFrom-Json
         }
@@ -41,17 +42,79 @@ function Test-PortAvailable {
     return -not $existing
 }
 
+function Stop-DashboardOnPort {
+    param(
+        [int]$Port,
+        [string]$ExpectedServerPath,
+        [string]$ExpectedProjectDir
+    )
+    $connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
+        Where-Object { $_.State -in @("Listen", "Established", "Bound") }
+    $processIds = @($connections | Select-Object -ExpandProperty OwningProcess -Unique)
+    $stopped = $false
+    foreach ($processId in $processIds) {
+        if (-not $processId) { continue }
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        $cmd = [string]$proc.CommandLine
+        if ($cmd -and $cmd.Contains($ExpectedServerPath) -and $cmd.Contains($ExpectedProjectDir) -and $cmd.Contains("--port $Port")) {
+            Stop-Process -Id $processId -Force
+            $stopped = $true
+        }
+    }
+    return $stopped
+}
+
 $resolvedProject = (Resolve-Path -LiteralPath $ProjectDir).Path
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$serverPath = Join-Path $scriptDir "server.py"
+$resolvedProjectFull = [System.IO.Path]::GetFullPath($resolvedProject).TrimEnd('\')
 $targetOrchestrator = Resolve-OrchestratorDir -StartDir $resolvedProject
+if ($Close -and -not $targetOrchestrator) {
+    $closed = $false
+    $matchedPort = $null
+    for ($candidate = $PreferredPort; $candidate -lt $PreferredPort + 50; $candidate++) {
+        if (Stop-DashboardOnPort -Port $candidate -ExpectedServerPath $serverPath -ExpectedProjectDir $resolvedProjectFull) {
+            $closed = $true
+            $matchedPort = $candidate
+            break
+        }
+    }
+    if ($matchedPort) {
+        Write-Output "dashboard_url=http://127.0.0.1:$matchedPort"
+    }
+    Write-Output "orchestrator_dir="
+    Write-Output "stopped=$($closed.ToString().ToLowerInvariant())"
+    exit 0
+}
 if (-not $targetOrchestrator) {
     throw ".agent-orchestrator not found from project dir: $resolvedProject"
 }
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$serverPath = Join-Path $scriptDir "server.py"
 $target = [System.IO.Path]::GetFullPath($targetOrchestrator).TrimEnd('\')
 $requiredServerVersion = "audit-orch-project-bound-v3"
 $port = $null
+
+if ($Close) {
+    $closed = $false
+    $matchedPort = $null
+    for ($candidate = $PreferredPort; $candidate -lt $PreferredPort + 50; $candidate++) {
+        $status = Get-DashboardStatus -Port $candidate
+        if (-not ($status -and $status.orchestrator_dir)) { continue }
+        $current = [System.IO.Path]::GetFullPath([string]$status.orchestrator_dir).TrimEnd('\')
+        if ($current -ieq $target -and $status.server_version -eq $requiredServerVersion) {
+            $matchedPort = $candidate
+            $closed = Stop-DashboardOnPort -Port $candidate -ExpectedServerPath $serverPath -ExpectedProjectDir $resolvedProjectFull
+            break
+        }
+    }
+    if ($matchedPort) {
+        Write-Output "dashboard_url=http://127.0.0.1:$matchedPort"
+    }
+    Write-Output "orchestrator_dir=$targetOrchestrator"
+    Write-Output "stopped=$($closed.ToString().ToLowerInvariant())"
+    exit 0
+}
 
 for ($candidate = $PreferredPort; $candidate -lt $PreferredPort + 50; $candidate++) {
     $status = Get-DashboardStatus -Port $candidate
@@ -59,8 +122,8 @@ for ($candidate = $PreferredPort; $candidate -lt $PreferredPort + 50; $candidate
         $current = [System.IO.Path]::GetFullPath([string]$status.orchestrator_dir).TrimEnd('\')
         if ($current -ieq $target -and $status.server_version -eq $requiredServerVersion) {
             $port = $candidate
-            Start-Process "http://localhost:$port"
-            Write-Output "dashboard_url=http://localhost:$port"
+            Start-Process "http://127.0.0.1:$port"
+            Write-Output "dashboard_url=http://127.0.0.1:$port"
             Write-Output "orchestrator_dir=$targetOrchestrator"
             exit 0
         }
@@ -102,8 +165,8 @@ if (Test-PortAvailable -Port $port) {
     if ($status -and $status.orchestrator_dir) {
         $current = [System.IO.Path]::GetFullPath([string]$status.orchestrator_dir).TrimEnd('\')
         if ($current -ieq $target) {
-            Start-Process "http://localhost:$port"
-            Write-Output "dashboard_url=http://localhost:$port"
+            Start-Process "http://127.0.0.1:$port"
+            Write-Output "dashboard_url=http://127.0.0.1:$port"
             Write-Output "orchestrator_dir=$targetOrchestrator"
             exit 0
         }
@@ -111,7 +174,7 @@ if (Test-PortAvailable -Port $port) {
     throw "Port $port is occupied by a dashboard or service for another project."
 }
 
-Start-Process "http://localhost:$port"
-Write-Output "dashboard_url=http://localhost:$port"
+Start-Process "http://127.0.0.1:$port"
+Write-Output "dashboard_url=http://127.0.0.1:$port"
 Write-Output "orchestrator_dir=$($newStatus.orchestrator_dir)"
 exit 0

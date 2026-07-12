@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
   "version": "0.3.0+codex.20260703221931",
-  "description": "CLI-driven Codex workflow for delegating implementation to Claude Code, targeted verification to Antigravity, and read-only monitoring of Agent Orch runs.",
+  "description": "MCP-driven multi-agent orchestration for delegating implementation to CC or AGY, targeted verification, and read-only monitoring of Agent Orch runs.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -15,8 +15,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Agent Orch",
-    "shortDescription": "Delegate coding to CC, verify with AGY, and monitor runs.",
-    "longDescription": "A CLI-driven workflow that keeps Codex in charge of project planning and final acceptance while Claude Code implements, Antigravity performs targeted investigation or verification, and a read-only dashboard can inspect Agent Orch progress.",
+    "shortDescription": "MCP-driven multi-agent coding orchestration with CC, AGY, and Codex.",
+    "longDescription": "An MCP-driven workflow that keeps Codex in charge of project planning and final acceptance while CC or AGY implements, AGY performs targeted investigation or verification, and a read-only dashboard can inspect Agent Orch progress. Worker and reviewer operations are only available through MCP tools; the CLI handles project lifecycle, dashboard, and MCP configuration maintenance.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [
@@ -24,7 +24,7 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Use agent-orch to plan this change, delegate implementation to CC, and verify it.",
+      "Use agent-orch to plan this change, delegate implementation via MCP tools, and verify it.",
       "Use agent-orch to ask AGY to investigate this failure without duplicating implementation.",
       "Use agent-orch to open a read-only dashboard for CC/AGY progress and visible conversation logs."
     ]

@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "external_agents": {
+    "agent-orch": {
       "command": "node",
       "args": [
-        "./scripts/server.mjs"
+        "scripts/server.mjs"
       ]
     }
   }

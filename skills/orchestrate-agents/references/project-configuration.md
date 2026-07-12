@@ -21,7 +21,7 @@ For a new project or early project framing, run a `grill-me` session before impl
   },
   "host": {
     "provider": "unknown",
-    "in_session_roles": ["planner", "accepter"]
+    "in_session_roles": ["coordinator"]
   },
   "providers": {
     "codex": {
@@ -36,7 +36,34 @@ For a new project or early project framing, run a `grill-me` session before impl
 
 Keep `duplicate_implementation` false. Codex should reject implementation if duplication is enabled.
 
-When the current host is Codex, `providers.codex.external_invocation` must disable planner/accepter self-invocation. Planning and acceptance happen in the current Codex session, while the CLI records state and launches external workers.
+When the current host is Codex, `providers.codex.external_invocation` must disable planner/accepter self-invocation. Planning and acceptance happen in the current Codex session, while workers are launched through MCP tools.
+
+## MCP gate
+
+`mcp.enabled` is the single project-level gate for MCP tool access:
+
+- When `true`, MCP tools are available subject to host allow-list and trust validation.
+- When `false`, only the `health` MCP tool is available; all other tools return a structured denial.
+- `cc_desktop` / `claude_desktop` `init` and `resume` enable `mcp.enabled: true` automatically.
+- `codex` and `terminal` hosts keep `mcp.enabled: false` by default (MCP tools are accessed via the plugin's auto-registered MCP server; terminal hosts manage MCP manually).
+- `resume` without an explicit host provider preserves the existing `mcp.enabled` value.
+- Run `agent-orch mcp install` to enable MCP and write the `.mcp.json` server entry.
+- Run `agent-orch mcp repair` to fix broken MCP configuration.
+- Run `agent-orch mcp remove` to disable MCP and remove the `.mcp.json` entry.
+- Run `agent-orch mcp status` to inspect current MCP configuration.
+
+## Host policy
+
+The `host.provider` field determines which MCP tools are available via the shared policy module:
+
+| Host | Allowed MCP Tools |
+| --- | --- |
+| `codex` | `cc-exec`, `cc-continue`, `agy-exec`, `agy-continue`, `auto`, `reviewer-investigate`, `reviewer-verify`, `status`, `result`, `cancel`, `apply`, `cleanup`, `health` |
+| `cc_desktop` / `claude_desktop` | `health`, `codex-exec`, `codex-continue`, `planner-plan`, `status`, `result`, `cancel`, `cleanup` |
+| `terminal` | `health`, `status`, `result`, `cancel`, `cleanup` |
+| `unknown` | none |
+
+When `trusted: false`, only safe diagnostic tools are available regardless of host: `health`, `status`, `result`, `cancel`, `cleanup`.
 
 ## Continuity and generated state
 
@@ -118,27 +145,31 @@ The review gate ensures implementation jobs receive independent verification bef
 ```json
 {
   "review_gate": {
-    "require_agy_verify_for_implementation": true,
+    "require_reviewer_for_implementation": true,
     "allow_waiver": true
   }
 }
 ```
 
-- **`require_agy_verify_for_implementation`** (default `true`): When enabled, CC execute/continue, AGY execute/continue, and auto-execute jobs are marked `requires_agy_review: true`. The `apply` command requires a completed AGY verify job for the same `project_dir` and `task_id` before the patch can land. AGY investigate/verify jobs are exempt.
-- **`allow_waiver`** (default `true`): When enabled, a job can bypass the review gate by setting `review_waiver: true` in the contract metadata. Waived jobs record the waiver in job metadata and the dashboard. Set to `false` to require AGY verify evidence on every implementation without exception.
+- **`require_reviewer_for_implementation`** (default `true`): When enabled, CC execute/continue, AGY execute/continue, and auto-execute jobs are marked as requiring reviewer evidence. The `apply` command requires a completed reviewer verification job for the same `project_dir` and `task_id` before the patch can land. Reviewer investigate/verify jobs are exempt. Legacy `require_agy_verify_for_implementation: false` is still honored for older projects.
+- **`allow_waiver`** (default `true`): When enabled, a job can bypass the review gate by setting `review_waiver: true` in the contract metadata. Waived jobs record the waiver in job metadata and the dashboard. Set to `false` to require reviewer evidence on every implementation without exception.
 
-**Disabling the gate**: Set `require_agy_verify_for_implementation` to `false` to disable review-gate enforcement entirely. All implementation jobs will apply without requiring AGY verification evidence.
+**Disabling the gate**: Set `require_reviewer_for_implementation` to `false` to disable review-gate enforcement entirely. All implementation jobs will apply without requiring reviewer evidence.
 
 **Dashboard visibility**: The review-gate status appears in:
 - Project summary (`review_blocked` count, per-job `requires_agy_review` / `review_waiver` fields)
 - Current state (`review_gate_summary` with blocked job IDs)
-- Handoff generation (recommends `agy-verify` for blocked jobs)
+- Handoff generation (recommends `reviewer-verify` for blocked jobs)
 
 
 ## Workflow policy
 
-For substantial changes, create small contracts and require an AGY gate for high-risk behavior. See [role-boundaries-and-workflow.md](role-boundaries-and-workflow.md).
+For substantial changes, create small contracts and require a reviewer gate for high-risk behavior. See [role-boundaries-and-workflow.md](role-boundaries-and-workflow.md).
 
-## Legacy MCP
+## MCP-driven architecture
 
-MCP is no longer the default path. Use it only when a single-account environment can keep Codex MCP configuration stable. The default project config should keep `mcp.enabled` false.
+Agent Orch is now MCP-driven. Worker implementation, reviewer, and job-control operations are only available through MCP tools. The CLI is restricted to project lifecycle (init, resume, health), dashboard, and MCP maintenance (mcp status, mcp install, mcp repair, mcp remove).
+
+The shared core policy module (`scripts/lib/policy.mjs`) enforces host identity, tool allow-lists, and trust decisions before any lower-layer execution. See [routing-and-sessions.md](routing-and-sessions.md) for the complete host x tool matrix.
+
+To enable MCP: run `agent-orch init -ProjectDir . -HostProvider cc_desktop` (which enables mcp.enabled) or run `agent-orch mcp install` on an existing project.

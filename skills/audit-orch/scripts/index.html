@@ -100,10 +100,14 @@
       width: 320px;
       background-color: var(--bg-sidebar);
       border-right: 1px solid var(--border-color);
-      display: flex;
-      flex-direction: column;
-      height: 100%;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      height: 100vh;
+      max-height: 100vh;
       flex-shrink: 0;
+      min-height: 0;
+      min-width: 0;
+      overflow: hidden;
       transition: background-color 0.3s, border-color 0.3s;
     }
 
@@ -112,6 +116,8 @@
     .sidebar-header {
       padding: 20px;
       border-bottom: 1px solid var(--border-color);
+      flex-shrink: 0;
+      min-width: 0;
     }
 
     .brand {
@@ -160,16 +166,47 @@
 
     .filter-btn.active { background-color: var(--primary); border-color: var(--primary); color: #ffffff; }
 
-    .job-list {
+    .mode-btn {
       flex-grow: 1;
+      height: 30px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--bg-app);
+      color: var(--text-secondary);
+      font-size: 0.76rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .mode-btn.active {
+      background: var(--primary-bg);
+      border-color: var(--primary);
+      color: var(--text-primary);
+    }
+
+    .job-list {
+      flex: 1 1 0;
+      min-height: 0;
+      height: auto;
+      max-height: none;
+      min-width: 0;
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 10px;
       display: flex;
       flex-direction: column;
       gap: 8px;
+      overscroll-behavior: contain;
+    }
+
+    .job-list > * {
+      flex: 0 0 auto;
     }
 
     .job-card {
+      width: 100%;
+      min-width: 0;
+      overflow: hidden;
       padding: 12px;
       background-color: var(--bg-card);
       border-radius: 8px;
@@ -181,12 +218,86 @@
     .job-card:hover { background-color: var(--bg-card-hover); }
     .job-card.active { border-color: var(--primary); background-color: var(--primary-bg); }
 
-    .job-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-    .job-card-id { font-family: var(--font-mono); font-size: 0.8rem; font-weight: 500; color: var(--text-primary); }
+    .job-card-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; min-width: 0; }
+    .job-card-id { font-family: var(--font-mono); font-size: 0.8rem; font-weight: 500; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .job-card-task { font-size: 0.85rem; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 4px; }
+
+    .task-group {
+      width: 100%;
+      min-width: 0;
+      min-height: 0;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--bg-card);
+    }
+
+    .task-group-header {
+      width: 100%;
+      border: 0;
+      background: var(--bg-card);
+      color: var(--text-primary);
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      cursor: pointer;
+      font-family: var(--font-sans);
+      text-align: left;
+      min-width: 0;
+    }
+
+    .task-group-header:hover { background: var(--bg-card-hover); }
+    .task-group.active .task-group-header { background: var(--primary-bg); }
+
+    .task-group-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+
+    .task-group-meta {
+      flex-shrink: 0;
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      font-family: var(--font-mono);
+    }
+
+    .task-group-jobs {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      padding: 8px;
+      border-top: 1px solid var(--border-color);
+      min-width: 0;
+      min-height: 0;
+      overflow: visible;
+    }
+
+    .task-group .job-card {
+      border-radius: 6px;
+      padding: 10px;
+    }
+
+    .contract-summary {
+      color: var(--text-secondary);
+      font-size: 0.74rem;
+      line-height: 1.35;
+      padding: 0 12px 10px 12px;
+      border-top: 1px solid var(--border-color);
+    }
 
     .badge {
       display: inline-block;
+      flex-shrink: 0;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       padding: 2px 6px;
       border-radius: 4px;
       font-size: 0.7rem;
@@ -195,6 +306,11 @@
     }
 
     .provider-badge { background-color: var(--border-color); color: var(--text-secondary); }
+    .job-card .provider-badge { max-width: 118px; vertical-align: bottom; }
+    .plan-badge { font-size: 0.65rem; padding: 1px 5px; border-radius: 3px; margin-left: 4px; vertical-align: bottom; }
+    .plan-formal { background-color: var(--primary); color: #fff; }
+    .plan-adhoc { background-color: #e6a817; color: #fff; }
+    .plan-legacy { background-color: var(--border-color); color: var(--text-secondary); }
     .status-badge { margin-left: 5px; }
 
     .status-running { color: var(--status-running); background-color: var(--status-running-bg); }
@@ -268,6 +384,178 @@
       display: flex;
       flex-direction: column;
       gap: 20px;
+    }
+
+    .dag-panel {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .dag-panel.collapsed .dag-grid,
+    .dag-panel.collapsed .dag-edges,
+    .dag-panel.collapsed .contract-panel {
+      display: none;
+    }
+
+    .dag-panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .dag-header-left {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .dag-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .dag-action {
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--bg-app);
+      color: var(--text-secondary);
+      height: 30px;
+      padding: 0 9px;
+      font-size: 0.74rem;
+      font-family: var(--font-sans);
+      cursor: pointer;
+    }
+
+    .dag-action:hover,
+    .dag-action.active {
+      color: var(--text-primary);
+      border-color: var(--primary);
+      background: var(--primary-bg);
+    }
+
+    .dag-panel-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .dag-panel-meta {
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      font-family: var(--font-mono);
+    }
+
+    .dag-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 10px;
+    }
+
+    .dag-node {
+      border: 1px solid var(--border-color);
+      border-left: 4px solid var(--text-muted);
+      border-radius: 8px;
+      padding: 10px;
+      background: var(--bg-app);
+      min-height: 132px;
+      cursor: default;
+    }
+
+    .dag-node.clickable { cursor: pointer; }
+    .dag-node.clickable:hover { background: var(--bg-card-hover); }
+    .dag-node.applied { border-left-color: var(--status-completed); }
+    .dag-node.running { border-left-color: var(--status-running); }
+    .dag-node.failed { border-left-color: var(--status-failed); }
+    .dag-node.blocked, .dag-node.review_blocked { border-left-color: var(--status-stale); }
+    .dag-node.ready_for_acceptance { border-left-color: var(--primary); }
+
+    .dag-node-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }
+
+    .dag-node-id {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-primary);
+      overflow-wrap: anywhere;
+    }
+
+    .dag-node-goal {
+      color: var(--text-secondary);
+      font-size: 0.82rem;
+      line-height: 1.3;
+      margin-bottom: 8px;
+    }
+
+    .dag-scope {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+
+    .dag-chip {
+      border: 1px solid var(--border-color);
+      border-radius: 5px;
+      padding: 2px 5px;
+      color: var(--text-secondary);
+      font-size: 0.68rem;
+      font-family: var(--font-mono);
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .dag-edges {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-color);
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .contract-panel {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-color);
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 10px;
+    }
+
+    .contract-card {
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: var(--bg-app);
+      padding: 10px;
+    }
+
+    .contract-card-title {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+      overflow-wrap: anywhere;
+    }
+
+    .contract-card-body {
+      color: var(--text-secondary);
+      font-size: 0.78rem;
+      line-height: 1.45;
     }
 
     /* -- Project Selection View -- */
@@ -1057,6 +1345,7 @@
           <div class="filter-btn active" id="btnProvAll" onclick="setProviderFilter('all')">All Providers</div>
           <div class="filter-btn" id="btnCc" onclick="setProviderFilter('cc')">CC</div>
           <div class="filter-btn" id="btnAgy" onclick="setProviderFilter('agy')">AGY</div>
+          <div class="filter-btn" id="btnCodex" onclick="setProviderFilter('codex')">Codex</div>
         </div>
       </div>
     </div>
@@ -1107,7 +1396,15 @@
   <script>
     // -- State --
     let rawJobs = [];
+    let rawDag = { nodes: [], edges: [] };
+    let rawPlans = null; // from /api/plans — authoritative plan manifest
     let activeJobId = null;
+    let activeTaskId = null;
+    let activePlanId = null;
+    let collapsedPlans = readStringSet('agentOrchAuditCollapsedPlans');
+    let collapsedContracts = readStringSet('agentOrchAuditCollapsedContracts');
+    let dagCollapsed = localStorage.getItem('agentOrchAuditDagCollapsed') === 'true';
+    let dagMode = localStorage.getItem('agentOrchAuditDagMode') || 'dag';
     let statusFilter = 'all';
     let providerFilter = 'all';
     let theme = localStorage.getItem('agentOrchAuditTheme') || 'dark';
@@ -1288,6 +1585,8 @@
                   <span class="orch-indicator ${p.has_orchestrator ? 'orch-yes' : 'orch-no'}">${p.has_orchestrator ? 'Agent Orch' : 'No Orch'}</span>
                   <span class="meta-stat">${p.total_jobs} jobs</span>
                   ${p.active_jobs > 0 ? `<span class="meta-stat active-jobs">${p.active_jobs} running</span>` : ''}
+                  ${p.plan_counts ? `<span class="meta-stat">${Object.keys(p.plan_counts).length} plans</span>` : ''}
+                  ${p.legacy_job_count > 0 ? `<span class="meta-stat">${p.legacy_job_count} legacy</span>` : ''}
                 </div>
               </div>`;
             }).join('')}
@@ -1309,9 +1608,12 @@
     // -- Dashboard Load --
     function loadDashboard() {
       activeJobId = null;
+      activeTaskId = null;
       activeTabId = null;
-      document.getElementById('detailPane') && (document.getElementById('detailPane').innerHTML = '<div class="empty-state">Select a task from the left sidebar to view real-time logs and session metadata.</div>');
+      document.getElementById('dashboardView').innerHTML = '<div id="dagPanel" class="dag-panel"><div class="empty-state">Loading DAG...</div></div><div id="detailPane"><div class="empty-state">Select a task from the left sidebar or DAG to view real-time logs and session metadata.</div></div>';
       pollStatus();
+      pollDag();
+      pollPlans();
       pollRuns();
       if (!detailPollTimer) {
         detailPollTimer = setInterval(() => {
@@ -1339,7 +1641,7 @@
 
     function setProviderFilter(val) {
       providerFilter = val;
-      ['btnProvAll', 'btnCc', 'btnAgy'].forEach(id => document.getElementById(id).classList.remove('active'));
+      ['btnProvAll', 'btnCc', 'btnAgy', 'btnCodex'].forEach(id => document.getElementById(id).classList.remove('active'));
       const targetId = val === 'all' ? 'btnProvAll' : 'btn' + val.charAt(0).toUpperCase() + val.slice(1);
       document.getElementById(targetId).classList.add('active');
       applyFilters();
@@ -1350,10 +1652,83 @@
       const filtered = rawJobs.filter(job => {
         const matchesSearch = job.job_id.toLowerCase().includes(search) || job.task_id.toLowerCase().includes(search);
         const matchesStatus = statusFilter === 'all' || job.status === statusFilter;
-        const matchesProvider = providerFilter === 'all' || job.provider === providerFilter;
+        const matchesProvider = providerFilter === 'all'
+          || job.provider === providerFilter
+          || (providerFilter === 'agy' && ['agy', 'agy_write'].includes(job.provider));
         return matchesSearch && matchesStatus && matchesProvider;
       });
-      renderJobList(filtered);
+      renderContractList(filtered);
+    }
+
+    function showAllDag() {
+      activeTaskId = null;
+      activePlanId = null;
+      dagCollapsed = false;
+      localStorage.setItem('agentOrchAuditDagCollapsed', 'false');
+      renderDag();
+      applyFilters();
+    }
+
+    function toggleDagPanel() {
+      dagCollapsed = !dagCollapsed;
+      localStorage.setItem('agentOrchAuditDagCollapsed', dagCollapsed ? 'true' : 'false');
+      renderDag();
+    }
+
+    function setDagMode(mode) {
+      dagMode = mode;
+      localStorage.setItem('agentOrchAuditDagMode', mode);
+      dagCollapsed = false;
+      localStorage.setItem('agentOrchAuditDagCollapsed', 'false');
+      renderDag();
+    }
+
+    function selectTask(taskId) {
+      activeTaskId = taskId || null;
+      const node = (rawDag.nodes || []).find(item => item.task_id === activeTaskId);
+      activePlanId = node?.plan_id || activePlanId;
+      dagCollapsed = false;
+      localStorage.setItem('agentOrchAuditDagCollapsed', 'false');
+      renderDag();
+      applyFilters();
+      const latest = rawJobs.find(job => job.task_id === activeTaskId);
+      if (latest) selectJob(latest.job_id);
+      else {
+        const detail = document.getElementById('detailPane');
+        const node = (rawDag.nodes || []).find(item => item.task_id === activeTaskId);
+        if (detail) detail.innerHTML = renderSelectedContractDetail(node);
+      }
+    }
+
+    function selectPlanSet(planId) {
+      activePlanId = planId || null;
+      activeTaskId = null;
+      activeJobId = null;
+      dagCollapsed = false;
+      localStorage.setItem('agentOrchAuditDagCollapsed', 'false');
+      renderDag();
+      applyFilters();
+      const planInfo = (rawPlans?.plans || []).find(p => p.plan_id === activePlanId);
+      const set = (rawDag.contract_sets || []).find(item => (item.plan_id || 'default-plan') === activePlanId);
+      const detail = document.getElementById('detailPane');
+      if (detail) {
+        const isLegacy = activePlanId === '__legacy__';
+        const type = planInfo?.type || (isLegacy ? 'legacy' : (set ? 'formal' : 'adhoc'));
+        const nodeCount = set?.nodes?.length || 0;
+        const jobCount = set?.job_count || rawJobs.filter(j => j.plan_id === activePlanId || (isLegacy && !j.plan_id)).length;
+        detail.innerHTML = `<div class="detail-card">
+          <div class="detail-header">
+            <div class="detail-title">
+              <h3>Plan: ${escapeHtml(planInfo?.name || activePlanId || 'default-plan')}</h3>
+              <p>
+                <span class="badge plan-badge plan-${type}" style="margin-right:6px;">${type}</span>
+                <span style="color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.85rem;">${nodeCount} contracts / ${jobCount} jobs</span>
+              </p>
+            </div>
+          </div>
+          ${nodeCount > 0 ? `<div class="content-box"><div class="content-box-title">Contracts</div><div class="content-box-body">${escapeHtml(set.nodes.map(n => n.task_id).join(', ') || 'none')}</div></div>` : `<div class="content-box"><div class="content-box-title">Note</div><div class="content-box-body">${isLegacy ? 'Read-only group of historical jobs without plan provenance.' : 'This plan has no persisted contracts. Jobs were created by direct execution.'}</div></div>`}
+        </div>`;
+      }
     }
 
     // -- Process Column --
@@ -1430,6 +1805,134 @@
       }
     }
 
+    async function pollDag() {
+      if (currentView !== 'dashboard') return;
+      try {
+        const res = await fetch(projectApiUrl('/api/dag'));
+        const data = await res.json();
+        if (data && !data.error) rawDag = data;
+        renderDag();
+        applyFilters();
+      } catch (err) {
+        console.error("Error polling DAG:", err);
+      }
+    }
+
+    async function pollPlans() {
+      if (currentView !== 'dashboard') return;
+      try {
+        const res = await fetch(projectApiUrl('/api/plans'));
+        const data = await res.json();
+        if (data && !data.error) rawPlans = data;
+      } catch (err) {
+        console.error("Error polling plans:", err);
+      }
+    }
+
+    function renderDag() {
+      const panel = document.getElementById('dagPanel');
+      if (!panel) return;
+      const allNodes = rawDag.nodes || [];
+      const allEdges = rawDag.edges || [];
+
+      // When a plan is selected that has no DAG nodes (ad-hoc/legacy), show descriptive text
+      if (activePlanId && !activeTaskId) {
+        const planHasNodes = allNodes.some(node => (node.plan_id || 'default-plan') === activePlanId);
+        const isLegacy = activePlanId === '__legacy__';
+        if (!planHasNodes) {
+          panel.classList.toggle('collapsed', dagCollapsed);
+          const planInfo = (rawPlans?.plans || []).find(p => p.plan_id === activePlanId);
+          const type = planInfo?.type || (isLegacy ? 'legacy' : 'adhoc');
+          panel.innerHTML = `<div class="dag-panel-header">${dagHeaderHtml('No contracts', 0, 0)}</div>
+            <div class="empty-state">${isLegacy ? 'This is a read-only Legacy / Migration Plan grouping jobs created before plan/contract provenance was introduced.' : `This ${type} plan has no persisted contracts. Jobs were created via direct execution without a Planner contract.`}</div>`;
+          return;
+        }
+      }
+
+      const planTaskIds = activePlanId
+        ? new Set(allNodes.filter(node => (node.plan_id || 'default-plan') === activePlanId).map(node => node.task_id))
+        : null;
+      const visibleTaskIds = activeTaskId
+        ? new Set([activeTaskId, ...allEdges.filter(edge => edge.target === activeTaskId).map(edge => edge.source), ...allEdges.filter(edge => edge.source === activeTaskId).map(edge => edge.target)])
+        : planTaskIds
+        ? planTaskIds
+        : null;
+      const nodes = visibleTaskIds ? allNodes.filter(node => visibleTaskIds.has(node.task_id)) : allNodes;
+      const edges = visibleTaskIds ? allEdges.filter(edge => visibleTaskIds.has(edge.source) && visibleTaskIds.has(edge.target)) : allEdges;
+      if (!nodes.length) {
+        panel.classList.toggle('collapsed', dagCollapsed);
+        panel.innerHTML = `<div class="dag-panel-header">${dagHeaderHtml('No contracts found', 0, 0)}</div><div class="empty-state">Add JSON contracts under .agent-orchestrator/contracts to visualize the project DAG.</div>`;
+        return;
+      }
+      const stateCounts = nodes.reduce((acc, node) => {
+        acc[node.state] = (acc[node.state] || 0) + 1;
+        return acc;
+      }, {});
+      const stateText = Object.entries(stateCounts).map(([key, value]) => `${key}:${value}`).join(' ');
+      panel.classList.toggle('collapsed', dagCollapsed);
+      panel.innerHTML = `<div class="dag-panel-header">
+        ${dagHeaderHtml(stateText, nodes.length, edges.length)}
+      </div>
+      <div class="dag-grid">
+        ${nodes.map(renderDagNode).join('')}
+      </div>
+      ${edges.length ? `<div class="dag-edges">${edges.map(edge => `<span>${escapeHtml(edge.source)} -> ${escapeHtml(edge.target)}</span>`).join('')}</div>` : ''}
+      ${dagMode === 'contracts' ? renderContractPanel(nodes) : ''}`;
+    }
+
+    function dagHeaderHtml(stateText, nodeCount, edgeCount) {
+      const scope = activeTaskId ? `Task: ${activeTaskId}` : activePlanId ? `Plan: ${activePlanId}` : 'All Plans';
+      return `<div class="dag-header-left">
+        <div class="dag-panel-title">Contract DAG</div>
+        <div class="dag-panel-meta">${escapeHtml(scope)} / ${escapeHtml(nodeCount)} nodes / ${escapeHtml(edgeCount)} edges / ${escapeHtml(stateText)}</div>
+      </div>
+      <div class="dag-header-actions">
+        ${activeTaskId || activePlanId ? `<button class="dag-action" onclick="showAllDag()">All</button>` : ''}
+        <button class="dag-action ${dagMode === 'dag' ? 'active' : ''}" onclick="setDagMode('dag')">DAG</button>
+        <button class="dag-action ${dagMode === 'contracts' ? 'active' : ''}" onclick="setDagMode('contracts')">Contracts</button>
+        <button class="dag-action" onclick="toggleDagPanel()">${dagCollapsed ? 'Show' : 'Hide'}</button>
+      </div>`;
+    }
+
+    function renderContractPanel(nodes) {
+      return `<div class="contract-panel">
+        ${nodes.map(node => `<div class="contract-card">
+          <div class="contract-card-title">${escapeHtml(node.task_id)}</div>
+          <div class="contract-card-body">
+            <div>${escapeHtml(node.goal || '-')}</div>
+            <div>dep: ${escapeHtml((node.dependencies || []).join(', ') || 'none')}</div>
+            <div>read: ${escapeHtml((node.read_paths || []).join(', ') || 'none')}</div>
+            <div>write: ${escapeHtml((node.writable_paths || []).join(', ') || 'none')}</div>
+            <div>forbid: ${escapeHtml((node.forbidden_paths || []).join(', ') || 'none')}</div>
+          </div>
+        </div>`).join('')}
+      </div>`;
+    }
+
+    function renderDagNode(node) {
+      const jobId = node.latest_job_id || node.implementation_job_id || node.verify_job_id || '';
+      const stateClass = String(node.state || 'planned');
+      const clickable = jobId ? 'clickable' : '';
+      const deps = (node.dependencies || []).join(', ') || 'none';
+      const reads = (node.read_paths || []).slice(0, 3);
+      const writes = (node.writable_paths || []).slice(0, 3);
+      const blocked = (node.blocked_by || []).join(', ');
+      return `<div class="dag-node ${escapeHtml(stateClass)} ${clickable}" onclick="${jobId ? `selectJob('${escapeHtml(jobId)}')` : `selectTask('${escapeHtml(node.task_id)}')`}">
+        <div class="dag-node-head">
+          <div class="dag-node-id">${escapeHtml(node.task_id)}</div>
+          <span class="badge status-badge status-${escapeHtml(stateClass === 'applied' ? 'completed' : stateClass === 'failed' ? 'failed' : stateClass === 'running' ? 'running' : 'stale')}">${escapeHtml(node.state)}</span>
+        </div>
+        <div class="dag-node-goal">${escapeHtml(node.goal || '-')}</div>
+        <div class="dag-scope">
+          <span class="dag-chip" title="Dependencies">dep: ${escapeHtml(deps)}</span>
+          ${blocked ? `<span class="dag-chip" title="Blocked by">blocked: ${escapeHtml(blocked)}</span>` : ''}
+          ${reads.map(path => `<span class="dag-chip" title="Read path">R ${escapeHtml(path)}</span>`).join('')}
+          ${writes.map(path => `<span class="dag-chip" title="Writable path">W ${escapeHtml(path)}</span>`).join('')}
+          ${node.phase ? `<span class="dag-chip" title="Latest phase">${escapeHtml(node.phase)}</span>` : ''}
+        </div>
+      </div>`;
+    }
+
     // -- Job List --
     function renderJobList(jobs) {
       const container = document.getElementById('jobList');
@@ -1437,7 +1940,188 @@
         container.innerHTML = '<div class="empty-state">No jobs match selection.</div>';
         return;
       }
-      container.innerHTML = jobs.map(job => {
+      const groups = groupJobsByTask(jobs);
+      container.innerHTML = groups.map(group => {
+        const isTaskActive = group.task_id === activeTaskId ? 'active' : '';
+        return `<div class="task-group ${isTaskActive}">
+          <button class="task-group-header" onclick="selectTask('${escapeHtml(group.task_id)}')" title="${escapeHtml(group.task_id)}">
+            <span class="task-group-title">${escapeHtml(group.task_id || '(No Task ID)')}</span>
+            <span class="task-group-meta">${escapeHtml(group.jobs.length)} jobs</span>
+          </button>
+          <div class="task-group-jobs">
+            ${group.jobs.map(jobCardHtml).join('')}
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    function renderContractList(filteredJobs) {
+      const container = document.getElementById('jobList');
+      const search = document.getElementById('searchInput').value.toLowerCase();
+
+      // Build authoritative plan list from job plan_ids + server plan manifest.
+      // Every unique plan_id among filtered jobs becomes a plan section.
+      // The server /api/plans manifest provides names and types.
+      const planManifest = (rawPlans?.plans || []).reduce((map, p) => { map[p.plan_id] = p; return map; }, {});
+      const jobPlanIds = [...new Set(filteredJobs.map(j => j.plan_id || '__legacy__'))];
+      const searchText = search.trim().toLowerCase();
+
+      const sections = jobPlanIds.map(planId => {
+        const planInfo = planManifest[planId] || {};
+        const type = planInfo?.type || (planId === '__legacy__' ? 'legacy' : (filteredJobs.find(j => j.plan_id === planId)?.plan_type || 'adhoc'));
+        const isLegacy = planId === '__legacy__';
+        const planJobs = isLegacy
+          ? filteredJobs.filter(j => !j.plan_id)
+          : filteredJobs.filter(j => j.plan_id === planId);
+
+        if (!planJobs.length) return null;
+
+        // Group jobs by task_id within this plan
+        const taskMap = new Map();
+        planJobs.forEach(job => {
+          const tid = job.task_id || '(no task)';
+          if (!taskMap.has(tid)) taskMap.set(tid, []);
+          taskMap.get(tid).push(job);
+        });
+
+        // For formal plans, find matching DAG nodes
+        const dagNodes = isLegacy ? [] : (rawDag.nodes || []).filter(n => planJobs.some(j => j.task_id === n.task_id && (n.plan_id || 'default-plan') === planId));
+
+        const planIdShort = planId === '__legacy__' ? '__legacy__' : planId;
+        const isCollapsed = collapsedPlans.has(planIdShort);
+        const planName = planInfo?.name || (isLegacy ? 'Legacy / Migration Plan' : `Plan: ${planIdShort}`);
+        const planLabel = isLegacy ? 'legacy' : type;
+
+        return { planId: planIdShort, planName, planLabel, isCollapsed, planJobs, taskMap, dagNodes, planInfo, isLegacy };
+      }).filter(Boolean);
+
+      // Also include plans from manifest that have 0 filtered jobs (for counts context)
+      // but only when search is empty (full view)
+      if (!search.trim()) {
+        for (const plan of (rawPlans?.plans || [])) {
+          if (!sections.some(s => s.planId === plan.plan_id)) {
+            sections.push({
+              planId: plan.plan_id,
+              planName: plan.name || plan.plan_id,
+              planLabel: plan.type || 'adhoc',
+              isCollapsed: collapsedPlans.has(plan.plan_id),
+              planJobs: [],
+              taskMap: new Map(),
+              dagNodes: [],
+              planInfo: plan,
+              isLegacy: plan.plan_id === '__legacy__',
+              emptyPlan: true,
+            });
+          }
+        }
+      }
+
+      if (!sections.length) {
+        container.innerHTML = '<div class="empty-state">No jobs or plans match selection.</div>';
+        return;
+      }
+
+      container.innerHTML = sections.map(section => {
+        const planId = section.planId;
+        const totalJobCount = section.planJobs.length;
+        const dagNodeCount = section.dagNodes.length;
+
+        return `<div class="task-group">
+          <button class="task-group-header" onclick="togglePlanCollapsed('${escapeJsString(planId)}')" title="Toggle ${escapeHtml(section.planName)}">
+            <span class="task-group-title">${section.isCollapsed ? '+ ' : '- '}${escapeHtml(section.planName)}</span>
+            <span class="task-group-meta">
+              <span class="badge plan-badge plan-${section.planLabel}" style="margin-right:6px;">${section.planLabel}</span>
+              ${escapeHtml(totalJobCount)} jobs
+            </span>
+          </button>
+          ${section.isCollapsed ? '' : `
+            <div class="contract-summary">
+              <div>${totalJobCount} job(s) across ${section.taskMap.size} task(s)${section.emptyPlan ? ' (no matching jobs under current filter)' : ''}</div>
+            </div>
+            ${section.emptyPlan ? '' : `
+              <div class="task-group-jobs">
+                ${[...section.taskMap.entries()].map(([taskId, jobs]) => {
+                  const dagNode = section.dagNodes.find(n => n.task_id === taskId);
+                  const isTaskActive = taskId === activeTaskId ? 'active' : '';
+                  const taskCollapsed = collapsedContracts.has(taskId);
+                  return `<div class="task-group ${isTaskActive}">
+                    <button class="task-group-header" onclick="toggleContractCollapsed('${escapeJsString(taskId)}')" title="Toggle ${escapeHtml(taskId)}">
+                      <span class="task-group-title">${taskCollapsed ? '+ ' : '- '}${escapeHtml(taskId)}</span>
+                      <span class="task-group-meta">${escapeHtml(dagNode?.state || 'ad-hoc')} / ${jobs.length} jobs</span>
+                    </button>
+                    ${taskCollapsed ? '' : `
+                      ${dagNode ? `<div class="contract-summary"><div>${escapeHtml(dagNode.goal || '-')}</div><div>dep: ${escapeHtml((dagNode.dependencies || []).join(', ') || 'none')}</div></div>` : ''}
+                      <div class="task-group-jobs">${jobs.map(jobCardHtml).join('')}</div>
+                    `}
+                  </div>`;
+                }).join('')}
+              </div>
+            `}
+          `}
+        </div>`;
+      }).join('');
+    }
+
+    function contractNodeHtml(node, filteredJobs) {
+      const jobs = filteredJobs.filter(job => job.task_id === node.task_id);
+      const isTaskActive = node.task_id === activeTaskId ? 'active' : '';
+      const taskId = node.task_id || '';
+      const isCollapsed = collapsedContracts.has(taskId);
+      return `<div class="task-group ${isTaskActive}">
+        <button class="task-group-header" onclick="toggleContractCollapsed('${escapeJsString(taskId)}')" title="Toggle ${escapeHtml(taskId)}">
+          <span class="task-group-title">${isCollapsed ? '+ ' : '- '}${escapeHtml(taskId)}</span>
+          <span class="task-group-meta">${escapeHtml(node.state || 'planned')}</span>
+        </button>
+        ${isCollapsed ? '' : `
+          <div class="contract-summary">
+            <div>${escapeHtml(node.goal || '-')}</div>
+            <div>${escapeHtml(jobs.length)} job(s) / dep: ${escapeHtml((node.dependencies || []).join(', ') || 'none')}</div>
+          </div>
+          ${jobs.length ? `<div class="task-group-jobs">${jobs.map(jobCardHtml).join('')}</div>` : ''}
+        `}
+      </div>`;
+    }
+
+    function togglePlanCollapsed(planId) {
+      toggleStringSetValue(collapsedPlans, planId || 'default-plan');
+      writeStringSet('agentOrchAuditCollapsedPlans', collapsedPlans);
+      applyFilters();
+    }
+
+    function toggleContractCollapsed(taskId) {
+      toggleStringSetValue(collapsedContracts, taskId || '');
+      writeStringSet('agentOrchAuditCollapsedContracts', collapsedContracts);
+      applyFilters();
+    }
+
+    function renderSelectedContractDetail(node) {
+      if (!node) return '<div class="empty-state">No matching contract found.</div>';
+      return `<div class="detail-card">
+        <div class="detail-header">
+          <div class="detail-title">
+            <h3>Contract: ${escapeHtml(node.task_id)}</h3>
+            <p style="color: var(--text-secondary); font-family: var(--font-mono); font-size: 0.85rem;">State: ${escapeHtml(node.state || 'planned')}</p>
+          </div>
+        </div>
+        <div class="content-box"><div class="content-box-title">Goal</div><div class="content-box-body">${escapeHtml(node.goal || '-')}</div></div>
+        <div class="content-box"><div class="content-box-title">Dependencies</div><div class="content-box-body">${escapeHtml((node.dependencies || []).join(', ') || 'none')}</div></div>
+        <div class="content-box"><div class="content-box-title">Read Paths</div><div class="content-box-body">${escapeHtml((node.read_paths || []).join(', ') || 'none')}</div></div>
+        <div class="content-box"><div class="content-box-title">Writable Paths</div><div class="content-box-body">${escapeHtml((node.writable_paths || []).join(', ') || 'none')}</div></div>
+        <div class="content-box"><div class="content-box-title">Forbidden Paths</div><div class="content-box-body">${escapeHtml((node.forbidden_paths || []).join(', ') || 'none')}</div></div>
+      </div>`;
+    }
+
+    function groupJobsByTask(jobs) {
+      const map = new Map();
+      for (const job of jobs) {
+        const key = job.task_id || '(No Task ID)';
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(job);
+      }
+      return Array.from(map.entries()).map(([task_id, taskJobs]) => ({ task_id, jobs: taskJobs }));
+    }
+
+    function jobCardHtml(job) {
         const isActive = job.job_id === activeJobId ? 'active' : '';
         const statusClass = 'status-' + job.status;
         return `<div class="job-card ${isActive}" onclick="selectJob('${job.job_id}')">
@@ -1449,18 +2133,25 @@
           <div>
             <span class="badge provider-badge">${job.provider}</span>
             <span class="badge provider-badge" style="margin-left:5px;">${job.phase || ''}</span>
+            ${job.plan_type ? `<span class="badge plan-badge plan-${job.plan_type}" title="Plan: ${job.plan_id || ''} (${job.plan_type})">${job.plan_type}</span>` : ''}
           </div>
         </div>`;
-      }).join('');
     }
 
     // -- Job Detail --
     async function selectJob(id) {
       activeJobId = id;
+      const job = rawJobs.find(item => item.job_id === id);
+      if (job) {
+        activeTaskId = job.task_id || activeTaskId;
+        const node = (rawDag.nodes || []).find(item => item.task_id === activeTaskId);
+        activePlanId = node?.plan_id || activePlanId;
+      }
       activeTabId = null;
       metadataExpanded = false;
       applyFilters();
-      const container = document.getElementById('dashboardView');
+      renderDag();
+      const container = document.getElementById('detailPane') || document.getElementById('dashboardView');
       delete container.dataset.jobId;
       delete container.dataset.provider;
       container.innerHTML = '<div class="empty-state">Loading selected job...</div>';
@@ -1489,8 +2180,31 @@
     }
 
     // -- Helpers --
+    function readStringSet(key) {
+      try {
+        const values = JSON.parse(localStorage.getItem(key) || '[]');
+        return new Set(Array.isArray(values) ? values.map(value => String(value)) : []);
+      } catch {
+        return new Set();
+      }
+    }
+
+    function writeStringSet(key, set) {
+      localStorage.setItem(key, JSON.stringify(Array.from(set)));
+    }
+
+    function toggleStringSetValue(set, value) {
+      const key = String(value ?? '');
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+    }
+
     function escapeHtml(value) {
       return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function escapeJsString(value) {
+      return String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r/g, '\\r').replace(/\n/g, '\\n');
     }
 
     function classifyProcess(process) {
@@ -1646,7 +2360,7 @@
     }
 
     function syncEventStream(events, mode = 'conversation') {
-      const container = document.getElementById('dashboardView');
+      const container = document.getElementById('detailPane') || document.getElementById('dashboardView');
       const stream = container.querySelector('.conversation-frame .event-stream');
       if (!stream) return;
       const frame = stream.closest('.conversation-frame');
@@ -1794,7 +2508,7 @@
     }
 
     function updateJobDetailInPlace(data, modelStr, startStr, endStr, statusClass) {
-      const container = document.getElementById('dashboardView');
+      const container = document.getElementById('detailPane') || document.getElementById('dashboardView');
       const job = data.job || {};
       setFieldText(container, 'taskId', job.task_id || job.id || '-');
       setFieldText(container, 'jobId', job.id || '-');
@@ -1850,7 +2564,7 @@
 
     // -- Job Detail Rendering --
     function renderJobDetail(data) {
-      const container = document.getElementById('dashboardView');
+      const container = document.getElementById('detailPane') || document.getElementById('dashboardView');
       if (!data || data.error) {
         container.innerHTML = `<div class="empty-state">Error loading job: ${escapeHtml(data ? data.error : 'unknown')}</div>`;
         return;
@@ -1926,7 +2640,7 @@
       }
 
       container.innerHTML = `
-        <div class="detail-card" id="detailPane">
+        <div class="detail-card">
           <div class="detail-header">
             <div class="detail-title">
               <h3>Task: <span data-field="taskId">${escapeHtml(job.task_id || job.id)}</span></h3>
@@ -2001,6 +2715,8 @@
     pollStatus();
     setInterval(pollStatus, 5000);
     setInterval(pollRuns, 5000);
+    setInterval(pollDag, 5000);
+    setInterval(pollPlans, 10000);
 
     // -- Delegated project card click handler --
     document.getElementById('dashboardView').addEventListener('click', function(e) {

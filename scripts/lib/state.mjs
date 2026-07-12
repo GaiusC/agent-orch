@@ -246,7 +246,12 @@ function buildCurrentState({ projectDir, jobs, events, sessions }) {
 
   const activeJobs = filteredJobs.filter((job) => ["queued", "running"].includes(job.status));
   const ready = filteredJobs.filter((job) => job.status === "completed" && job.phase === "ready_for_acceptance");
-  const failed = filteredJobs.filter((job) => job.status === "failed");
+  const appliedTaskIds = new Set(filteredJobs
+    .filter((job) => job.status === "completed" && ["applied", "applied_and_cleaned"].includes(job.phase))
+    .map((job) => job.task_id)
+    .filter(Boolean));
+  const failed = filteredJobs.filter((job) => job.status === "failed" && !appliedTaskIds.has(job.task_id));
+  const supersededFailed = filteredJobs.filter((job) => job.status === "failed" && appliedTaskIds.has(job.task_id));
 
   // Detect stale running jobs: started > STALE_MS ago with no update in STALE_MS
   const staleJobs = activeJobs.filter((job) => {
@@ -295,15 +300,52 @@ function buildCurrentState({ projectDir, jobs, events, sessions }) {
     stale_jobs: staleJobs.map(publicJobSnapshot),
     ready_for_acceptance: ready.map(publicJobSnapshot),
     failed_jobs: failed.map(publicJobSnapshot),
+    superseded_failed_jobs: supersededFailed.map(publicJobSnapshot),
     recent_jobs: filteredJobs.slice(0, 20).map(publicJobSnapshot),
     recent_events: filteredEvents,
     sessions: filteredSessions.sessions || {},
     fallback_chains: fallbackChains,
+    plan_summary: buildPlanSummary(filteredJobs),
     review_gate_summary: {
       total_requiring_review: jobsRequiringReview.length,
       ready_blocked_by_review: reviewGateBlocked.length,
       blocked_job_ids: reviewGateBlocked.map((j) => j.id),
     },
+  };
+}
+
+function buildPlanSummary(jobs) {
+  const planIds = [...new Set(jobs.map((j) => j.plan_id).filter(Boolean))];
+  const counts = {};
+  for (const pid of planIds) {
+    const planJobs = jobs.filter((j) => j.plan_id === pid);
+    counts[pid] = {
+      total: planJobs.length,
+      active: planJobs.filter((j) => ["queued", "running"].includes(j.status)).length,
+      completed: planJobs.filter((j) => j.status === "completed").length,
+      failed: planJobs.filter((j) => j.status === "failed").length,
+      type: planJobs[0]?.plan_type || "adhoc",
+    };
+  }
+  // Count legacy (no plan_id) jobs
+  const legacyJobs = jobs.filter((j) => !j.plan_id);
+  if (legacyJobs.length > 0) {
+    counts.__legacy__ = {
+      total: legacyJobs.length,
+      active: legacyJobs.filter((j) => ["queued", "running"].includes(j.status)).length,
+      completed: legacyJobs.filter((j) => j.status === "completed").length,
+      failed: legacyJobs.filter((j) => j.status === "failed").length,
+      type: "legacy",
+    };
+  }
+  const totalByPlan = Object.values(counts).reduce((s, c) => s + c.total, 0);
+  return {
+    plans: counts,
+    total_jobs: jobs.length,
+    total_plan_jobs: totalByPlan,
+    integrity_warning: totalByPlan !== jobs.length
+      ? `Job count mismatch: ${totalByPlan} jobs across plans vs ${jobs.length} total`
+      : null,
   };
 }
 
@@ -320,12 +362,22 @@ function publicJobSnapshot(job) {
     task_id: job.task_id,
     model: job.model || job.model_override || null,
     session_id: job.session_id || null,
+    plan_id: job.plan_id || null,
+    plan_type: job.plan_type || null,
+    contract_id: job.contract_id || null,
+    association_reason: job.association_reason || null,
     auto_route: job.auto_route || null,
     auto_fallback_classifier: job.auto_fallback_classifier || null,
     auto_fallback_reason: truncate(job.auto_fallback_reason || "", 500),
+    dependencies: job.dependencies || [],
+    read_paths: job.read_paths || [],
+    writable_paths: job.writable_paths || [],
+    forbidden_paths: job.forbidden_paths || [],
+    acceptance_commands: job.acceptance_commands || [],
     requires_agy_review: job.requires_agy_review || false,
     review_waiver: job.review_waiver || false,
     agy_verify_job_id: job.agy_verify_job_id || null,
+    reviewer_job_id: job.reviewer_job_id || job.agy_verify_job_id || null,
     evidence_path: job.evidence_path || null,
     patch_path: job.patch_path || null,
     error: job.error || null,
@@ -342,7 +394,7 @@ function recommendNextAction(state, hostProvider) {
   }
   if (state.review_gate_summary?.ready_blocked_by_review > 0) {
     const blockedIds = state.review_gate_summary.blocked_job_ids.join(", ");
-    return `Jobs ready for acceptance but blocked by AGY review gate: ${blockedIds}. Run agy-verify for each task or explicitly waive the review gate.`;
+    return `Jobs ready for acceptance but blocked by reviewer gate: ${blockedIds}. Run reviewer-verify for each task or explicitly waive the review gate.`;
   }
   if (state.ready_for_acceptance?.length) {
     if (hostProvider === "codex") return "Current Codex session should inspect evidence/diff and accept, reject, or continue the same task_id. Do not invoke Codex CLI.";
@@ -368,8 +420,9 @@ function executionModeFor(provider) {
 }
 
 function roleFor(provider, type = "", phase = "") {
-  // Reviewer role: AGY read-only investigation/verification jobs
-  if (provider === "agy" && /verify|investigate/.test(type)) return "reviewer";
+  if (provider === "agy" && /plan/.test(type)) return "planner";
+  // Reviewer role: read-only investigation/review/verification jobs
+  if (provider === "agy" && /verify|review|investigate/.test(type)) return "reviewer";
   // Accepter role: applied/accepted jobs (checked before executor since
   // applied CC jobs still carry cc provider and cc_execute type)
   if (phase === "applied" || phase === "applied_and_cleaned") return "accepter";
@@ -383,6 +436,7 @@ function roleFor(provider, type = "", phase = "") {
 
 function stageFor(value) {
   const text = String(value || "");
+  if (/plan/.test(text)) return "plan";
   if (/verify|review|investigate/.test(text)) return "review";
   if (/\bappl/i.test(text) || /\baccept(ed|ance)?\b/i.test(text)) return "accept";
   if (/repair/.test(text)) return "repair";

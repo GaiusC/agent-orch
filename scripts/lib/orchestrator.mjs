@@ -1,24 +1,65 @@
 ﻿import fs from "node:fs/promises";
+import crypto from "node:crypto";
 import path from "node:path";
 import { assertProject, autoRouteProvider, chooseAgyWriteModel, chooseModel } from "./config.mjs";
 import { commandExists } from "./process.mjs";
-import { classifyAgyQuotaError, runAgy, runAgyWrite, runClaude } from "./adapters.mjs";
+import { classifyAgyQuotaError, readWorkerProgress, runAgy, runAgyWrite, runClaude } from "./adapters.mjs";
 import { applyPatch, captureChanges, cleanupWorkspace, inspectGit, prepareWorkspace } from "./workspace.mjs";
 import { runVerification, verificationFailureContext } from "./verify.mjs";
 import { asStringArray, newId, nowIso, pathExists, requireString, truncate, writeJsonAtomic } from "./utils.mjs";
+import { assertCanStartImplementation, assertCanStartVerify, getContractId, getContractVersion, getContractDigest, getContractRequiredTests, loadPlannerContract, loadPlannerSubtask, normalizeContract, resolveJobPlan } from "./contracts.mjs";
+import { agyExecutorFallback, investigatorFallback, investigatorPrimary, reviewerModel } from "./model-registry.mjs";
+import { invalidateAcceptance, assertAcceptanceArtifactValid, saveAcceptance, validateAcceptanceForCurrentPatch } from "./acceptance.mjs";
 
-function collectAgyVerifyEvidence(jobs, projectDir, taskId) {
-  // Find a completed AGY verify job for the same project and task
+// -- Formal review evidence builder --
+
+function buildReviewEvidence({ job, contract, patchDigest, repository, workspace, tests, model, status, findings = null, implementationJob = null }) {
+  return {
+    status: status || "completed",
+    job_id: job?.id || null,
+    task_id: job?.task_id || null,
+    review_id: job?.review_id || null,
+    contract_id: getContractId(contract),
+    contract_version: getContractVersion(contract),
+    contract_digest: getContractDigest(contract),
+    patch_digest: patchDigest || null,
+    repository_identity: contract?.repository_identity || repository || null,
+    workspace: workspace || null,
+    tests: tests || [],
+    actual_model: model || job?.model || null,
+    provider: job?.provider || "agy",
+    findings: findings || null,
+    implementation_job_id: implementationJob?.id || null,
+    created_at: nowIso(),
+  };
+}
+
+// -- Stale artifact invalidation (delegated to acceptance.mjs) --
+
+async function invalidateStaleArtifacts(store, projectDir, taskId, currentPatchDigest) {
+  await invalidateAcceptance({ store, projectDir, taskId, currentPatchDigest });
+}
+
+// -- Acceptance artifact validation (exposed for testing) --
+
+// -- Acceptance artifact validation (delegated to acceptance.mjs) --
+// validateAcceptanceArtifact is imported via assertAcceptanceArtifactValid.
+
+function collectAgyVerifyEvidence(jobs, projectDir, taskId, implementationJob = null) {
+  // Find a completed reviewer evidence job for the same project and task.
   if (!jobs || !jobs.length) return null;
   const candidates = jobs.filter((j) => {
     const jProj = j.project_dir ? path.resolve(j.project_dir) : "";
     const targetProj = projectDir ? path.resolve(projectDir) : "";
+    const verifyTime = Date.parse(j.finished_at || j.updated_at || j.created_at || "");
+    const implementationTime = implementationJob ? Date.parse(implementationJob.finished_at || implementationJob.updated_at || implementationJob.created_at || "") : null;
     return (
       j.provider === "agy" &&
-      j.type === "agy_verify" &&
+      ["agy_verify", "agy_review"].includes(j.type) &&
       j.task_id === taskId &&
       j.status === "completed" &&
-      jProj === targetProj
+      jProj === targetProj &&
+      (!implementationJob || !Number.isFinite(implementationTime) || (Number.isFinite(verifyTime) && verifyTime >= implementationTime))
     );
   });
   if (!candidates.length) return null;
@@ -32,7 +73,9 @@ function collectAgyVerifyEvidence(jobs, projectDir, taskId) {
 
 function computeReviewGate(config, jobType, jobMetadata) {
   const gate = config?.review_gate || {};
-  const requireGate = gate.require_agy_verify_for_implementation !== false;
+  const requireGate = gate.require_agy_verify_for_implementation === false
+    ? false
+    : gate.require_reviewer_for_implementation !== false;
   const allowWaiver = gate.allow_waiver !== false;
   const requestedWaiver = jobMetadata?.review_waiver === true;
   // Only implementation job types require the review gate
@@ -49,6 +92,19 @@ function computeReviewGate(config, jobType, jobMetadata) {
     review_waiver: effectiveWaiver,
     allow_waiver: allowWaiver,
   };
+}
+
+function mergedForbidden(config, job) {
+  return Array.from(new Set([...(config.scope?.forbidden || []), ...(job.forbidden_paths || [])]));
+}
+
+function implementationContract(args, acceptance, config) {
+  return normalizeContract({
+    ...args,
+    writable_paths: args.writable_paths || config.scope?.writable || ["."],
+    forbidden_paths: args.forbidden_paths || config.scope?.forbidden || [],
+    acceptance_commands: acceptance,
+  });
 }
 
 export class WorkerOrchestrator {
@@ -80,8 +136,15 @@ export class WorkerOrchestrator {
     if (config.roles.primary_writer !== "cc") throw new Error("Project policy does not designate CC as the primary writer.");
     if (config.roles.duplicate_implementation !== false) throw new Error("duplicate_implementation must remain false for this workflow.");
     const acceptance = asStringArray(args.acceptance_commands, "acceptance_commands") || config.verification.commands || [];
+    const contract = implementationContract(args, acceptance, config);
+    await assertCanStartImplementation({ contract, jobs: await this.store.listJobs() });
     const id = newId("cc");
     const reviewGate = computeReviewGate(config, continuation ? "cc_continue" : "cc_execute", args);
+    const allJobs = await this.store.listJobs();
+    const plan = await resolveJobPlan(projectDir, taskId, {
+      existingJobs: allJobs,
+      jobType: continuation ? "cc_continue" : "cc_execute",
+    });
     const job = await this.store.createJob({
       id,
       type: continuation ? "cc_continue" : "cc_execute",
@@ -92,8 +155,15 @@ export class WorkerOrchestrator {
       task_id: taskId,
       goal,
       plan: typeof args.plan === "string" ? args.plan : "",
+      plan_id: plan.plan_id,
+      plan_type: plan.plan_type,
+      association_reason: plan.association_reason,
       complexity: ["low", "medium", "high"].includes(args.complexity) ? args.complexity : "medium",
       model_override: typeof args.model === "string" ? args.model : null,
+      dependencies: contract.dependencies,
+      read_paths: contract.read_paths,
+      writable_paths: contract.writable_paths,
+      forbidden_paths: contract.forbidden_paths,
       acceptance_commands: acceptance,
       continuation,
       requires_agy_review: reviewGate.requires_agy_review,
@@ -110,7 +180,14 @@ export class WorkerOrchestrator {
     const config = await assertProject(projectDir);
     if (config.agy?.enabled === false) throw new Error("AGY is disabled in project config.");
     if (mode === "disjoint_subtask" && args.allow_write !== true) throw new Error("AGY write tasks require allow_write=true and must be disjoint from CC implementation.");
+    const contract = normalizeContract(args);
+    if (mode === "verify") await assertCanStartVerify({ contract, jobs: await this.store.listJobs() });
     const id = newId("agy");
+    const allJobs = await this.store.listJobs();
+    const plan = await resolveJobPlan(projectDir, taskId, {
+      existingJobs: allJobs,
+      jobType: `agy_${mode}`,
+    });
     const job = await this.store.createJob({
       id,
       type: `agy_${mode}`,
@@ -119,10 +196,18 @@ export class WorkerOrchestrator {
       phase: "queued",
       project_dir: projectDir,
       task_id: taskId,
+      review_id: args.review_id || null,
+      plan_id: plan.plan_id,
+      plan_type: plan.plan_type,
+      association_reason: plan.association_reason,
       goal,
       plan: typeof args.plan === "string" ? args.plan : "",
       complexity: ["low", "medium", "high"].includes(args.complexity) ? args.complexity : "medium",
       model_override: typeof args.model === "string" ? args.model : null,
+      dependencies: contract.dependencies,
+      read_paths: contract.read_paths,
+      writable_paths: contract.writable_paths,
+      forbidden_paths: contract.forbidden_paths,
       mode,
     });
     this.launch(job, (signal) => this.executeAgy(job, config, signal));
@@ -139,8 +224,15 @@ export class WorkerOrchestrator {
     if (config.agy?.enabled === false) throw new Error("AGY is disabled in project config.");
     if (config.roles.duplicate_implementation !== false) throw new Error("duplicate_implementation must remain false for this workflow.");
     const acceptance = asStringArray(args.acceptance_commands, "acceptance_commands") || config.verification.commands || [];
+    const contract = implementationContract(args, acceptance, config);
+    await assertCanStartImplementation({ contract, jobs: await this.store.listJobs() });
     const id = newId("agy");
     const reviewGate = computeReviewGate(config, continuation ? "agy_continue" : "agy_execute", args);
+    const allJobs = await this.store.listJobs();
+    const plan = await resolveJobPlan(projectDir, taskId, {
+      existingJobs: allJobs,
+      jobType: continuation ? "agy_continue" : "agy_execute",
+    });
     const job = await this.store.createJob({
       id,
       type: continuation ? "agy_continue" : "agy_execute",
@@ -151,8 +243,15 @@ export class WorkerOrchestrator {
       task_id: taskId,
       goal,
       plan: typeof args.plan === "string" ? args.plan : "",
+      plan_id: plan.plan_id,
+      plan_type: plan.plan_type,
+      association_reason: plan.association_reason,
       complexity: ["low", "medium", "high"].includes(args.complexity) ? args.complexity : "medium",
       model_override: typeof args.model === "string" ? args.model : null,
+      dependencies: contract.dependencies,
+      read_paths: contract.read_paths,
+      writable_paths: contract.writable_paths,
+      forbidden_paths: contract.forbidden_paths,
       acceptance_commands: acceptance,
       continuation,
       requires_agy_review: reviewGate.requires_agy_review,
@@ -167,14 +266,31 @@ export class WorkerOrchestrator {
   async startAuto(args) {
     const projectDir = path.resolve(requireString(args, "project_dir"));
     const taskId = requireString(args, "task_id");
-    const goal = requireString(args, "goal");
     const config = await assertProject(projectDir);
     if (config.roles.duplicate_implementation !== false) throw new Error("duplicate_implementation must remain false for this workflow.");
-    const complexity = ["low", "medium", "high"].includes(args.complexity) ? args.complexity : "medium";
+    for (const field of ["complexity", "executor", "provider", "model", "reasoning_effort", "fallback_target"]) {
+      if (Object.hasOwn(args, field)) throw new Error(field === "complexity" ? "server_managed_complexity" : "server_managed_routing");
+    }
+    const { contract: plannerContract, subtask } = await loadPlannerSubtask(projectDir, taskId, requireString(args, "subtask_id"));
+    const goal = subtask.objective;
+    const complexity = subtask.complexity === "mid" ? "medium" : subtask.complexity;
     const provider = autoRouteProvider(config, complexity);
-    const acceptance = asStringArray(args.acceptance_commands, "acceptance_commands") || config.verification.commands || [];
+    const acceptance = subtask.required_tests.length ? subtask.required_tests : (config.verification.commands || []);
+    const contract = implementationContract({
+      task_id: `${taskId}:${subtask.subtask_id}`,
+      goal,
+      dependencies: subtask.depends_on,
+      writable_paths: subtask.writable_paths,
+      forbidden_paths: subtask.forbidden_paths,
+    }, acceptance, config);
+    await assertCanStartImplementation({ contract, jobs: await this.store.listJobs() });
     const id = newId("auto");
     const reviewGate = computeReviewGate(config, "auto_execute", args);
+    const plan = await resolveJobPlan(projectDir, taskId, {
+      contract: plannerContract,
+      jobType: "auto_execute",
+      existingJobs: await this.store.listJobs(),
+    });
     const job = await this.store.createJob({
       id,
       type: "auto_execute",
@@ -183,12 +299,25 @@ export class WorkerOrchestrator {
       phase: "queued",
       project_dir: projectDir,
       task_id: taskId,
+      subtask_id: subtask.subtask_id,
+      plan_id: plan.plan_id,
+      plan_type: plan.plan_type,
+      association_reason: plan.association_reason,
       goal,
-      plan: typeof args.plan === "string" ? args.plan : "",
+      plan: JSON.stringify({ planner_contract: plannerContract.file, subtask_id: subtask.subtask_id }),
       complexity,
-      model_override: typeof args.model === "string" ? args.model : null,
+      model_override: null,
+      dependencies: contract.dependencies,
+      read_paths: contract.read_paths,
+      writable_paths: contract.writable_paths,
+      forbidden_paths: contract.forbidden_paths,
       acceptance_commands: acceptance,
       auto_route: provider,
+      planner_session_id: plannerContract.planner_session_id,
+      contract_id: plannerContract.contract_id,
+      contract_version: plannerContract.contract_version,
+      contract_digest: plannerContract.contract_digest,
+      routing: { requested_complexity: complexity, selected_executor: provider },
       requires_agy_review: reviewGate.requires_agy_review,
       review_waiver: reviewGate.review_waiver,
     });
@@ -240,6 +369,9 @@ export class WorkerOrchestrator {
       jobDir,
       goal: job.goal,
       plan: job.plan,
+      readPaths: job.read_paths || [],
+      writablePaths: job.writable_paths || [],
+      forbiddenPaths: mergedForbidden(config, job),
       taskSession,
       model,
       signal,
@@ -281,6 +413,38 @@ export class WorkerOrchestrator {
       cli_log_path: run.cli_log_path,
       launch: run.launch,
     };
+
+    // When in review mode, enrich evidence with formal review provenance
+    // bound to the Planner contract and current patch digest.
+    if (job.mode === "review") {
+      const contract = await loadPlannerContract(job.project_dir, job.task_id).catch(() => null);
+      const allJobs = await this.store.listJobs();
+      const implementationJob = allJobs
+        .filter((j) => j.task_id === job.task_id && ["cc_execute", "agy_execute", "auto_execute", "cc_continue", "agy_continue"].includes(j.type) && j.status === "completed" && j.phase === "ready_for_acceptance")
+        .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))[0] || null;
+      let patchDigest = null;
+      if (implementationJob?.patch_path) {
+        patchDigest = crypto.createHash("sha256").update(await fs.readFile(implementationJob.patch_path)).digest("hex");
+      }
+      const reviewEvidence = buildReviewEvidence({
+        job,
+        contract,
+        patchDigest,
+        repository: contract?.repository_identity || null,
+        workspace: implementationJob?.workspace || null,
+        tests: job.acceptance_commands || [],
+        model: model || job.model || null,
+        status: "completed",
+        findings: run.result ? { summary: truncate(run.result, 5000), source: run.result_source } : null,
+        implementationJob,
+      });
+      evidence.review_evidence = reviewEvidence;
+      const evidencePath = path.join(jobDir, "evidence.json");
+      await writeJsonAtomic(evidencePath, evidence);
+      await this.store.updateJob(job.id, { status: "completed", phase: "completed", evidence_path: evidencePath, session_id: run.session_id, model: model || null, finished_at: nowIso() });
+      return;
+    }
+
     const evidencePath = path.join(jobDir, "evidence.json");
     await writeJsonAtomic(evidencePath, evidence);
     await this.store.updateJob(job.id, { status: "completed", phase: "completed", evidence_path: evidencePath, session_id: run.session_id, model: model || null, finished_at: nowIso() });
@@ -327,6 +491,9 @@ export class WorkerOrchestrator {
         goal: job.goal,
         plan: job.plan,
         acceptance: job.acceptance_commands,
+        readPaths: job.read_paths || [],
+        writablePaths: job.writable_paths || [],
+        forbiddenPaths: mergedForbidden(config, job),
         taskSession,
         model,
         repairContext,
@@ -357,9 +524,12 @@ export class WorkerOrchestrator {
       if (run.timed_out) throw new Error("AGY write task timed out");
       if (run.exit_code !== 0 || run.parsed.is_error) throw new Error(`AGY write execution failed: ${truncate(run.stderr || JSON.stringify(run.parsed.result), 3000)}`);
 
-      changes = await captureChanges({ workspace: workspaceInfo.path, jobDir, forbidden: config.scope.forbidden });
-      if (changes.forbidden_changes.length) {
-        verification = { configured: job.acceptance_commands.length > 0, passed: false, results: [], policy_failure: `Forbidden paths changed: ${changes.forbidden_changes.join(", ")}` };
+      changes = await captureChanges({ workspace: workspaceInfo.path, jobDir, forbidden: mergedForbidden(config, job), writable: job.writable_paths || [] });
+      if (changes.forbidden_changes.length || changes.unauthorized_changes.length) {
+        const failures = [];
+        if (changes.forbidden_changes.length) failures.push(`Forbidden paths changed: ${changes.forbidden_changes.join(", ")}`);
+        if (changes.unauthorized_changes.length) failures.push(`Changes outside writable_paths: ${changes.unauthorized_changes.join(", ")}`);
+        verification = { configured: job.acceptance_commands.length > 0, passed: false, results: [], policy_failure: failures.join("; ") };
         break;
       }
       verification = await runVerification({ commands: job.acceptance_commands, workspace: workspaceInfo.path, jobDir, config, signal, round });
@@ -370,7 +540,12 @@ export class WorkerOrchestrator {
       }
     }
 
-    const ready = changes.forbidden_changes.length === 0 && (verification.passed || !verification.configured);
+    const ready = changes.forbidden_changes.length === 0 && changes.unauthorized_changes.length === 0 && (verification.passed || !verification.configured);
+    // Invalidate stale review/acceptance artifacts for this task when a new
+    // patch digest is produced by a continuation.
+    if (ready && changes.patch_digest) {
+      await invalidateStaleArtifacts(this.store, job.project_dir, job.task_id, changes.patch_digest);
+    }
     const evidence = {
       status: ready ? "ready_for_acceptance" : "verification_failed",
       job_id: job.id,
@@ -655,6 +830,9 @@ export class WorkerOrchestrator {
         goal: job.goal,
         plan: job.plan,
         acceptance: job.acceptance_commands,
+        readPaths: job.read_paths || [],
+        writablePaths: job.writable_paths || [],
+        forbiddenPaths: mergedForbidden(config, job),
         taskSession,
         model,
         repairContext,
@@ -686,9 +864,12 @@ export class WorkerOrchestrator {
       if (run.timed_out) throw new Error("CC task timed out");
       if (run.exit_code !== 0 || run.parsed.is_error) throw new Error(`CC execution failed: ${truncate(run.stderr || JSON.stringify(run.parsed.result), 3000)}`);
 
-      changes = await captureChanges({ workspace: workspaceInfo.path, jobDir, forbidden: config.scope.forbidden });
-      if (changes.forbidden_changes.length) {
-        verification = { configured: job.acceptance_commands.length > 0, passed: false, results: [], policy_failure: `Forbidden paths changed: ${changes.forbidden_changes.join(", ")}` };
+      changes = await captureChanges({ workspace: workspaceInfo.path, jobDir, forbidden: mergedForbidden(config, job), writable: job.writable_paths || [] });
+      if (changes.forbidden_changes.length || changes.unauthorized_changes.length) {
+        const failures = [];
+        if (changes.forbidden_changes.length) failures.push(`Forbidden paths changed: ${changes.forbidden_changes.join(", ")}`);
+        if (changes.unauthorized_changes.length) failures.push(`Changes outside writable_paths: ${changes.unauthorized_changes.join(", ")}`);
+        verification = { configured: job.acceptance_commands.length > 0, passed: false, results: [], policy_failure: failures.join("; ") };
         break;
       }
       verification = await runVerification({ commands: job.acceptance_commands, workspace: workspaceInfo.path, jobDir, config, signal, round });
@@ -699,7 +880,12 @@ export class WorkerOrchestrator {
       }
     }
 
-    const ready = changes.forbidden_changes.length === 0 && (verification.passed || !verification.configured);
+    const ready = changes.forbidden_changes.length === 0 && changes.unauthorized_changes.length === 0 && (verification.passed || !verification.configured);
+    // Invalidate stale review/acceptance artifacts for this task when a new
+    // patch digest is produced by a continuation.
+    if (ready && changes.patch_digest) {
+      await invalidateStaleArtifacts(this.store, job.project_dir, job.task_id, changes.patch_digest);
+    }
     const evidence = {
       status: ready ? "ready_for_acceptance" : "verification_failed",
       job_id: job.id,
@@ -765,6 +951,9 @@ export class WorkerOrchestrator {
         goal: job.goal,
         plan: job.plan,
         acceptance: job.acceptance_commands,
+        readPaths: job.read_paths || [],
+        writablePaths: job.writable_paths || [],
+        forbiddenPaths: mergedForbidden(config, job),
         taskSession,
         model,
         repairContext,
@@ -795,9 +984,12 @@ export class WorkerOrchestrator {
       if (run.timed_out) throw new Error("AGY write task timed out");
       if (run.exit_code !== 0 || run.parsed.is_error) throw new Error(`AGY write execution failed: ${truncate(run.stderr || JSON.stringify(run.parsed.result), 3000)}`);
 
-      changes = await captureChanges({ workspace: workspaceInfo.path, jobDir, forbidden: config.scope.forbidden });
-      if (changes.forbidden_changes.length) {
-        verification = { configured: job.acceptance_commands.length > 0, passed: false, results: [], policy_failure: `Forbidden paths changed: ${changes.forbidden_changes.join(", ")}` };
+      changes = await captureChanges({ workspace: workspaceInfo.path, jobDir, forbidden: mergedForbidden(config, job), writable: job.writable_paths || [] });
+      if (changes.forbidden_changes.length || changes.unauthorized_changes.length) {
+        const failures = [];
+        if (changes.forbidden_changes.length) failures.push(`Forbidden paths changed: ${changes.forbidden_changes.join(", ")}`);
+        if (changes.unauthorized_changes.length) failures.push(`Changes outside writable_paths: ${changes.unauthorized_changes.join(", ")}`);
+        verification = { configured: job.acceptance_commands.length > 0, passed: false, results: [], policy_failure: failures.join("; ") };
         break;
       }
       verification = await runVerification({ commands: job.acceptance_commands, workspace: workspaceInfo.path, jobDir, config, signal, round });
@@ -808,7 +1000,7 @@ export class WorkerOrchestrator {
       }
     }
 
-    const ready = changes.forbidden_changes.length === 0 && (verification.passed || !verification.configured);
+    const ready = changes.forbidden_changes.length === 0 && changes.unauthorized_changes.length === 0 && (verification.passed || !verification.configured);
     const evidence = {
       status: ready ? "ready_for_acceptance" : "verification_failed",
       job_id: job.id,
@@ -839,7 +1031,76 @@ export class WorkerOrchestrator {
   async status(jobId) {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
+    const jobDir = this.store.jobDir(jobId);
+    const progress = await readWorkerProgress({ job, jobDir });
+    return { ...this.publicJob(job), progress };
+  }
+
+  async startInvestigation(args) {
+    const projectDir = path.resolve(requireString(args, "project_dir"));
+    const config = await assertProject(projectDir);
+    const taskId = String(args.task_id || `investigate-${Date.now()}`);
+    const allJobs = await this.store.listJobs();
+    const plan = await resolveJobPlan(projectDir, taskId, {
+      existingJobs: allJobs,
+      jobType: "reviewer_investigate",
+    });
+    const job = await this.store.createJob({
+      id: newId("investigate"), type: "reviewer_investigate", provider: "agy", status: "queued", phase: "queued",
+      project_dir: projectDir, task_id: taskId, goal: requireString(args, "objective"), plan: "", complexity: "low", mode: "investigate",
+      plan_id: plan.plan_id, plan_type: plan.plan_type, association_reason: plan.association_reason,
+      routing: { primary: investigatorPrimary(config), fallback: investigatorFallback(config), fallback_only_for: "runtime_provider_failure" },
+    });
+    this.launch(job, (signal) => this.executeAgy(job, config, signal));
     return this.publicJob(job);
+  }
+
+  async startVerify(args) {
+    const projectDir = path.resolve(requireString(args, "project_dir"));
+    const contract = await loadPlannerContract(projectDir, requireString(args, "task_id"));
+    const review = contract.reviewer_tasks.find((item) => item.review_id === args.review_id);
+    if (!review) throw new Error(`Invalid reviewer review_id=${args.review_id}`);
+    const complexity = review.complexity === "mid" ? "medium" : review.complexity;
+    return this.startAgy({ project_dir: projectDir, task_id: args.task_id, goal: review.required_checks.join("; ") || `Verify ${args.review_id}`, plan: "", review_id: args.review_id, complexity }, "review");
+  }
+
+  async accept(args) {
+    const projectDir = path.resolve(requireString(args, "project_dir"));
+    const taskId = requireString(args, "task_id");
+    const jobs = await this.store.listJobs();
+    const job = jobs.find((item) => item.id === requireString(args, "job_id") && item.project_dir === projectDir && item.task_id === taskId && item.status === "completed" && item.phase === "ready_for_acceptance");
+    if (!job) throw new Error("acceptance_unavailable");
+    const verification = collectAgyVerifyEvidence(jobs, projectDir, taskId, job);
+    if (job.requires_agy_review && !job.review_waiver && !verification) throw new Error("acceptance_unavailable");
+    const evidence = JSON.parse(await fs.readFile(job.evidence_path, "utf8"));
+    const patchDigest = evidence.changes?.patch_digest || crypto.createHash("sha256").update(await fs.readFile(job.patch_path)).digest("hex");
+
+    // Require a Planner contract — fail closed if missing or invalid.
+    let contract;
+    try {
+      contract = await loadPlannerContract(projectDir, taskId);
+    } catch (err) {
+      throw new Error(`acceptance_unavailable: ${err.message}`);
+    }
+
+    // Use the shared saveAcceptance() with full provenance schema.
+    return saveAcceptance({
+      jobDir: this.store.jobDir(job.id),
+      job,
+      contract,
+      evidence,
+      patchDigest,
+      verification,
+      decision: args.decision || "accepted",
+      accepterHost: "codex",
+      accepterProvider: "codex",
+      accepterModel: "gpt-5.6-sol",
+      accepterSessionId: args.session_id || job.session_id || null,
+      summary: args.summary || `Accepted via Codex`,
+      conditions: Array.isArray(args.conditions) ? args.conditions : [],
+      unresolvedRisks: Array.isArray(args.unresolved_risks) ? args.unresolved_risks : [],
+      updateJob: (patch) => this.store.updateJob(job.id, patch),
+    });
   }
 
   async result(jobId) {
@@ -861,30 +1122,77 @@ export class WorkerOrchestrator {
   async apply(jobId) {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
+
+    // Gate 1: Job must be completed and ready for acceptance
     if (job.status !== "completed" || job.phase !== "ready_for_acceptance") throw new Error("Only a completed job ready for acceptance can be applied.");
 
-    // Review-gate enforcement: implementation jobs that require AGY review
-    // must have a completed AGY verify job unless explicitly waived.
+    // Gate 2: Acceptance artifact must exist with accepted status
+    if (job.acceptance_status !== "accepted" || !job.acceptance_artifact_path) throw new Error("A valid acceptance artifact is required before apply.");
+
+    // Gate 3: Contract must exist.
+    const contract = await loadPlannerContract(job.project_dir, job.task_id);
+    if (!contract) throw new Error(`No Planner contract found for task ${job.task_id}. A contract is required before apply.`);
+
+    // Gate 4: Review-gate enforcement
     if (job.requires_agy_review && !job.review_waiver) {
       const allJobs = await this.store.listJobs();
-      const agyEvidence = collectAgyVerifyEvidence(allJobs, job.project_dir, job.task_id);
+      const agyEvidence = collectAgyVerifyEvidence(allJobs, job.project_dir, job.task_id, job);
       if (!agyEvidence) {
         throw new Error(
-          `Job requires AGY verify evidence before apply. ` +
-          `Run agy-verify for task "${job.task_id}" or set review_waiver: true ` +
+          `Job requires reviewer evidence before apply. ` +
+          `Run reviewer-verify for task "${job.task_id}" or set review_waiver: true ` +
           `on the job contract to bypass this gate.`
         );
       }
-      // Record the matching AGY evidence reference
       await this.store.updateJob(jobId, {
         agy_verify_job_id: agyEvidence.id,
         agy_verify_evidence_path: agyEvidence.evidence_path || null,
+        reviewer_job_id: agyEvidence.id,
+        reviewer_evidence_path: agyEvidence.evidence_path || null,
       });
     }
 
+    // Gate 5: Evidence and patch integrity checks
     const evidence = JSON.parse(await fs.readFile(job.evidence_path, "utf8"));
+
+    // Gate 5a: Patch digest must match acceptance artifact
+    if (evidence.changes?.patch_digest && evidence.changes.patch_digest !== job.acceptance_patch_digest) {
+      throw new Error("Acceptance artifact patch digest does not match the current patch.");
+    }
+
+    // Gate 5b: No forbidden path changes
     if (evidence.changes.forbidden_changes.length) throw new Error("Cannot apply a patch containing forbidden-path changes.");
+
+    // Gate 5c: No unauthorized changes outside writable_paths
+    if (evidence.changes.unauthorized_changes?.length) throw new Error("Cannot apply a patch containing changes outside writable_paths.");
+
+    // Gate 5d: Verification must have passed.  Provider unavailability
+    // (e.g. AGY quota exhaustion during review) must be surfaced as
+    // verification_unavailable, not a silent verified=false.
+    if (evidence.verification) {
+      if (evidence.verification.status === "verification_unavailable") {
+        throw new Error(`Verification provider was unavailable for job ${jobId}. Cannot apply.`);
+      }
+      if (!evidence.verification.passed && evidence.verification.configured !== false) {
+        throw new Error(`Verification did not pass for job ${jobId}. Cannot apply.`);
+      }
+    }
+
+    // Gate 6: Acceptance artifact provenance must match the current contract.
+    // Uses the shared validateAcceptanceForCurrentPatch() which checks
+    // schema validity, contract_id/version/digest match, patch_digest match,
+    // and status === "accepted".
+    const currentPatchDigest = evidence.changes?.patch_digest || null;
+    await validateAcceptanceForCurrentPatch({
+      artifactPath: job.acceptance_artifact_path,
+      contract,
+      currentPatchDigest,
+    });
+
+    // Gate 7: Workspace mode check
     if (job.workspace.mode === "in_place") return { applied: false, already_in_place: true, project_dir: job.project_dir };
+
+    // Gate 8: Git apply check (done inside applyPatch)
     const result = await applyPatch({ originalProjectDir: job.workspace.original_project_dir, patchPath: job.patch_path, logDir: this.store.jobDir(jobId) });
     await this.store.updateJob(jobId, { applied_at: nowIso(), phase: "applied" });
     return result;
@@ -918,15 +1226,30 @@ export class WorkerOrchestrator {
       phase: job.phase,
       project_dir: job.project_dir,
       task_id: job.task_id,
+      review_id: job.review_id || null,
       session_id: job.session_id || null,
       model: job.model || job.model_override || null,
+      plan_id: job.plan_id || null,
+      plan_type: job.plan_type || null,
+      contract_id: job.contract_id || null,
+      association_reason: job.association_reason || null,
       auto_route: job.auto_route || null,
       auto_fallback_reason: job.auto_fallback_reason || null,
       auto_fallback_classifier: job.auto_fallback_classifier || null,
+      dependencies: job.dependencies || [],
+      read_paths: job.read_paths || [],
+      writable_paths: job.writable_paths || [],
+      forbidden_paths: job.forbidden_paths || [],
+      acceptance_commands: job.acceptance_commands || [],
       requires_agy_review: job.requires_agy_review || false,
       review_waiver: job.review_waiver || false,
       agy_verify_job_id: job.agy_verify_job_id || null,
       agy_verify_evidence_path: job.agy_verify_evidence_path || null,
+      reviewer_job_id: job.reviewer_job_id || job.agy_verify_job_id || null,
+      reviewer_evidence_path: job.reviewer_evidence_path || job.agy_verify_evidence_path || null,
+      acceptance_artifact_path: job.acceptance_artifact_path || null,
+      acceptance_status: job.acceptance_status || null,
+      routing: job.routing || null,
       created_at: job.created_at,
       updated_at: job.updated_at,
       started_at: job.started_at || null,

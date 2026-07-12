@@ -35,6 +35,13 @@ powershell -ExecutionPolicy Bypass -File <plugin-root>\skills\audit-orch\scripts
 3. The launcher checks whether an existing dashboard is bound to the same `.agent-orchestrator`; if not, it starts a new read-only dashboard on the next available port instead of reusing the wrong project.
 4. Tell the user the dashboard URL printed by the launcher.
 
+PowerShell/dashboard handling:
+
+- Prefer the project-aware launcher or `agent-orch.ps1 dashboard`; do not hand-build nested PowerShell command strings.
+- The launcher prints a `http://127.0.0.1:<port>` URL. Use that URL for health checks and browser verification because `localhost` can resolve slowly or time out on this Windows machine.
+- Stop a dashboard with `agent-orch.ps1 dashboard-close -ProjectDir <project>` or `.agent-orchestrator\open-dashboard.ps1 -Close` before deleting temporary project directories.
+- If a previous dashboard process survived after a failed cleanup, run the same close command with the original `-ProjectDir`; it can stop a project-bound dashboard even if `.agent-orchestrator` was already removed.
+
 Do not start `server.py` directly unless debugging the dashboard itself. If direct startup is necessary, pass both `--project-dir <project>` and `--port <port>` explicitly.
 
 ## Dashboard Capabilities

@@ -3,12 +3,12 @@
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "CLI-driven Codex workflow for Claude Code and Antigravity CLI.",
+  "description": "MCP-driven Codex workflow for multi-agent orchestration with CC and AGY providers.",
   "scripts": {
     "agent-orch": "node scripts/agent-orch.mjs",
     "test": "node --test tests/*.test.mjs",
     "start": "node scripts/agent-orch.mjs",
-    "start:legacy-mcp": "node scripts/server.mjs"
+    "start:mcp": "node scripts/server.mjs"
   },
   "engines": {
     "node": ">=18.18"

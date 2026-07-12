@@ -5,11 +5,29 @@ import path from "node:path";
 import { runProcess } from "./process.mjs";
 import { pathExists, truncate } from "./utils.mjs";
 
-function contractPrompt({ role, goal, plan, acceptance, writablePaths, forbiddenPaths, evidenceOnly = false }) {
+async function readClaudeSettingsEnv() {
+  const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
+  const settingsPath = path.join(home, ".claude", "settings.json");
+  try {
+    const parsed = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    const env = parsed?.env;
+    if (!env || typeof env !== "object" || Array.isArray(env)) return {};
+    return Object.fromEntries(
+      Object.entries(env)
+        .filter(([key, value]) => typeof key === "string" && typeof value !== "object" && value !== null)
+        .map(([key, value]) => [key, String(value)]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function contractPrompt({ role, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, evidenceOnly = false }) {
   return [
     `Role: ${role}`,
     `Goal: ${goal}`,
     plan ? `Approved plan:\n${plan}` : null,
+    readPaths?.length ? `Read-only paths: ${readPaths.join(", ")}` : null,
     writablePaths?.length ? `Writable paths: ${writablePaths.join(", ")}` : null,
     forbiddenPaths?.length ? `Forbidden paths: ${forbiddenPaths.join(", ")}` : null,
     acceptance?.length ? `Acceptance commands: ${acceptance.join("; ")}` : null,
@@ -46,15 +64,16 @@ function parseClaudeOutput(stdout, fallbackSessionId) {
   }
 }
 
-export async function runClaude({ config, workspace, jobDir, goal, plan, acceptance, taskSession, model, repairContext, signal, round = 0 }) {
+export async function runClaude({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0 }) {
   const sessionId = taskSession?.session_id || crypto.randomUUID();
   const basePrompt = contractPrompt({
     role: "Primary implementation worker reporting to Codex",
     goal,
     plan,
     acceptance,
-    writablePaths: config.scope.writable,
-    forbiddenPaths: config.scope.forbidden,
+    readPaths,
+    writablePaths,
+    forbiddenPaths,
   });
   const prompt = repairContext
     ? `${basePrompt}\n\nThis is a continuation. Fix only the following verified failures without redesigning the approved plan:\n${repairContext}`
@@ -68,6 +87,7 @@ export async function runClaude({ config, workspace, jobDir, goal, plan, accepta
     maxBudgetUsd: config.execution.cc_max_budget_usd,
   });
   args.unshift(...(config.cli.claude_prefix_args || []));
+  const claudeSettingsEnv = await readClaudeSettingsEnv();
   const processResult = await runProcess({
     command: config.cli.claude,
     args,
@@ -76,6 +96,7 @@ export async function runClaude({ config, workspace, jobDir, goal, plan, accepta
     logDir: jobDir,
     logPrefix: `cc-round-${round}`,
     maxLogBytes: config.execution.max_log_bytes,
+    env: { ...claudeSettingsEnv, ...(config.cli.claude_env || {}) },
     signal,
   });
   return { ...processResult, parsed: parseClaudeOutput(processResult.stdout, sessionId), session_id: sessionId, model: model || null };
@@ -247,13 +268,184 @@ async function readTail(file, maxChars = 4000) {
   }
 }
 
-export async function runAgy({ config, workspace, jobDir, goal, plan, taskSession, model, signal, mode = "investigate" }) {
+// -- Worker progress extraction (bounded, assistant-only, at most 2 newest) --
+
+/**
+ * Read the bounded tail of an AGY transcript JSONL file and return at most the
+ * two newest MODEL-source (assistant) messages.  Never exposes tool calls,
+ * tool arguments, tool output, or user messages.
+ *
+ * @param {string|null} conversationId
+ * @param {number} [maxChars=16000] bounded tail read limit
+ * @returns {Promise<Array<{content:string, timestamp:string|null, source:string}>>}
+ */
+async function readAgyProgress(conversationId, maxChars = 16000) {
+  if (!conversationId) return [];
+  const transcript = path.join(
+    agyCliRoot(),
+    "brain",
+    conversationId,
+    ".system_generated",
+    "logs",
+    "transcript.jsonl",
+  );
+  if (!(await pathExists(transcript))) return [];
+  try {
+    const text = await readTail(transcript, maxChars);
+    if (!text) return [];
+    const modelMessages = [];
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      let item;
+      try { item = JSON.parse(line); } catch { continue; }
+      if (item.source === "MODEL" && typeof item.content === "string" && item.content.trim()) {
+        modelMessages.push({
+          content: item.content.trim(),
+          timestamp: item.ts || item.timestamp || null,
+          source: "agy_transcript",
+        });
+      }
+    }
+    return modelMessages.slice(-2);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Read the bounded tail of the latest CC round's stdout file and extract
+ * assistant messages.  Supports two formats:
+ *
+ * 1. Single JSON object with a `result` string field (CC --output-format json
+ *    final summary).
+ * 2. JSONL where each line may have `type: "message"` with `role: "assistant"`,
+ *    or a final summary line with a `result` field.
+ *
+ * Returns at most the two newest non-empty assistant messages.
+ *
+ * @param {string} jobDir – absolute path to the job directory on disk
+ * @param {number} [maxChars=16000]
+ * @returns {Promise<Array<{content:string, timestamp:string|null, source:string}>>}
+ */
+async function readCcProgress(jobDir, maxChars = 16000) {
+  // Discover the latest round's stdout file
+  let entries;
+  try { entries = await fs.readdir(jobDir, { withFileTypes: true }); } catch { return []; }
+  const stdoutFiles = entries
+    .filter((e) => e.isFile() && /^cc-round-\d+\.stdout$/.test(e.name))
+    .map((e) => ({ name: e.name, round: parseInt(e.name.match(/\d+/)[0], 10) }))
+    .sort((a, b) => b.round - a.round);
+  if (!stdoutFiles.length) return [];
+  const text = await readTail(path.join(jobDir, stdoutFiles[0].name), maxChars);
+  if (!text) return [];
+
+  const messages = [];
+  const lines = text.split(/\n/).filter(Boolean);
+
+  // First pass: look for a summary JSON object (last line most likely)
+  // CC produces a single JSON object with --output-format json
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    try {
+      const parsed = JSON.parse(lines[i]);
+      if (typeof parsed.result === "string" && parsed.result.trim()) {
+        messages.push({
+          content: parsed.result.trim(),
+          timestamp: parsed.ts || parsed.timestamp || null,
+          source: "cc_summary",
+        });
+        break;
+      }
+    } catch { continue; }
+  }
+
+  // Second pass: collect JSONL assistant message lines (streaming text)
+  for (const line of lines) {
+    try {
+      const item = JSON.parse(line);
+      if (item.type === "message" && item.role === "assistant" && typeof item.content === "string" && item.content.trim()) {
+        messages.push({
+          content: item.content.trim(),
+          timestamp: item.ts || item.timestamp || null,
+          source: "cc_message",
+        });
+      }
+    } catch { continue; }
+  }
+
+  // Deduplicate by content (summary may duplicate a message)
+  const seen = new Set();
+  const unique = [];
+  for (const m of messages) {
+    const key = m.content.slice(0, 200);
+    if (!seen.has(key)) { seen.add(key); unique.push(m); }
+  }
+
+  return unique.slice(-2);
+}
+
+/**
+ * Best-effort bounded progress extractor for CC and AGY worker jobs.
+ * Reads a bounded tail of known/discoverable worker transcripts, selects
+ * assistant/model messages only, and returns at most the two newest
+ * non-empty messages with safe metadata.
+ *
+ * Never exposes raw transcript paths, tool calls, tool arguments, or
+ * tool output through the returned progress.
+ *
+ * @param {object} opts
+ * @param {object} opts.job   – full job object from the state store
+ * @param {string} opts.jobDir – absolute path to the job's disk directory
+ * @returns {Promise<{available:boolean, messages:Array, note:string|null}>}
+ */
+export async function readWorkerProgress({ job, jobDir }) {
+  const provider = job?.provider || "";
+  const sessionId = job?.session_id || null;
+
+  let messages = [];
+
+  if (provider === "cc") {
+    messages = await readCcProgress(jobDir);
+  } else if (provider === "agy" || provider === "agy_write") {
+    messages = await readAgyProgress(sessionId);
+  }
+
+  if (!messages || messages.length === 0) {
+    return {
+      available: false,
+      messages: [],
+      note: `No assistant progress available yet for this ${provider || "unknown"} job.`,
+    };
+  }
+
+  // Bound each message's content length
+  const trimmed = messages.slice(0, 2).map((m) => ({
+    content: truncate(m.content, 2000),
+    timestamp: m.timestamp || null,
+    source: m.source || null,
+  }));
+
+  return { available: true, messages: trimmed, note: null };
+}
+
+export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths, writablePaths, forbiddenPaths, taskSession, model, signal, mode = "investigate" }) {
   const evidenceOnly = mode !== "disjoint_subtask";
-  const prompt = evidenceOnly
+  const prompt = mode === "plan"
     ? [
-        "You are a specialist reporting evidence to Codex.",
+        "You are a planner producing a contract-oriented plan for the host orchestrator.",
+        `Planning goal: ${goal}`,
+        plan ? `Context: ${plan}` : null,
+        readPaths?.length ? `Read-only paths: ${readPaths.join(", ")}` : null,
+        forbiddenPaths?.length ? `Forbidden paths: ${forbiddenPaths.join(", ")}` : null,
+        "Read-only: do not modify files or external systems.",
+        "Return a concise plan with proposed contracts, dependencies, read_paths, writable_paths, forbidden_paths, acceptance commands, and parallel/serial ordering. Do not execute implementation.",
+      ].filter(Boolean).join("\n\n")
+    : evidenceOnly
+    ? [
+        mode === "review" ? "You are a reviewer reporting acceptance evidence to the host orchestrator." : "You are a specialist reporting evidence to the host orchestrator.",
         `Task: ${goal}`,
         plan ? `Context: ${plan}` : null,
+        readPaths?.length ? `Read-only paths: ${readPaths.join(", ")}` : null,
+        forbiddenPaths?.length ? `Forbidden paths: ${forbiddenPaths.join(", ")}` : null,
         "Read-only: do not modify files or external systems.",
         "After any necessary tool use, provide a concise final answer with concrete evidence. Do not stop at a plan.",
       ].filter(Boolean).join("\n\n")
@@ -261,8 +453,9 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, taskSessio
         "You are implementing a strictly disjoint subtask for Codex.",
         `Task: ${goal}`,
         plan ? `Approved plan: ${plan}` : null,
-        `Writable paths: ${config.scope.writable.join(", ")}`,
-        `Forbidden paths: ${config.scope.forbidden.join(", ")}`,
+        readPaths?.length ? `Read-only paths: ${readPaths.join(", ")}` : null,
+        writablePaths?.length ? `Writable paths: ${writablePaths.join(", ")}` : null,
+        forbiddenPaths?.length ? `Forbidden paths: ${forbiddenPaths.join(", ")}` : null,
         "Do not commit, push, publish, deploy, or modify anything outside the approved paths.",
         "Complete the task, run relevant checks, and provide a concise final answer. Do not stop at a plan.",
       ].filter(Boolean).join("\n\n");
@@ -297,6 +490,7 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, taskSessio
     logDir: jobDir,
     logPrefix: `agy-${mode}`,
     maxLogBytes: config.execution.max_log_bytes,
+    env: config.cli.agy_env || {},
     signal,
   });
   const sessionId = await discoverAgyConversation({
@@ -365,11 +559,12 @@ export function classifyAgyQuotaError(output, stderr = "") {
   return quotaPatterns.some((re) => re.test(combined));
 }
 
-export function contractPromptAgyWrite({ goal, plan, acceptance, writablePaths, forbiddenPaths }) {
+export function contractPromptAgyWrite({ goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths }) {
   return [
     "Role: Primary implementation worker reporting to Codex",
     `Goal: ${goal}`,
     plan ? `Approved plan:\n${plan}` : null,
+    readPaths?.length ? `Read-only paths: ${readPaths.join(", ")}` : null,
     writablePaths?.length ? `Writable paths: ${writablePaths.join(", ")}` : null,
     forbiddenPaths?.length ? `Forbidden paths: ${forbiddenPaths.join(", ")}` : null,
     acceptance?.length ? `Acceptance commands: ${acceptance.join("; ")}` : null,
@@ -380,14 +575,15 @@ export function contractPromptAgyWrite({ goal, plan, acceptance, writablePaths, 
   ].filter(Boolean).join("\n\n");
 }
 
-export async function runAgyWrite({ config, workspace, jobDir, goal, plan, acceptance, taskSession, model, repairContext, signal, round = 0 }) {
+export async function runAgyWrite({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0 }) {
   const sessionId = taskSession?.session_id || crypto.randomUUID();
   const basePrompt = contractPromptAgyWrite({
     goal,
     plan,
     acceptance,
-    writablePaths: config.scope.writable,
-    forbiddenPaths: config.scope.forbidden,
+    readPaths,
+    writablePaths,
+    forbiddenPaths,
   });
   const prompt = repairContext
     ? `${basePrompt}\n\nThis is a continuation. Fix only the following verified failures without redesigning the approved plan:\n${repairContext}`
@@ -426,6 +622,7 @@ export async function runAgyWrite({ config, workspace, jobDir, goal, plan, accep
     logDir: jobDir,
     logPrefix: `agy-write-round-${round}`,
     maxLogBytes: config.execution.max_log_bytes,
+    env: config.cli.agy_env || {},
     signal,
   });
 

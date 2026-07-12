@@ -17,7 +17,7 @@ MAX_TAIL_BYTES = 256 * 1024
 MAX_TRANSCRIPT_BYTES = 192 * 1024
 MAX_EVENTS = 120
 MAX_PROMPT_CONTENT_BYTES = 160 * 1024
-JOB_ID_RE = re.compile(r"^(cc|agy|agy-probe)-[A-Za-z0-9_.-]+$")
+JOB_ID_RE = re.compile(r"^(auto|cc|agy|agy-probe)-[A-Za-z0-9_.-]+$")
 TRANSCRIPT_CACHE = {}
 PROCESS_CACHE = {"time": 0.0, "processes": [], "text": ""}
 CONCLUSION_LOCK = threading.Lock()
@@ -491,7 +491,9 @@ def job_role(job):
     provider = job.get("provider", "")
     job_type = job.get("type", "")
     phase = job.get("phase", "")
-    if provider == "agy" and ("verify" in job_type or "investigate" in job_type):
+    if provider == "agy" and "plan" in job_type:
+        return "planner"
+    if provider == "agy" and ("verify" in job_type or "review" in job_type or "investigate" in job_type):
         return "reviewer"
     # Accepter: applied jobs checked before executor since applied CC jobs
     # still carry cc provider and cc_execute type
@@ -507,6 +509,8 @@ def job_role(job):
 def job_stage(job):
     """Map job phase/type to a lifecycle stage: plan, execute, review, repair, accept, cleanup."""
     text = str(job.get("phase") or job.get("type") or "")
+    if "plan" in text:
+        return "plan"
     if "verify" in text or "review" in text or "investigate" in text:
         return "review"
     if "applied" in text or "accepted" in text:
@@ -518,6 +522,247 @@ def job_stage(job):
     if any(k in text for k in ("queue", "prepar", "execut", "ready", "fail", "complet", "session", "job")):
         return "execute"
     return "plan"
+
+
+def string_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    return [str(value)]
+
+
+def load_contracts(orchestrator_dir):
+    if not orchestrator_dir:
+        return []
+    contracts_dir = os.path.join(orchestrator_dir, "contracts")
+    if not os.path.isdir(contracts_dir):
+        return []
+    contracts = []
+    for name in sorted(os.listdir(contracts_dir)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(contracts_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                contract = json.load(fh)
+            task_id = str(contract.get("task_id") or contract.get("taskId") or "").strip()
+            if not task_id:
+                continue
+            contract["task_id"] = task_id
+            contract["plan_id"] = str(
+                contract.get("plan_id")
+                or contract.get("planId")
+                or contract.get("contract_set_id")
+                or contract.get("contractSetId")
+                or contract.get("planner_job_id")
+                or contract.get("plannerJobId")
+                or "default-plan"
+            )
+            contract["planner_job_id"] = contract.get("planner_job_id") or contract.get("plannerJobId")
+            contract["dependencies"] = string_list(contract.get("dependencies") or contract.get("depends_on") or contract.get("dependsOn"))
+            contract["read_paths"] = string_list(contract.get("read_paths") or contract.get("readPaths"))
+            contract["writable_paths"] = string_list(contract.get("writable_paths") or contract.get("writablePaths"))
+            contract["forbidden_paths"] = string_list(contract.get("forbidden_paths") or contract.get("forbiddenPaths"))
+            contract["acceptance_commands"] = string_list(contract.get("acceptance_commands") or contract.get("acceptanceCommands"))
+            contract["file"] = path
+            contracts.append(contract)
+        except Exception:
+            pass
+    return contracts
+
+
+def load_plans(orchestrator_dir):
+    """Load all plan manifests from .agent-orchestrator/plans/. Returns list of plan dicts."""
+    if not orchestrator_dir:
+        return []
+    plans_dir = os.path.join(orchestrator_dir, "plans")
+    if not os.path.isdir(plans_dir):
+        return []
+    plans = []
+    for name in sorted(os.listdir(plans_dir)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(plans_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                plan = json.load(fh)
+            if plan.get("plan_id") and plan.get("type") in ("formal", "adhoc"):
+                plan["file"] = path
+                plans.append(plan)
+        except Exception:
+            pass
+    return plans
+
+
+def load_jobs(orchestrator_dir):
+    if not orchestrator_dir:
+        return []
+    runs_dir = os.path.join(orchestrator_dir, "runs")
+    if not os.path.isdir(runs_dir):
+        return []
+    jobs = []
+    for folder in os.listdir(runs_dir):
+        job_file = os.path.join(runs_dir, folder, "job.json")
+        if not os.path.isfile(job_file):
+            continue
+        try:
+            with open(job_file, "r", encoding="utf-8") as fh:
+                jobs.append(json.load(fh))
+        except Exception:
+            pass
+    return jobs
+
+
+def job_sort_key(job):
+    return str(job.get("updated_at") or job.get("finished_at") or job.get("started_at") or job.get("created_at") or "")
+
+
+def dependency_applied(task_id, jobs):
+    return any(
+        job.get("task_id") == task_id
+        and job.get("status") == "completed"
+        and job.get("phase") in ("applied", "applied_and_cleaned")
+        for job in jobs
+    )
+
+
+def latest_job(jobs, predicate):
+    matches = [job for job in jobs if predicate(job)]
+    matches.sort(key=job_sort_key, reverse=True)
+    return matches[0] if matches else None
+
+
+def dag_node_state(contract, task_jobs, all_jobs):
+    implementation = latest_job(task_jobs, lambda job: job.get("type") in ("auto_execute", "cc_execute", "cc_continue", "agy_execute", "agy_continue"))
+    verify = latest_job(task_jobs, lambda job: job.get("type") in ("agy_verify", "agy_review") and job.get("status") == "completed")
+    blocked_by = [dep for dep in contract.get("dependencies", []) if not dependency_applied(dep, all_jobs)]
+    if implementation and implementation.get("status") == "completed" and implementation.get("phase") in ("applied", "applied_and_cleaned"):
+        return "applied", blocked_by, implementation, verify
+    if implementation and implementation.get("status") in ("queued", "running"):
+        return "running", blocked_by, implementation, verify
+    if implementation and implementation.get("status") == "failed":
+        return "failed", blocked_by, implementation, verify
+    if implementation and implementation.get("status") == "completed" and implementation.get("phase") == "ready_for_acceptance":
+        if implementation.get("requires_agy_review") and not implementation.get("review_waiver") and not verify:
+            return "review_blocked", blocked_by, implementation, verify
+        return "ready_for_acceptance", blocked_by, implementation, verify
+    if blocked_by:
+        return "blocked", blocked_by, implementation, verify
+    return "planned", blocked_by, implementation, verify
+
+
+def build_dag(orchestrator_dir):
+    contracts = load_contracts(orchestrator_dir)
+    jobs = load_jobs(orchestrator_dir)
+    nodes = []
+    for contract in contracts:
+        task_jobs = [job for job in jobs if job.get("task_id") == contract.get("task_id")]
+        latest = latest_job(task_jobs, lambda job: True)
+        state, blocked_by, implementation, verify = dag_node_state(contract, task_jobs, jobs)
+        nodes.append({
+            "task_id": contract.get("task_id"),
+            "plan_id": contract.get("plan_id", "default-plan"),
+            "planner_job_id": contract.get("planner_job_id"),
+            "goal": contract.get("goal", ""),
+            "state": state,
+            "dependencies": contract.get("dependencies", []),
+            "read_paths": contract.get("read_paths", []),
+            "writable_paths": contract.get("writable_paths", []),
+            "forbidden_paths": contract.get("forbidden_paths", []),
+            "acceptance_commands": contract.get("acceptance_commands", []),
+            "blocked_by": blocked_by,
+            "latest_job_id": latest.get("id") if latest else None,
+            "implementation_job_id": implementation.get("id") if implementation else None,
+            "verify_job_id": verify.get("id") if verify else None,
+            "status": latest.get("status") if latest else None,
+            "phase": latest.get("phase") if latest else None,
+            "provider": latest.get("provider") if latest else None,
+        })
+    edges = []
+    for contract in contracts:
+        for dep in contract.get("dependencies", []):
+            edges.append({"source": dep, "target": contract.get("task_id")})
+    contract_sets = []
+    for plan_id in sorted(set(node.get("plan_id", "default-plan") for node in nodes)):
+        set_nodes = [node for node in nodes if node.get("plan_id", "default-plan") == plan_id]
+        set_task_ids = {node.get("task_id") for node in set_nodes}
+        contract_sets.append({
+            "plan_id": plan_id,
+            "planner_job_id": next((node.get("planner_job_id") for node in set_nodes if node.get("planner_job_id")), None),
+            "nodes": set_nodes,
+            "edges": [edge for edge in edges if edge.get("source") in set_task_ids and edge.get("target") in set_task_ids],
+            "job_count": len([job for job in jobs if job.get("task_id") in set_task_ids]),
+        })
+    return {"nodes": nodes, "edges": edges, "contract_sets": contract_sets, "generated_at": time.time()}
+
+
+def build_plan_summary(orchestrator_dir):
+    """Build a summary of plans with job counts, plan types, and integrity checks."""
+    jobs = load_jobs(orchestrator_dir)
+    plans = load_plans(orchestrator_dir)
+    plan_map = {p["plan_id"]: p for p in plans}
+
+    # Count jobs per plan
+    plan_job_counts = {}
+    legacy_jobs = []
+    for job in jobs:
+        pid = job.get("plan_id")
+        plan_type = job.get("plan_type")
+        if pid and plan_type:
+            plan_job_counts.setdefault(pid, {"total": 0, "active": 0, "completed": 0, "failed": 0, "type": plan_type})
+            plan_job_counts[pid]["total"] += 1
+            status = job.get("status")
+            if status in ("queued", "running"):
+                plan_job_counts[pid]["active"] += 1
+            elif status == "completed":
+                plan_job_counts[pid]["completed"] += 1
+            elif status == "failed":
+                plan_job_counts[pid]["failed"] += 1
+        else:
+            legacy_jobs.append(job)
+
+    # Build plan list
+    plan_list = []
+    for pid, counts in plan_job_counts.items():
+        plan = plan_map.get(pid, {})
+        plan_list.append({
+            "plan_id": pid,
+            "name": plan.get("name", pid),
+            "type": counts["type"],
+            "job_counts": counts,
+        })
+
+    # Add legacy plan grouping
+    legacy_count = len(legacy_jobs)
+    if legacy_count > 0:
+        plan_list.append({
+            "plan_id": "__legacy__",
+            "name": "Legacy / Migration Plan",
+            "type": "legacy",
+            "read_only": True,
+            "job_counts": {
+                "total": legacy_count,
+                "active": sum(1 for j in legacy_jobs if j.get("status") in ("queued", "running")),
+                "completed": sum(1 for j in legacy_jobs if j.get("status") == "completed"),
+                "failed": sum(1 for j in legacy_jobs if j.get("status") == "failed"),
+            },
+        })
+
+    total_plan_jobs = sum(p["job_counts"]["total"] for p in plan_list)
+    total_all_jobs = len(jobs)
+
+    return {
+        "plans": plan_list,
+        "total_jobs": total_all_jobs,
+        "total_plan_jobs": total_plan_jobs,
+        "integrity_warning": None if total_plan_jobs == total_all_jobs
+            else f"Job count mismatch: {total_plan_jobs} jobs across plans vs {total_all_jobs} total",
+    }
 
 
 def project_summary(project_path, source="manual", process_text=None):
@@ -537,6 +782,8 @@ def project_summary(project_path, source="manual", process_text=None):
     role_counts = {"planner": 0, "executor": 0, "reviewer": 0, "accepter": 0, "coordinator": 0}
     stage_counts = {"plan": 0, "execute": 0, "review": 0, "repair": 0, "accept": 0, "cleanup": 0}
     fallback_chains = []
+    plan_counts = {}
+    legacy_count = 0
 
     now_ts = time.time()
     STALE_SECONDS = 900  # 15 minutes
@@ -608,6 +855,21 @@ def project_summary(project_path, source="manual", process_text=None):
                             "reason": (job.get("auto_fallback_reason") or "")[:200],
                         })
 
+                    # Track plan associations
+                    pid = job.get("plan_id")
+                    ptype = job.get("plan_type")
+                    if pid and ptype:
+                        plan_counts.setdefault(pid, {"total": 0, "active": 0, "completed": 0, "failed": 0, "type": ptype})
+                        plan_counts[pid]["total"] += 1
+                        if status in ("queued", "running"):
+                            plan_counts[pid]["active"] += 1
+                        elif status == "completed":
+                            plan_counts[pid]["completed"] += 1
+                        elif status == "failed":
+                            plan_counts[pid]["failed"] += 1
+                    else:
+                        legacy_count += 1
+
                 except Exception:
                     pass
 
@@ -623,6 +885,8 @@ def project_summary(project_path, source="manual", process_text=None):
         "role_counts": role_counts,
         "stage_counts": stage_counts,
         "fallback_chains": fallback_chains[:20],
+        "plan_counts": plan_counts,
+        "legacy_job_count": legacy_count,
         "source": source,
     }
 
@@ -1076,6 +1340,10 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                 response_data = project_summary(requested)
             elif path == "/api/runs":
                 response_data = self.get_runs_list(orchestrator_dir)
+            elif path == "/api/dag":
+                response_data = build_dag(orchestrator_dir)
+            elif path == "/api/plans":
+                response_data = build_plan_summary(orchestrator_dir)
             elif path.startswith("/api/conclusion/"):
                 job_id = unquote(path[len("/api/conclusion/"):])
                 safe_run_path(orchestrator_dir, job_id)
@@ -1142,6 +1410,8 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                     "stage": job_stage(job),
                     "type": job.get("type", ""),
                     "task_id": job.get("task_id", ""),
+                    "plan_id": job.get("plan_id"),
+                    "plan_type": job.get("plan_type"),
                     "status": status,
                     "phase": job.get("phase", ""),
                     "started_at": job.get("started_at"),
@@ -1150,6 +1420,10 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                     "requires_agy_review": job.get("requires_agy_review", False),
                     "review_waiver": job.get("review_waiver", False),
                     "auto_route": job.get("auto_route"),
+                    "dependencies": job.get("dependencies", []),
+                    "read_paths": job.get("read_paths", []),
+                    "writable_paths": job.get("writable_paths", []),
+                    "forbidden_paths": job.get("forbidden_paths", []),
                     "auto_fallback_classifier": job.get("auto_fallback_classifier"),
                     "auto_fallback_reason": (job.get("auto_fallback_reason") or "")[:200],
                 })

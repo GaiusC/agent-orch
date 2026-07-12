@@ -137,3 +137,74 @@ test("resume filters sessions to the requested project only", async (t) => {
   const sessionKeysAll = Object.keys(resumeAll.sessions);
   assert.ok(sessionKeysAll.length >= 3);
 });
+
+test("job with plan fields appears in job snapshot", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-state-plan-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new StateStore(path.join(root, "state"), { jobsRoot: path.join(root, "runs"), orchestratorRoot: root });
+  await store.init();
+  const job = await store.createJob({
+    id: "cc-plan-job",
+    type: "cc_execute",
+    provider: "cc",
+    status: "completed",
+    phase: "ready_for_acceptance",
+    project_dir: "C:/project-plan",
+    task_id: "task-plan",
+    plan_id: "plan-test-1",
+    plan_type: "adhoc",
+    contract_id: "contract-test-1",
+    association_reason: "auto_adhoc",
+  });
+  assert.equal(job.plan_id, "plan-test-1");
+  assert.equal(job.plan_type, "adhoc");
+  assert.equal(job.contract_id, "contract-test-1");
+  assert.equal(job.association_reason, "auto_adhoc");
+
+  const state = await store.rebuildCurrentState("C:/project-plan");
+  const jobInState = state.recent_jobs.find((j) => j.id === "cc-plan-job");
+  assert.ok(jobInState, "job should appear in state");
+  assert.equal(jobInState.plan_id, "plan-test-1");
+  assert.equal(jobInState.plan_type, "adhoc");
+  assert.equal(jobInState.contract_id, "contract-test-1");
+  assert.equal(jobInState.association_reason, "auto_adhoc");
+});
+
+test("plan_summary groups jobs by plan_id and reports legacy jobs", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-plan-summary-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new StateStore(path.join(root, "state"), { jobsRoot: path.join(root, "runs"), orchestratorRoot: root });
+  await store.init();
+  await store.createJob({ id: "job-p1", type: "cc_execute", provider: "cc", status: "completed", phase: "ready_for_acceptance", project_dir: "C:/proj", task_id: "t1", plan_id: "plan-a", plan_type: "formal" });
+  await store.createJob({ id: "job-p2", type: "cc_execute", provider: "cc", status: "completed", phase: "ready_for_acceptance", project_dir: "C:/proj", task_id: "t2", plan_id: "plan-a", plan_type: "formal" });
+  await store.createJob({ id: "job-p3", type: "agy_execute", provider: "agy_write", status: "failed", phase: "failed", project_dir: "C:/proj", task_id: "t3", plan_id: "plan-b", plan_type: "adhoc" });
+  await store.createJob({ id: "legacy-job", type: "cc_execute", provider: "cc", status: "completed", project_dir: "C:/proj", task_id: "legacy" });
+
+  const state = await store.rebuildCurrentState("C:/proj");
+  assert.ok(state.plan_summary, "state should include plan_summary");
+  assert.equal(state.plan_summary.total_jobs, 4);
+  assert.equal(state.plan_summary.total_plan_jobs, 4, "all jobs should be counted in plans (including legacy)");
+
+  assert.equal(state.plan_summary.plans["plan-a"]?.total, 2);
+  assert.equal(state.plan_summary.plans["plan-a"]?.type, "formal");
+  assert.equal(state.plan_summary.plans["plan-b"]?.total, 1);
+  assert.equal(state.plan_summary.plans["__legacy__"]?.total, 1);
+  assert.equal(state.plan_summary.plans["__legacy__"]?.type, "legacy");
+  assert.equal(state.plan_summary.integrity_warning, null);
+});
+
+test("no plan_id on jobs creates legacy-only plan_summary", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-plan-warn-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new StateStore(path.join(root, "state"), { jobsRoot: path.join(root, "runs"), orchestratorRoot: root });
+  await store.init();
+  await store.createJob({ id: "no-plan-1", type: "cc_execute", provider: "cc", status: "completed", phase: "done", project_dir: "C:/warn", task_id: "t1" });
+  await store.createJob({ id: "no-plan-2", type: "cc_execute", provider: "cc", status: "failed", phase: "failed", project_dir: "C:/warn", task_id: "t2" });
+
+  const state = await store.rebuildCurrentState("C:/warn");
+  assert.ok(state.plan_summary);
+  assert.equal(state.plan_summary.total_jobs, 2);
+  assert.equal(state.plan_summary.total_plan_jobs, 2, "legacy jobs counted in total_plan_jobs");
+  assert.equal(state.plan_summary.plans["__legacy__"]?.total, 2);
+  assert.equal(state.plan_summary.integrity_warning, null);
+});

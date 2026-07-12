@@ -1481,6 +1481,221 @@ class AuditDashboardTests(unittest.TestCase):
         self.assertIn("total_jobs", html)
         self.assertIn("has_orchestrator", html)
 
+    # -- Plan/contract/job provenance dashboard tests --
+
+    def test_load_plans_empty_dir(self):
+        """load_plans should return empty list when no plans directory exists."""
+        with tempfile.TemporaryDirectory() as root:
+            result = SERVER.load_plans(root)
+            self.assertEqual(result, [])
+
+    def test_load_plans_reads_plan_files(self):
+        """load_plans should read valid plan files from .agent-orchestrator/plans/."""
+        with tempfile.TemporaryDirectory() as root:
+            orch = Path(root) / ".agent-orchestrator"
+            plans_dir = orch / "plans"
+            plans_dir.mkdir(parents=True)
+            (plans_dir / "plan-test.json").write_text(json.dumps({
+                "plan_id": "plan-test",
+                "name": "Test Plan",
+                "type": "formal",
+                "project_dir": root,
+            }), encoding="utf-8")
+            (plans_dir / "invalid.json").write_text("not json", encoding="utf-8")
+            result = SERVER.load_plans(str(orch))
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["plan_id"], "plan-test")
+
+    def test_build_plan_summary_counts_jobs_per_plan(self):
+        """build_plan_summary should count jobs by plan_id and include legacy."""
+        with tempfile.TemporaryDirectory() as root:
+            orch = Path(root) / ".agent-orchestrator"
+            runs_dir = orch / "runs"
+            runs_dir.mkdir(parents=True)
+
+            # Create jobs spread across plans
+            for i, (pid, ptype) in enumerate([("plan-a", "formal"), ("plan-a", "formal"), ("plan-b", "adhoc")]):
+                jdir = runs_dir / f"job-{i}"
+                jdir.mkdir()
+                (jdir / "job.json").write_text(json.dumps({
+                    "id": f"job-{i}", "task_id": f"t{i}", "status": "completed",
+                    "project_dir": root, "plan_id": pid, "plan_type": ptype,
+                }), encoding="utf-8")
+
+            # Legacy job (no plan_id)
+            jdir = runs_dir / "legacy-job"
+            jdir.mkdir()
+            (jdir / "job.json").write_text(json.dumps({
+                "id": "legacy-job", "task_id": "legacy", "status": "completed",
+                "project_dir": root,
+            }), encoding="utf-8")
+
+            summary = SERVER.build_plan_summary(str(orch))
+            self.assertEqual(summary["total_jobs"], 4)
+            self.assertEqual(summary["total_plan_jobs"], 4)
+
+            plans_by_id = {p["plan_id"]: p for p in summary["plans"]}
+            self.assertEqual(plans_by_id["plan-a"]["job_counts"]["total"], 2)
+            self.assertEqual(plans_by_id["plan-b"]["job_counts"]["total"], 1)
+            self.assertIn("__legacy__", plans_by_id)
+            self.assertEqual(plans_by_id["__legacy__"]["job_counts"]["total"], 1)
+            self.assertEqual(plans_by_id["__legacy__"]["type"], "legacy")
+            self.assertEqual(plans_by_id["__legacy__"]["read_only"], True)
+            self.assertIsNone(summary["integrity_warning"])
+
+    def test_build_plan_summary_no_plans_no_jobs(self):
+        """build_plan_summary on empty project should return zero counts."""
+        with tempfile.TemporaryDirectory() as root:
+            orch = Path(root) / ".agent-orchestrator"
+            orch.mkdir(parents=True)
+            summary = SERVER.build_plan_summary(str(orch))
+            self.assertEqual(summary["total_jobs"], 0)
+            self.assertEqual(summary["plans"], [])
+
+    def test_project_summary_includes_plan_counts(self):
+        """project_summary should include plan_counts and legacy_job_count fields."""
+        with tempfile.TemporaryDirectory() as root:
+            orch = Path(root) / ".agent-orchestrator"
+            orch.mkdir()
+            (orch / "config.json").write_text(json.dumps({"trusted": True}), encoding="utf-8")
+            runs = orch / "runs"
+            runs.mkdir()
+            jdir = runs / "plan-job"
+            jdir.mkdir()
+            (jdir / "job.json").write_text(json.dumps({
+                "id": "plan-job", "task_id": "t1", "status": "completed",
+                "project_dir": root, "plan_id": "plan-x", "plan_type": "formal",
+            }), encoding="utf-8")
+
+            summary = SERVER.project_summary(root, process_text="")
+            self.assertIn("plan_counts", summary)
+            self.assertIn("legacy_job_count", summary)
+            self.assertEqual(summary["plan_counts"]["plan-x"]["total"], 1)
+            self.assertEqual(summary["legacy_job_count"], 0)
+
+    # -- Plan-based job grouping endpoint tests --
+
+    def test_build_plan_summary_adhoc_plan_shows_jobs_without_contracts(self):
+        """An ad-hoc plan with jobs but no contracts must appear with correct job counts."""
+        with tempfile.TemporaryDirectory() as root:
+            orch = Path(root) / ".agent-orchestrator"
+            runs_dir = orch / "runs"
+            runs_dir.mkdir(parents=True)
+            plans_dir = orch / "plans"
+            plans_dir.mkdir(parents=True)
+
+            # Create an ad-hoc plan file
+            (plans_dir / "plan-adhoc-1.json").write_text(json.dumps({
+                "plan_id": "plan-adhoc-1",
+                "name": "Ad-hoc / Test Plan",
+                "type": "adhoc",
+                "project_dir": root,
+            }), encoding="utf-8")
+
+            # Create jobs for this ad-hoc plan (no contracts exist)
+            for i, status in enumerate(["completed", "failed", "completed"]):
+                jdir = runs_dir / f"adhoc-job-{i}"
+                jdir.mkdir()
+                (jdir / "job.json").write_text(json.dumps({
+                    "id": f"adhoc-job-{i}", "task_id": f"t{i}", "status": status,
+                    "project_dir": root, "plan_id": "plan-adhoc-1", "plan_type": "adhoc",
+                    "association_reason": "auto_adhoc",
+                }), encoding="utf-8")
+
+            summary = SERVER.build_plan_summary(str(orch))
+            plans_by_id = {p["plan_id"]: p for p in summary["plans"]}
+
+            self.assertIn("plan-adhoc-1", plans_by_id,
+                          "Ad-hoc plan must appear in plan summary even without contracts")
+            self.assertEqual(plans_by_id["plan-adhoc-1"]["job_counts"]["total"], 3)
+            self.assertEqual(plans_by_id["plan-adhoc-1"]["job_counts"]["completed"], 2)
+            self.assertEqual(plans_by_id["plan-adhoc-1"]["job_counts"]["failed"], 1)
+            self.assertEqual(plans_by_id["plan-adhoc-1"]["type"], "adhoc")
+            self.assertIsNone(summary["integrity_warning"])
+
+    def test_build_plan_summary_legacy_shows_unmapped_jobs(self):
+        """Legacy/Migration plan must include every job without a plan_id."""
+        with tempfile.TemporaryDirectory() as root:
+            orch = Path(root) / ".agent-orchestrator"
+            runs_dir = orch / "runs"
+            runs_dir.mkdir(parents=True)
+
+            # Create jobs with and without plan_id
+            for pid in [None, None, "plan-mapped"]:
+                jdir = runs_dir / f"job-{pid or 'legacy'}-{len(list(runs_dir.iterdir()))}"
+                jdir.mkdir()
+                j = {"id": jdir.name, "task_id": "t1", "status": "completed", "project_dir": root}
+                if pid:
+                    j["plan_id"] = pid
+                    j["plan_type"] = "formal"
+                (jdir / "job.json").write_text(json.dumps(j), encoding="utf-8")
+
+            summary = SERVER.build_plan_summary(str(orch))
+            self.assertEqual(summary["total_jobs"], 3)
+            self.assertEqual(summary["total_plan_jobs"], 3)
+
+            legacy = next((p for p in summary["plans"] if p["plan_id"] == "__legacy__"), None)
+            self.assertIsNotNone(legacy, "Legacy plan must exist for unmapped jobs")
+            self.assertEqual(legacy["job_counts"]["total"], 2)
+            self.assertEqual(legacy["type"], "legacy")
+            self.assertTrue(legacy["read_only"])
+
+    def test_build_plan_summary_project_total_equals_plan_sums(self):
+        """Sum of all plan job counts must equal total project jobs."""
+        with tempfile.TemporaryDirectory() as root:
+            orch = Path(root) / ".agent-orchestrator"
+            runs_dir = orch / "runs"
+            runs_dir.mkdir(parents=True)
+            plans_dir = orch / "plans"
+            plans_dir.mkdir(parents=True)
+
+            # Formal plan
+            (plans_dir / "plan-f.json").write_text(json.dumps({
+                "plan_id": "plan-f", "type": "formal", "name": "Formal",
+            }), encoding="utf-8")
+
+            # Ad-hoc plan
+            (plans_dir / "plan-a.json").write_text(json.dumps({
+                "plan_id": "plan-a", "type": "adhoc", "name": "Ad-hoc",
+            }), encoding="utf-8")
+
+            # Jobs spread across plans
+            for pid, ptype in [("plan-f", "formal"), ("plan-f", "formal"), ("plan-a", "adhoc"), (None, None)]:
+                jdir = runs_dir / f"job-{pid or 'legacy'}-{len(list(runs_dir.iterdir()))}"
+                jdir.mkdir()
+                j = {"id": jdir.name, "task_id": "t1", "status": "completed", "project_dir": root}
+                if pid:
+                    j["plan_id"] = pid
+                    j["plan_type"] = ptype
+                (jdir / "job.json").write_text(json.dumps(j), encoding="utf-8")
+
+            summary = SERVER.build_plan_summary(str(orch))
+            total_plan_sum = sum(p["job_counts"]["total"] for p in summary["plans"])
+            self.assertEqual(total_plan_sum, summary["total_jobs"],
+                             f"Plan job sum {total_plan_sum} must equal total jobs {summary['total_jobs']}")
+            self.assertIsNone(summary["integrity_warning"])
+
+    def test_frontend_handles_plan_types_in_contract_list(self):
+        """The frontend must handle plan type badges and ad-hoc/legacy rendering."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        # Plan type badges
+        self.assertIn("plan-formal", html)
+        self.assertIn("plan-adhoc", html)
+        self.assertIn("plan-legacy", html)
+        # Plan section rendering from /api/plans data
+        self.assertIn("pollPlans", html)
+        self.assertIn("rawPlans", html)
+        # Legacy/Migration Plan text
+        self.assertIn("Legacy / Migration Plan", html)
+        # Ad-hoc/legacy plan DAG empty-state text
+        self.assertIn("no persisted contracts", html)
+
+    def test_frontend_legacy_plan_dag_shows_explanatory_text(self):
+        """When a legacy plan is selected and it has no DAG nodes, explanatory text must appear."""
+        html = INDEX_PATH.read_text(encoding="utf-8")
+        self.assertIn("read-only Legacy / Migration Plan", html)
+        self.assertIn("without a Planner contract", html)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 import os from "node:os";
 import path from "node:path";
 import { deepMerge, pathExists, readJson } from "./utils.mjs";
+import { ccExecutorModel, normalizeTier, reviewerModel } from "./model-registry.mjs";
 
 export const DEFAULT_CONFIG = {
   version: 1,
@@ -17,12 +18,13 @@ export const DEFAULT_CONFIG = {
   },
   host: {
     provider: "unknown",
-    in_session_roles: ["planner", "accepter"],
+    in_session_roles: ["coordinator"],
   },
   providers: {
     codex: {
       roles: ["planner", "accepter"],
       external_invocation: "disabled_when_host_is_codex",
+      invocation: "in_session_when_host_is_codex",
     },
     cc: {
       roles: ["executor"],
@@ -34,11 +36,11 @@ export const DEFAULT_CONFIG = {
     },
   },
   routing: {
-    auto: "cc_first",
-    agy_write_fallback_to_cc_on_quota: true,
-    cc_verify_fail_escalate_to_agy: true,
+    executor_priority: ["cc", "agy"],
+    agy_executor_runtime_failure_threshold: 2,
   },
   review_gate: {
+    require_reviewer_for_implementation: true,
     require_agy_verify_for_implementation: true,
     allow_waiver: true,
   },
@@ -51,10 +53,11 @@ export const DEFAULT_CONFIG = {
     agy_sandbox: false,
     agy_project: null,
     agy_project_id: null,
+    agy_env: {},
   },
   agy: {
     enabled: true,
-    launch: "codex_cli",
+    launch: "cli",
     auth_probe_required: true,
     fail_fast_on_auth_window: true,
   },
@@ -69,8 +72,9 @@ export const DEFAULT_CONFIG = {
     max_result_chars: 8000,
   },
   models: {
+    codex: { planner: "gpt-5.6-sol", accepter: "gpt-5.6-sol", reasoning_effort: "high" },
     cc: { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" },
-    agy: { low: "Gemini 3.5 Flash", medium: "Gemini 3.1 Pro", high: "Gemini 3.1 Pro" },
+    agy: { low: "gemini-3.5-flash", medium: "gemini-3.5-flash", high: "gemini-3.1-pro" },
     agy_write: {
       low: null,
       medium: "Claude Sonnet 4.6 (Thinking)",
@@ -102,6 +106,10 @@ export function projectStateRoot(projectDir) {
 
 export function projectRunsRoot(projectDir) {
   return path.join(projectOrchestratorRoot(projectDir), "runs");
+}
+
+export function projectPlansRoot(projectDir) {
+  return path.join(projectOrchestratorRoot(projectDir), "plans");
 }
 
 export async function loadProjectConfig(projectDir) {
@@ -144,37 +152,31 @@ export async function assertProject(projectDir, { requireTrusted = true } = {}) 
   return config;
 }
 
-export function chooseModel(config, provider, complexity = "medium", override) {
-  if (override) return override;
-  const level = ["low", "medium", "high"].includes(complexity) ? complexity : "medium";
-  const value = config.models?.[provider]?.[level];
-  if (value) return value;
-  // Fall back to CC two-tier defaults when value is null or missing.
-  if (provider === "cc" && CC_MODEL_DEFAULTS[level]) return CC_MODEL_DEFAULTS[level];
-  return undefined;
+export function chooseModel(config, provider, complexity = "medium", modelOverride) {
+  if (modelOverride) return modelOverride;
+  const tier = normalizeTier(complexity);
+  if (provider === "cc") return ccExecutorModel(tier, config).canonical_id;
+  if (provider === "agy") return reviewerModel(tier, config).canonical_id;
+  throw new Error(`Unknown model provider: ${provider}`);
 }
 
 export function chooseAgyWriteModel(config, complexity = "medium") {
-  const level = ["low", "medium", "high"].includes(complexity) ? complexity : "medium";
-  const override = config.models?.agy_write?.[level];
+  const level = normalizeTier(complexity);
+  const override = config.models?.agy_write?.[level] || (level === "mid" ? config.models?.agy_write?.medium : null);
   if (override) return override;
   // Provider-aware calibration: CC-high ~ AGY-medium/Sonnet; AGY-high/Opus for exceptional risk.
-  if (level === "medium") return "Claude Sonnet 4.6 (Thinking)";
+  if (level === "mid") return "Claude Sonnet 4.6 (Thinking)";
   if (level === "high") return "Claude Opus 4.6 (Thinking)";
-  return null;
+  return "Claude Sonnet 4.6 (Thinking)";
 }
 
 export function autoRouteProvider(config, complexity) {
-  const policy = config.routing?.auto || "cc_first";
-  // cc_first (default): all complexities start with CC; AGY escalation after CC verify failure.
-  // Legacy values: "agy_preferred" (low -> CC, medium/high -> AGY write) and "cc" (all -> CC).
-  if (policy === "cc_first") {
-    return "cc";
-  }
-  if (policy === "agy_preferred" || policy === "agy") {
-    if (complexity === "low") return "cc";
-    return "agy";
-  }
-  // policy === "cc": all complexities route to CC (legacy default)
-  return "cc";
+  normalizeTier(complexity);
+  // A missing policy is normalized to the documented CC-first default; it is
+  // not a caller override and remains centralized here.
+  const priority = config.routing?.executor_priority || ["cc"];
+  if (!Array.isArray(priority) || priority.length === 0) throw new Error("executor_priority must be a non-empty centralized policy");
+  const provider = priority[0];
+  if (!['cc', 'agy'].includes(provider)) throw new Error(`Unknown executor priority provider: ${provider}`);
+  return provider;
 }

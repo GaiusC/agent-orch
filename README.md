@@ -1,10 +1,10 @@
 ﻿# Agent Orch
 
-Agent Orch is a local multi-agent orchestration runtime for supervising external coding agents without depending on a Codex MCP server. Codex is the default planner/accepter, Claude Code or Antigravity implements, and Antigravity provides targeted investigation or verification when its local auth is usable.
+Agent Orch is a local multi-agent orchestration runtime for supervising external coding agents through MCP tools. Codex is the default planner/accepter, Claude Code or Antigravity implements, and Antigravity provides targeted investigation or verification.
 
 Agent Orch is designed to be resumable across hosts. Codex, Claude Desktop/Claude Code, and plain terminal workflows all resume from `.agent-orchestrator/` state before continuing a project. When the current host is Codex, planning and acceptance happen in the current Codex session; Agent Orch must not start Codex CLI just to plan or accept.
 
-The default path is Skill + CLI:
+The default path:
 
 - Codex owns task planning, scope boundaries, and final acceptance.
 - Codex does not author project patches while Agent Orch is active; it plans, delegates, verifies, and accepts or rejects.
@@ -48,7 +48,7 @@ The default `routing.auto` policy is `"cc_first"` (all complexities route to CC;
 
 Agent Orch enforces a review gate for implementation jobs by default. After a CC or AGY write implementation completes, the `apply` command requires one of:
 
-- A completed AGY verify job (`agy-verify`) for the same project and `task_id`, confirming the implementation evidence; or
+- A completed reviewer verification job (`reviewer-verify`) for the same project and `task_id`, confirming the implementation evidence; or
 - An explicit `review_waiver: true` set on the job contract metadata.
 
 Configurable in `.agent-orchestrator/config.json`:
@@ -56,27 +56,48 @@ Configurable in `.agent-orchestrator/config.json`:
 ```json
 {
   "review_gate": {
-    "require_agy_verify_for_implementation": true,
+    "require_reviewer_for_implementation": true,
     "allow_waiver": true
   }
 }
 ```
 
-- Set `require_agy_verify_for_implementation` to `false` to disable the gate entirely.
-- Set `allow_waiver` to `false` to require AGY verify evidence on every implementation apply - no exceptions.
-- AGY `investigate` and `verify` jobs are exempt (they are read-only review work, not implementation).
+- Set `require_reviewer_for_implementation` to `false` to disable the gate entirely. Legacy `require_agy_verify_for_implementation: false` is still honored for older projects.
+- Set `allow_waiver` to `false` to require reviewer evidence on every implementation apply - no exceptions.
+- Reviewer `investigate` and `verify` jobs are exempt (they are read-only review work, not implementation).
 - Review-gate status, blocked jobs, and explicit waivers are visible in the audit dashboard and in `current-state.json`.
+
+### AGY proxy injection
+
+Agent Orch automatically injects proxy environment variables into every AGY subprocess (`agy-exec`, `agy-continue`, `reviewer-investigate`, `reviewer-verify`) through the `cli.agy_env` configuration map. This works without modifying WinHTTP, without a wrapper script, and without requiring MCP callers to pass proxy fields.
+
+Configure in `.agent-orchestrator/config.json`:
+
+```json
+{
+  "cli": {
+    "agy_env": {
+      "HTTP_PROXY": "http://127.0.0.1:10100",
+      "HTTPS_PROXY": "http://127.0.0.1:10100",
+      "ALL_PROXY": "http://127.0.0.1:10100",
+      "NO_PROXY": "localhost,127.0.0.1,::1"
+    }
+  }
+}
+```
+
+The defaults template and this project are pre-configured with `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` set to `http://127.0.0.1:10100`, plus `NO_PROXY` for loopback addresses. The process environment is always preserved; explicit `agy_env` values override it. Set `agy_env` to an empty object `{}` to disable injection without removing the key.
 
 ### Audit dashboard views
 
 The audit dashboard (launched via `agent-orch dashboard`) exposes role/provider/stage views for every project:
 
-- **Role lanes**: Planner (Codex), Executor (CC/AGY write), Reviewer (AGY verify/investigate), Accepter/Coordinator.
+- **Role lanes**: Planner (Codex or configured planner), Executor (CC/AGY write), Reviewer (configured reviewer, currently AGY-backed), Accepter/Coordinator.
 - **Provider counts**: CC, AGY, AGY write, Codex.
 - **Lifecycle stages**: plan, execute, review, repair, accept, cleanup.
 - **Stale running jobs**: jobs running but with no recent update (15-minute threshold), flagged in project summary and handoff.
 - **Fallback/escalation chains**: jobs that triggered quota fallback or CC-to-AGY escalation, with chain evidence.
-- **Review-gate status**: jobs blocked by the review gate (ready for acceptance but missing AGY verify evidence).
+- **Review-gate status**: jobs blocked by the review gate (ready for acceptance but missing reviewer evidence).
 
 Dashboard data is read-only and served from `.agent-orchestrator/runs/` and `current-state.json`.
 
@@ -134,21 +155,22 @@ Review `.agent-orchestrator/config.json`, keep `duplicate_implementation` false,
 
 ## Usage
 
-In any host, resume first:
+In any host, resume project state first:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
 ```
 
-Use `-HostProvider claude_desktop` from Claude/CC hosts and `-HostProvider terminal` from a plain shell.
+Use `-HostProvider cc_desktop` from Claude/CC Desktop hosts and `-HostProvider terminal` from a plain shell.
 
-In a Codex session for a configured project:
+In a Codex session for a configured project, use MCP tools to route work:
 
-```text
-Use agent-orch. Plan this change, delegate implementation to CC or AGY via the auto router, use AGY for targeted verification, and apply the patch only after acceptance.
-```
+- Delegate implementation via `auto`, `cc-exec`/`cc-continue`, or `agy-exec`/`agy-continue`.
+- Route verification or investigation through `reviewer-verify` or `reviewer-investigate`.
+- Inspect job evidence with `status` (compact snapshot with bounded assistant-only progress) and `result` (full evidence pack).
+- Apply an accepted patch with `apply`, then clean up with `cleanup`.
 
-Codex should call `scripts\agent-orch.ps1`, inspect evidence under `.agent-orchestrator\runs`, request same-session repair if needed, and apply the patch only after verification.
+Codex should inspect evidence under `.agent-orchestrator\runs` before accepting, request same-session repair via continuation tools if needed, and apply the patch only after verification.
 
 Open the dashboard without talking to an agent:
 
@@ -156,33 +178,33 @@ Open the dashboard without talking to an agent:
 powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 dashboard -ProjectDir <project>
 ```
 
-For substantial work, Codex should first split the goal into small contracts, route implementation contracts via `auto` (which handles provider and model selection), route required investigation or verification gates to AGY, and record any waived gate or residual risk for the user.
-
-Parallel routing is allowed, but bounded: multiple CC workers can run for read-only or disjoint contracts; AGY write should be serialized unless the current local AGY account has passed a fresh multi-AGY smoke test. In this environment, a 2026-07-04 smoke test showed parallel CC working, but two concurrent AGY jobs were unstable while sequential AGY recovered successfully.
+For substantial work, Codex should first split the goal into small contracts, route implementation contracts via `auto` (which handles provider and model selection), route required investigation or verification gates through `reviewer-investigate` or `reviewer-verify`, and record any waived gate or residual risk for the user.
 
 ## CLI Commands
 
+The CLI handles project lifecycle, dashboard, and MCP configuration maintenance. Worker implementation, reviewer, and job-control operations are only available through MCP tools.
+
 ```
-agent-orch init      -ProjectDir <project> [-ExistingProject]
-agent-orch health    -ProjectDir <project>
-agent-orch resume    -ProjectDir <project> [-HostProvider codex|claude_desktop|terminal|unknown]
-agent-orch dashboard -ProjectDir <project> [-PreferredPort 15788]
-agent-orch cc-exec   -ProjectDir <project> -Contract <json-or-file>
-agent-orch cc-continue -ProjectDir <project> -Contract <json-or-file>
-agent-orch agy-exec  -ProjectDir <project> -Contract <json-or-file>
-agent-orch agy-continue -ProjectDir <project> -Contract <json-or-file>
-agent-orch agy-investigate -ProjectDir <project> -Contract <json-or-file>
-agent-orch agy-verify -ProjectDir <project> -Contract <json-or-file>
-agent-orch auto      -ProjectDir <project> -Contract <json-or-file>
-agent-orch status    -ProjectDir <project> -JobId <id>
-agent-orch result    -ProjectDir <project> -JobId <id>
-agent-orch apply     -ProjectDir <project> -JobId <id>
-agent-orch cleanup   -ProjectDir <project> -JobId <id>
+agent-orch init              -ProjectDir <project> [-ExistingProject] [-HostProvider codex|cc_desktop|terminal]
+agent-orch health            -ProjectDir <project>
+agent-orch resume            -ProjectDir <project> [-HostProvider codex|cc_desktop|terminal|unknown]
+agent-orch dashboard         -ProjectDir <project> [-PreferredPort 15788]
+agent-orch dashboard-close   -ProjectDir <project> [-PreferredPort 15788]
+agent-orch mcp status        -ProjectDir <project>
+agent-orch mcp install       -ProjectDir <project>
+agent-orch mcp repair        -ProjectDir <project>
+agent-orch mcp remove        -ProjectDir <project>
 ```
 
-## Legacy MCP
+Worker, reviewer, and job-control commands (auto, cc-exec, cc-continue, agy-exec, agy-continue, reviewer-investigate, reviewer-verify, planner-plan, status, result, apply, cleanup) return an explicit MCP-only error if called from the CLI. Run `agent-orch mcp install` to set up the MCP server for a project.
 
-The previous MCP server remains in the repository for legacy use, but it is not registered by default. The CLI path is recommended for multi-account Codex setups and environments where MCP startup or AGY OAuth state is unstable.
+### Host tool access
+
+| Host | Available via MCP |
+| --- | --- |
+| Codex | cc-exec, cc-continue, agy-exec, agy-continue, auto, reviewer-investigate, reviewer-verify, status (includes bounded assistant-only progress), result, cancel, apply, cleanup, health |
+| CC Desktop / Claude Desktop | health, codex-exec, codex-continue, planner-plan, status (includes bounded assistant-only progress), result, cancel, cleanup |
+| Terminal | health, status (includes bounded assistant-only progress), result, cancel, cleanup |
 
 ## Safety Notes
 

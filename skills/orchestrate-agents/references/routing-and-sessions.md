@@ -1,4 +1,4 @@
-﻿# Routing, sessions, and cost
+# Routing, sessions, and cost
 
 ## Session policy
 
@@ -13,20 +13,22 @@
 
 ## Host/provider policy
 
-- `host_provider=codex`: planner/accepter work is performed by the current Codex session. Do not invoke Codex CLI for those roles.
-- `host_provider=claude_desktop` or `cc_desktop`: the host may coordinate and continue CC work, but Codex acceptance must either happen back in Codex or through an explicitly configured accepter fallback.
-- `host_provider=terminal`: use `resume` and project state to decide the next explicit command; do not infer hidden conversation context.
+- `host_provider=codex`: planner/accepter work is performed by the current Codex session. Do not invoke Codex CLI for those roles. Use MCP tools for all worker, reviewer, and job-control operations. MCP tools `codex-exec`, `codex-continue`, and `planner-plan` are blocked for codex hosts by policy.
+- `host_provider=cc_desktop` or `claude_desktop`: the host may coordinate via MCP but is limited to `health`, `codex-exec`, `codex-continue`, `planner-plan`, `status`, `result`, `cancel`, `cleanup`. Worker launch, reviewers, auto, and apply are blocked.
+- `host_provider=terminal`: minimum maintenance via MCP (`health`, `status`, `result`, `cancel`, `cleanup`). Use `resume` and project state to decide the next explicit command; do not infer hidden conversation context.
 - External provider fallback must be recorded in events/current-state and reported to the user.
 
 ## Routing policy
 
-| Situation | Route |
+All worker implementation, reviewer, and job-control operations are routed through MCP tools. The CLI only handles init, resume, health, dashboard, and MCP maintenance.
+
+| Situation | MCP Tool |
 | --- | --- |
-| Code implementation or test repair (low/medium/high) | `agent-orch auto` (routes to CC; escalates to AGY after CC verify failure) |
-| Explicit CC execution | `agent-orch cc-exec` / `cc-continue` |
-| Explicit AGY write execution | `agent-orch agy-exec` / `agy-continue` |
-| Reproduction or environment diagnosis | `agent-orch agy-investigate` |
-| Browser/UI/runtime verification | `agent-orch agy-verify` |
+| Code implementation or test repair (low/medium/high) | `auto` (routes to CC; escalates to AGY after CC verify failure) |
+| Explicit CC execution | `cc-exec` / `cc-continue` |
+| Explicit AGY write execution | `agy-exec` / `agy-continue` |
+| Reproduction or environment diagnosis | `reviewer-investigate` |
+| Browser/UI/runtime verification | `reviewer-verify` |
 | Non-overlapping module | CC by default; AGY write only with explicit disjoint-write permission or auto router |
 | CC deterministic test failure | Same CC session, bounded repair loop |
 | CC verification fails after 2+ cycles | Auto router escalates to AGY write with Claude Sonnet 4.6 (Thinking) |
@@ -36,9 +38,20 @@
 | AGY write auth/permission/internal error | Report to Codex; do NOT silently fall back |
 | AGY auth probe fails | Report the missing gate; continue only for low-risk deterministic work or after user approval |
 
+## MCP policy enforcement
+
+The shared core policy module (`scripts/lib/policy.mjs`) enforces host-specific tool allow-lists at the MCP server level:
+
+- **Codex** can use: `cc-exec`, `cc-continue`, `agy-exec`, `agy-continue`, `auto`, `reviewer-investigate`, `reviewer-verify`, `status`, `result`, `cancel`, `apply`, `cleanup`, `health`.
+- **CC Desktop** can use: `health`, `codex-exec`, `codex-continue`, `planner-plan`, `status`, `result`, `cancel`, `cleanup`.
+- **Terminal** can use: `health`, `status`, `result`, `cancel`, `cleanup`.
+- **Unknown** hosts are denied all tools.
+
+When `mcp.enabled` is false, only `health` is available. When `trusted` is false, only safe diagnostic tools (`health`, `status`, `result`, `cancel`, `cleanup`) are available.
+
 ## Automatic routing
 
-The `auto` command routes all implementation contracts to CC by default:
+The `auto` MCP tool routes all implementation contracts to CC by default:
 
 - **Low complexity**: CC with `deepseek-v4-flash`.
 - **Medium complexity**: CC with `deepseek-v4-flash`.
@@ -111,16 +124,18 @@ The default `routing.auto` value is `"cc_first"` (all complexities route to CC; 
 
 ## Review gate
 
-Implementation jobs (CC or AGY write) require AGY verification evidence before `apply` by default. This additional gate ensures an independent review has examined the implementation output before changes land in the project.
+Implementation jobs (CC or AGY write) require reviewer evidence before `apply` by default. This additional gate ensures an independent review has examined the implementation output before changes land in the project.
 
 ### Default behavior
 
-When `review_gate.require_agy_verify_for_implementation` is `true` (the default):
+When `review_gate.require_reviewer_for_implementation` is `true` (the default):
 
 1. Every CC execute/continue, AGY execute/continue, and auto-execute job is created with `requires_agy_review: true`.
-2. Before `apply`, the orchestrator searches for a completed AGY verify job with the same `project_dir` and `task_id`.
-3. If no matching AGY verify evidence exists, `apply` is rejected with a clear error message.
-4. AGY investigate/verify jobs are exempt - they are review work, not implementation.
+2. Before `apply`, the orchestrator searches for a completed reviewer verification job with the same `project_dir` and `task_id`.
+3. If no matching reviewer evidence exists, `apply` is rejected with a clear error message.
+4. Reviewer investigate/verify jobs are exempt - they are review work, not implementation.
+
+Legacy projects may still use `require_agy_verify_for_implementation`; setting that legacy field to `false` is honored as a compatibility opt-out.
 
 ### Waivers
 
@@ -130,13 +145,13 @@ To enforce the gate without exception, set `allow_waiver: false` in the project 
 
 ### Disabling the gate
 
-Set `require_agy_verify_for_implementation: false` to disable the review gate entirely. All implementation jobs will apply without requiring AGY verification evidence.
+Set `require_reviewer_for_implementation: false` to disable the review gate entirely. All implementation jobs will apply without requiring reviewer evidence.
 
 ### Dashboard visibility
 
 The review-gate status is visible at multiple levels:
 
-- **Project summary**: `review_blocked` count shows ready-for-acceptance jobs still requiring AGY verify.
-- **Job detail**: `requires_agy_review`, `review_waiver`, and `agy_verify_job_id` fields show the gate status for each job.
+- **Project summary**: `review_blocked` count shows ready-for-acceptance jobs still requiring reviewer evidence.
+- **Job detail**: `requires_agy_review`, `review_waiver`, `reviewer_job_id`, and legacy `agy_verify_job_id` fields show the gate status for each job.
 - **Current state**: `review_gate_summary` lists total jobs requiring review and jobs ready but blocked.
-- **Handoff**: recommends running `agy-verify` when blocked jobs are detected.
+- **Handoff**: recommends running `reviewer-verify` when blocked jobs are detected.

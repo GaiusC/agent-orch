@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import crypto from "node:crypto";
 import path from "node:path";
 import { runProcess } from "./process.mjs";
 import { matchesPathPattern, pathExists } from "./utils.mjs";
@@ -64,7 +65,7 @@ export async function prepareWorkspace({ projectDir, jobDir, config, requestedMo
   return { mode: "isolated", path: worktree, original_project_dir: git.root, git };
 }
 
-export async function captureChanges({ workspace, jobDir, forbidden = [] }) {
+export async function captureChanges({ workspace, jobDir, forbidden = [], writable = [] }) {
   const emptyIntent = await runGit(workspace, ["add", "-N", "."], jobDir, "git-add-intent");
   if (emptyIntent.exit_code !== 0) throw new Error(`Unable to inventory new files: ${emptyIntent.stderr}`);
   const patchResult = await runGit(workspace, ["diff", "--binary", "--no-ext-diff"], jobDir, "git-diff", { maxLogBytes: 64 * 1024 * 1024 });
@@ -73,13 +74,24 @@ export async function captureChanges({ workspace, jobDir, forbidden = [] }) {
   const stat = await runGit(workspace, ["diff", "--stat", "--no-ext-diff"], jobDir, "git-diff-stat");
   const names = await runGit(workspace, ["diff", "--name-only", "--no-ext-diff"], jobDir, "git-diff-names");
   const files = names.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const unauthorized = writable.length
+    ? files.filter((file) => !writable.some((pattern) => allowsPath(pattern, file)))
+    : [];
   return {
     patch_path: patchPath,
+    patch_digest: crypto.createHash("sha256").update(patchResult.stdout).digest("hex"),
     patch_bytes: Buffer.byteLength(patchResult.stdout),
     diff_stat: stat.stdout.trim(),
     changed_files: files,
     forbidden_changes: files.filter((file) => forbidden.some((pattern) => matchesPathPattern(file, pattern))),
+    unauthorized_changes: unauthorized,
   };
+}
+
+function allowsPath(pattern, file) {
+  const normalized = String(pattern || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!normalized || normalized === "." || normalized === "./" || normalized === "**" || normalized === "**/*") return true;
+  return matchesPathPattern(file, pattern);
 }
 
 export async function applyPatch({ originalProjectDir, patchPath, logDir }) {

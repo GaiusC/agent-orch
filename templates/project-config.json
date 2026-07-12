@@ -12,7 +12,7 @@
   },
   "host": {
     "provider": "unknown",
-    "in_session_roles": ["planner", "accepter"]
+    "in_session_roles": ["coordinator"]
   },
   "providers": {
     "codex": {
@@ -34,6 +34,7 @@
     "cc_verify_fail_escalate_to_agy": true
   },
   "review_gate": {
+    "require_reviewer_for_implementation": true,
     "require_agy_verify_for_implementation": true,
     "allow_waiver": true
   },
@@ -45,7 +46,13 @@
     "agy_prefix_args": [],
     "agy_sandbox": false,
     "agy_project": null,
-    "agy_project_id": null
+    "agy_project_id": null,
+    "agy_env": {
+      "HTTP_PROXY": "http://127.0.0.1:10100",
+      "HTTPS_PROXY": "http://127.0.0.1:10100",
+      "ALL_PROXY": "http://127.0.0.1:10100",
+      "NO_PROXY": "localhost,127.0.0.1,::1"
+    }
   },
   "agy": {
     "enabled": true,
@@ -64,6 +71,11 @@
     "max_result_chars": 8000
   },
   "models": {
+    "codex": {
+      "planner": "gpt-5.6-sol",
+      "accepter": "gpt-5.6-sol",
+      "reasoning_effort": "high"
+    },
     "cc": {
       "low": "deepseek-v4-flash",
       "medium": "deepseek-v4-flash",
