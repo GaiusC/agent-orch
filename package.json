@@ -3,12 +3,14 @@
   "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "MCP-driven Codex workflow for multi-agent orchestration with CC and AGY providers.",
+  "description": "Stage-first Codex plugin for durable orchestration with CC, AGY, and Codex Worker providers.",
   "scripts": {
     "agent-orch": "node scripts/agent-orch.mjs",
     "test": "node --test tests/*.test.mjs",
     "start": "node scripts/agent-orch.mjs",
-    "start:mcp": "node scripts/server.mjs"
+    "start:mcp": "node scripts/mcp-stdio-bridge.mjs",
+    "test:e2e-codex-mcp": "node scripts/e2e-codex-mcp.mjs",
+    "test:e2e-providers": "node scripts/e2e-providers.mjs"
   },
   "engines": {
     "node": ">=18.18"

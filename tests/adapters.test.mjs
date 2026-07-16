@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { runProcess } from "../scripts/lib/process.mjs";
 import { readWorkerProgress } from "../scripts/lib/adapters.mjs";
+import { buildCodexWorkerArgs, classifyAgyAuthOutput, classifyCodexWindowsSandboxFailure } from "../scripts/lib/adapters.mjs";
 
 // This test file proves that AGY processes receive the configured proxy
 // environment through runProcess — the same mechanism used by both
@@ -96,6 +97,53 @@ test("empty agy_env does not interfere with process environment", async (t) => {
   assert.equal(result.exit_code, 0);
   // HTTP_PROXY may or may not be in the parent env; just confirm the process ran
   assert.ok(result.stdout.includes("unset") || result.stdout.includes("http://"));
+});
+
+test("AGY OAuth output is classified for fail-fast remediation", () => {
+  assert.equal(classifyAgyAuthOutput("Open https://accounts.google.com/o/oauth2/auth?client_id=x"), true);
+  assert.equal(classifyAgyAuthOutput("normal non-interactive output"), false);
+});
+
+test("Codex Worker uses writable non-interactive sandbox and explicit workspace", () => {
+  const args = buildCodexWorkerArgs({
+    prompt: "implement",
+    sessionId: null,
+    resume: false,
+    model: "gpt-test",
+    workspace: "C:\\work tree\\repo",
+  });
+  assert.deepEqual(args.slice(0, 2), ["exec", "--json"]);
+  assert.ok(args.includes("workspace-write"));
+  assert.ok(args.includes('approval_policy="never"'));
+  assert.ok(args.includes("C:\\work tree\\repo"));
+});
+
+test("Codex Worker continuation uses cwd filtering and writable sandbox config", () => {
+  const args = buildCodexWorkerArgs({
+    prompt: "continue",
+    sessionId: "11111111-1111-4111-8111-111111111111",
+    resume: true,
+    model: null,
+    workspace: "C:\\work tree\\repo",
+  });
+  assert.deepEqual(args.slice(0, 3), ["exec", "resume", "--json"]);
+  assert.ok(args.includes('sandbox_mode="workspace-write"'));
+  assert.equal(args.includes("-C"), false, "codex exec resume does not support -C; cwd is supplied to spawn");
+});
+
+test("Codex Worker Windows sandbox failures are classified for same-session bypass", () => {
+  assert.equal(classifyCodexWindowsSandboxFailure("codex-windows-sandbox-setup.exe: Access denied (os error 5)"), true);
+  assert.equal(classifyCodexWindowsSandboxFailure("normal task failure"), false);
+  const args = buildCodexWorkerArgs({
+    prompt: "continue",
+    sessionId: "11111111-1111-4111-8111-111111111111",
+    resume: true,
+    model: null,
+    workspace: "C:\\repo",
+    bypassSandbox: true,
+  });
+  assert.ok(args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.equal(args.includes('sandbox_mode="workspace-write"'), false);
 });
 
 // ============================================================

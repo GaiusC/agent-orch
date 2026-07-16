@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
-  "version": "0.4.0+codex.20260712212909",
-  "description": "MCP-driven multi-agent orchestration for delegating implementation to CC or AGY, targeted verification, and read-only monitoring of Agent Orch runs.",
+  "version": "0.4.0+codex.20260716155646",
+  "description": "Stage-first Codex orchestration with durable CC, AGY, and Codex Worker execution, independent review, acceptance, and continuation.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -13,10 +13,11 @@
     "antigravity"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent Orch",
-    "shortDescription": "MCP-driven multi-agent coding orchestration with CC, AGY, and Codex.",
-    "longDescription": "An MCP-driven workflow that keeps Codex in charge of project planning and final acceptance while CC or AGY implements, AGY performs targeted investigation or verification, and a read-only dashboard can inspect Agent Orch progress. Worker and reviewer operations are only available through MCP tools; the CLI handles project lifecycle, dashboard, and MCP configuration maintenance.",
+    "shortDescription": "Stage-first orchestration with CC, AGY, and Codex Worker.",
+    "longDescription": "A stage-first MCP workflow that keeps Codex responsible for planning and formal acceptance while CC, AGY, or Codex Worker implements in isolated worktrees, AGY provides independent review, and durable PID/session state supports continuation across MCP restarts.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [
@@ -24,9 +25,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Use agent-orch to plan this change, delegate implementation via MCP tools, and verify it.",
-      "Use agent-orch to ask AGY to investigate this failure without duplicating implementation.",
-      "Use agent-orch to open a read-only dashboard for CC/AGY progress and visible conversation logs."
+      "Use agent-orch stage-plan, stage-work, stage-review, and stage-accept for this change.",
+      "Use agent-orch to continue the exact provider session and worktree for this task.",
+      "Use agent-orch to verify provider availability and durable worker state."
     ]
   }
 }

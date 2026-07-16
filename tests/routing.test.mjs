@@ -102,8 +102,8 @@ test("model registry resolves executor and reviewer identities by role and tier"
     provider: "agy",
     role: "reviewer",
     tier: "high",
-    display_name: "Gemini 3.1 Pro",
-    canonical_id: "gemini-3.1-pro",
+    display_name: "Gemini 3.1 Pro (High)",
+    canonical_id: "Gemini 3.1 Pro (High)",
   });
 });
 
@@ -225,20 +225,22 @@ test("CLI help shows new command surface", async (t) => {
 
 // -- CLI surface: init / resume --
 
-test("CLI init creates project with mcp config", async (t) => {
+test("CLI init enables the MCP stage surface for a Codex host", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-init-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const project = await createProject(root);
 
   const result = runCli(["init", "-ProjectDir", project, "-HostProvider", "codex"]);
   assert.equal(result.ok, true);
-  assert.equal(result.mcp_enabled, false, "codex init should keep mcp disabled");
+  assert.equal(result.mcp_enabled, true, "codex init should enable the stage MCP");
   assert.equal(result.host_provider, "codex");
 
   // Verify config was written
   const config = JSON.parse(await fs.readFile(path.join(project, ".agent-orchestrator", "config.json"), "utf8"));
-  assert.equal(config.mcp.enabled, false);
+  assert.equal(config.mcp.enabled, true);
   assert.equal(config.host.provider, "codex");
+  assert.equal(config.models.codex.planner, "gpt-5.6-terra");
+  assert.equal(config.models.codex.accepter, "gpt-5.6-terra");
 });
 
 test("CLI init with cc_desktop enables mcp", async (t) => {
@@ -272,6 +274,26 @@ test("CLI resume preserves mcp profile", async (t) => {
   assert.equal(config.host.provider, "codex");
 });
 
+test("CLI init and resume preserve an explicit mcp.enabled=false", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-resume-disabled-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const project = await createProject(root);
+  const configRoot = path.join(project, ".agent-orchestrator");
+  await fs.mkdir(configRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(configRoot, "config.json"),
+    JSON.stringify({ version: 2, trusted: true, mcp: { enabled: false }, host: { provider: "codex" }, stages: {} }, null, 2),
+  );
+
+  const initialized = runCli(["init", "-ProjectDir", project, "-HostProvider", "codex"]);
+  assert.equal(initialized.mcp_enabled, false);
+  const resumed = runCli(["resume", "-ProjectDir", project, "-HostProvider", "codex"]);
+  assert.equal(resumed.mcp_enabled, false);
+
+  const config = JSON.parse(await fs.readFile(path.join(configRoot, "config.json"), "utf8"));
+  assert.equal(config.mcp.enabled, false);
+});
+
 // -- CLI surface: mcp maintenance commands --
 
 test("CLI mcp status reports configuration", async (t) => {
@@ -282,7 +304,7 @@ test("CLI mcp status reports configuration", async (t) => {
 
   const result = runCli(["mcp", "status", "-ProjectDir", project]);
   assert.equal(result.ok, true);
-  assert.equal(result.mcp_enabled, false);
+  assert.equal(result.mcp_enabled, true);
   assert.equal(result.host_provider, "codex");
   assert.equal(result.trusted, true);
 });
@@ -303,8 +325,14 @@ test("CLI mcp install enables MCP and writes .mcp.json", async (t) => {
 
   // Verify .mcp.json
   const mcpJson = JSON.parse(await fs.readFile(path.join(project, ".mcp.json"), "utf8"));
-  assert.ok(mcpJson.mcpServers?.["agent-orch"], ".mcp.json should have agent-orch entry");
-  assert.equal(mcpJson.mcpServers["agent-orch"].command, "node");
+  assert.ok(mcpJson.mcpServers?.agent_orch, ".mcp.json should have agent_orch entry");
+  assert.equal(mcpJson.mcpServers.agent_orch.cwd, ".");
+  assert.ok(
+    mcpJson.mcpServers.agent_orch.args[0].includes("/") &&
+    !mcpJson.mcpServers.agent_orch.args[0].includes("\\"),
+    "MCP script path should use portable forward slashes on Windows",
+  );
+  assert.equal(mcpJson.mcpServers.agent_orch.command, "node");
 });
 
 test("CLI mcp repair fixes broken configuration", async (t) => {
@@ -318,6 +346,18 @@ test("CLI mcp repair fixes broken configuration", async (t) => {
   let config = JSON.parse(await fs.readFile(configPath, "utf8"));
   config.mcp = { enabled: false };
   await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+  await fs.writeFile(
+    path.join(project, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        "agent-orch": {
+          command: "node",
+          args: ["legacy/server.mjs"],
+          cwd: "C:/legacy",
+        },
+      },
+    }, null, 2),
+  );
 
   const result = runCli(["mcp", "repair", "-ProjectDir", project]);
   assert.equal(result.ok, true);
@@ -326,6 +366,10 @@ test("CLI mcp repair fixes broken configuration", async (t) => {
 
   config = JSON.parse(await fs.readFile(configPath, "utf8"));
   assert.equal(config.mcp.enabled, true);
+  const repairedMcp = JSON.parse(await fs.readFile(path.join(project, ".mcp.json"), "utf8"));
+  assert.equal(repairedMcp.mcpServers?.["agent-orch"], undefined);
+  assert.equal(repairedMcp.mcpServers?.agent_orch?.cwd, ".");
+  assert.match(repairedMcp.mcpServers.agent_orch.args[0], /mcp-stdio-bridge\.mjs$/);
 });
 
 test("CLI mcp remove disables MCP and removes .mcp.json entry", async (t) => {
@@ -344,6 +388,7 @@ test("CLI mcp remove disables MCP and removes .mcp.json entry", async (t) => {
   assert.equal(config.mcp.enabled, false);
 
   const mcpJson = JSON.parse(await fs.readFile(path.join(project, ".mcp.json"), "utf8"));
+  assert.equal(mcpJson.mcpServers?.agent_orch, undefined);
   assert.equal(mcpJson.mcpServers?.["agent-orch"], undefined);
 });
 

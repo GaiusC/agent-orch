@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { runProcess } from "./process.mjs";
 import { pathExists, truncate } from "./utils.mjs";
+import { effectiveProviderEnvironment } from "./runtime-env.mjs";
 
 async function readClaudeSettingsEnv() {
   const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
@@ -64,8 +65,9 @@ function parseClaudeOutput(stdout, fallbackSessionId) {
   }
 }
 
-export async function runClaude({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0 }) {
+export async function runClaude({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0, processHooks = {} }) {
   const sessionId = taskSession?.session_id || crypto.randomUUID();
+  await processHooks.onSession?.(sessionId);
   const basePrompt = contractPrompt({
     role: "Primary implementation worker reporting to Codex",
     goal,
@@ -98,6 +100,7 @@ export async function runClaude({ config, workspace, jobDir, goal, plan, accepta
     maxLogBytes: config.execution.max_log_bytes,
     env: { ...claudeSettingsEnv, ...(config.cli.claude_env || {}) },
     signal,
+    ...processHooks,
   });
   return { ...processResult, parsed: parseClaudeOutput(processResult.stdout, sessionId), session_id: sessionId, model: model || null };
 }
@@ -167,7 +170,7 @@ function safeAgyEnvSnapshot() {
   return Object.fromEntries(keys.map((key) => [key, process.env[key] ? { present: true, value: process.env[key] } : { present: false }]));
 }
 
-export function buildAgyArgs({ prompt, conversationId, model, timeoutSeconds, sandbox = false, projectId = null, workspace = null }) {
+export function buildAgyArgs({ prompt, conversationId, model, timeoutSeconds, sandbox = false, projectId = null, workspace = null, permissionMode = null }) {
   const args = ["--print", prompt, "--print-timeout", `${timeoutSeconds}s`];
   if (projectId) args.push("--project", projectId);
   if (conversationId) args.push("--conversation", conversationId);
@@ -175,7 +178,26 @@ export function buildAgyArgs({ prompt, conversationId, model, timeoutSeconds, sa
   if (workspace) args.push("--add-dir", workspace);
   if (model) args.push("--model", model);
   if (sandbox) args.push("--sandbox");
+  if (permissionMode === "dangerously-skip-permissions") args.push("--dangerously-skip-permissions");
+  else if (permissionMode === "accept-edits") args.push("--mode", "accept-edits");
+  else if (permissionMode === "plan") args.push("--mode", "plan");
   return args;
+}
+
+export function classifyAgyAuthOutput(text) {
+  const value = String(text || "");
+  return [
+    /accounts\.google\.com\/o\/oauth2/i,
+    /authorize\?.*(client_id|redirect_uri)/i,
+    /open (?:this )?url.*(?:sign in|login|oauth)/i,
+    /authentication (?:is )?required/i,
+    /please (?:sign in|log in)/i,
+  ].some((pattern) => pattern.test(value));
+}
+
+function agyAuthAbort({ text }) {
+  if (!classifyAgyAuthOutput(text)) return null;
+  return "AGY requested interactive OAuth authentication. Run agent-orch resume from the working shell to capture proxy/runtime environment, then verify `agy --print` works non-interactively.";
 }
 
 function agyHomeDir() {
@@ -383,6 +405,29 @@ async function readCcProgress(jobDir, maxChars = 16000) {
   return unique.slice(-2);
 }
 
+async function readCodexWorkerProgress(jobDir, maxChars = 16000) {
+  let entries;
+  try { entries = await fs.readdir(jobDir, { withFileTypes: true }); } catch { return []; }
+  const stdoutFiles = entries
+    .filter((entry) => entry.isFile() && /^codex-worker-round-\d+\.stdout\.log$/.test(entry.name))
+    .sort((a, b) => b.name.localeCompare(a.name));
+  if (!stdoutFiles.length) return [];
+  const text = await readTail(path.join(jobDir, stdoutFiles[0].name), maxChars);
+  const messages = [];
+  for (const line of text.split(/\r?\n/).filter(Boolean)) {
+    try {
+      const event = JSON.parse(line);
+      if (event.type === "item.completed" && event.item?.type === "agent_message") {
+        const content = event.item.text || event.item.content;
+        if (typeof content === "string" && content.trim()) {
+          messages.push({ content: content.trim(), timestamp: event.timestamp || null, source: "codex_worker" });
+        }
+      }
+    } catch {}
+  }
+  return messages.slice(-2);
+}
+
 /**
  * Best-effort bounded progress extractor for CC and AGY worker jobs.
  * Reads a bounded tail of known/discoverable worker transcripts, selects
@@ -407,6 +452,8 @@ export async function readWorkerProgress({ job, jobDir }) {
     messages = await readCcProgress(jobDir);
   } else if (provider === "agy" || provider === "agy_write") {
     messages = await readAgyProgress(sessionId);
+  } else if (provider === "codex_worker") {
+    messages = await readCodexWorkerProgress(jobDir);
   }
 
   if (!messages || messages.length === 0) {
@@ -427,7 +474,7 @@ export async function readWorkerProgress({ job, jobDir }) {
   return { available: true, messages: trimmed, note: null };
 }
 
-export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths, writablePaths, forbiddenPaths, taskSession, model, signal, mode = "investigate" }) {
+export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths, writablePaths, forbiddenPaths, taskSession, model, signal, mode = "investigate", processHooks = {} }) {
   const evidenceOnly = mode !== "disjoint_subtask";
   const prompt = mode === "plan"
     ? [
@@ -447,6 +494,7 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths,
         readPaths?.length ? `Read-only paths: ${readPaths.join(", ")}` : null,
         forbiddenPaths?.length ? `Forbidden paths: ${forbiddenPaths.join(", ")}` : null,
         "Read-only: do not modify files or external systems.",
+        mode === "review" ? "Begin the final answer with exactly `VERDICT: PASS` or `VERDICT: FAIL`, then give concrete diff and test evidence." : null,
         "After any necessary tool use, provide a concise final answer with concrete evidence. Do not stop at a plan.",
       ].filter(Boolean).join("\n\n")
     : [
@@ -471,9 +519,11 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths,
     sandbox,
     projectId,
     workspace,
+    permissionMode: evidenceOnly ? "dangerously-skip-permissions" : (config.cli.agy_write_permission_mode || "dangerously-skip-permissions"),
   });
   args.unshift(...(config.cli.agy_prefix_args || []));
   args.push("--log-file", cliLogPath);
+  const providerEnv = await effectiveProviderEnvironment(config.project_dir || workspace, config.cli.agy_env || {});
   const launch = {
     command: config.cli.agy,
     args: sanitizedAgyArgs(args),
@@ -490,9 +540,19 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths,
     logDir: jobDir,
     logPrefix: `agy-${mode}`,
     maxLogBytes: config.execution.max_log_bytes,
-    env: config.cli.agy_env || {},
+    env: providerEnv,
     signal,
+    abortOnOutput: config.agy?.fail_fast_on_auth_window === false ? undefined : agyAuthAbort,
+    ...processHooks,
+    onStdoutChunk: async (chunk) => {
+      await processHooks.onStdoutChunk?.(chunk);
+      const sessionId = findUuid(chunk.toString("utf8"));
+      if (sessionId) await processHooks.onSession?.(sessionId);
+    },
   });
+  if (processResult.aborted_by_output) {
+    throw new Error(`AGY_AUTH_REQUIRED: ${processResult.aborted_by_output}`);
+  }
   const sessionId = await discoverAgyConversation({
     workspace,
     stdout: processResult.stdout,
@@ -575,7 +635,7 @@ export function contractPromptAgyWrite({ goal, plan, acceptance, readPaths, writ
   ].filter(Boolean).join("\n\n");
 }
 
-export async function runAgyWrite({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0 }) {
+export async function runAgyWrite({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0, processHooks = {} }) {
   const sessionId = taskSession?.session_id || crypto.randomUUID();
   const basePrompt = contractPromptAgyWrite({
     goal,
@@ -601,9 +661,11 @@ export async function runAgyWrite({ config, workspace, jobDir, goal, plan, accep
     sandbox,
     projectId,
     workspace,
+    permissionMode: config.cli.agy_write_permission_mode || "dangerously-skip-permissions",
   });
   args.unshift(...(config.cli.agy_prefix_args || []));
   args.push("--log-file", cliLogPath);
+  const providerEnv = await effectiveProviderEnvironment(config.project_dir || workspace, config.cli.agy_env || {});
 
   const launch = {
     command: config.cli.agy,
@@ -622,9 +684,19 @@ export async function runAgyWrite({ config, workspace, jobDir, goal, plan, accep
     logDir: jobDir,
     logPrefix: `agy-write-round-${round}`,
     maxLogBytes: config.execution.max_log_bytes,
-    env: config.cli.agy_env || {},
+    env: providerEnv,
     signal,
+    abortOnOutput: config.agy?.fail_fast_on_auth_window === false ? undefined : agyAuthAbort,
+    ...processHooks,
+    onStdoutChunk: async (chunk) => {
+      await processHooks.onStdoutChunk?.(chunk);
+      const sessionId = findUuid(chunk.toString("utf8"));
+      if (sessionId) await processHooks.onSession?.(sessionId);
+    },
   });
+  if (processResult.aborted_by_output) {
+    throw new Error(`AGY_AUTH_REQUIRED: ${processResult.aborted_by_output}`);
+  }
 
   const resultSessionId = await discoverAgyConversation({
     workspace,
@@ -655,5 +727,165 @@ export async function runAgyWrite({ config, workspace, jobDir, goal, plan, accep
     cli_log_path: cliLogPath,
     cli_log_tail: cliLogTail,
     launch,
+  };
+}
+
+function codexWorkerPrompt({ goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, repairContext }) {
+  return [
+    "Role: Codex Worker implementing an approved Agent Orch work-stage contract.",
+    `Goal: ${goal}`,
+    plan ? `Approved plan:\n${plan}` : null,
+    readPaths?.length ? `Read-only paths: ${readPaths.join(", ")}` : null,
+    writablePaths?.length ? `Writable paths: ${writablePaths.join(", ")}` : null,
+    forbiddenPaths?.length ? `Forbidden paths: ${forbiddenPaths.join(", ")}` : null,
+    acceptance?.length ? `Acceptance commands: ${acceptance.join("; ")}` : null,
+    "Modify only approved writable paths in the current isolated worktree.",
+    "Do not commit, push, publish, deploy, or change remote systems.",
+    repairContext ? `Continuation feedback:\n${repairContext}` : null,
+    "Implement completely, run relevant checks, and summarize changes and evidence.",
+  ].filter(Boolean).join("\n\n");
+}
+
+export function buildCodexWorkerArgs({ prompt, sessionId, resume = false, model, workspace, bypassSandbox = false }) {
+  if (resume) {
+    const args = [
+      "exec", "resume",
+      "--json",
+    ];
+    if (bypassSandbox) args.push("--dangerously-bypass-approvals-and-sandbox");
+    else args.push("-c", 'approval_policy="never"', "-c", 'sandbox_mode="workspace-write"');
+    args.push("--skip-git-repo-check");
+    if (model) args.push("--model", model);
+    args.push(sessionId, prompt);
+    return args;
+  }
+  const args = [
+    "exec",
+    "--json",
+  ];
+  if (bypassSandbox) args.push("--dangerously-bypass-approvals-and-sandbox");
+  else args.push("--sandbox", "workspace-write", "-c", 'approval_policy="never"');
+  args.push("--skip-git-repo-check", "-C", workspace);
+  if (model) args.push("--model", model);
+  args.push(prompt);
+  return args;
+}
+
+export function classifyCodexWindowsSandboxFailure(output) {
+  return /windows sandbox:|codex-windows-sandbox-setup\.exe|orchestrator_helper_launch_failed|sandbox setup.*access denied/i.test(String(output || ""));
+}
+
+function parseCodexWorkerOutput(stdout, fallbackSessionId = null) {
+  let sessionId = fallbackSessionId;
+  let result = "";
+  let isError = false;
+  for (const line of String(stdout || "").split(/\r?\n/).filter(Boolean)) {
+    try {
+      const event = JSON.parse(line);
+      if (event.type === "thread.started") sessionId = event.thread_id || event.thread?.id || sessionId;
+      if (event.type === "item.completed" && event.item?.type === "agent_message") {
+        result = event.item.text || event.item.content || result;
+      }
+      if (event.type === "turn.failed" || event.type === "error") isError = true;
+    } catch {
+      if (line.trim()) result = line.trim();
+    }
+  }
+  return { session_id: sessionId, result: result || String(stdout || "").trim(), is_error: isError };
+}
+
+export async function runCodexWorker({
+  config,
+  workspace,
+  jobDir,
+  goal,
+  plan,
+  acceptance,
+  readPaths,
+  writablePaths,
+  forbiddenPaths,
+  taskSession,
+  model,
+  repairContext,
+  signal,
+  round = 0,
+  processHooks = {},
+}) {
+  const prompt = codexWorkerPrompt({ goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, repairContext });
+  const initialArgs = buildCodexWorkerArgs({
+    prompt,
+    sessionId: taskSession?.session_id || null,
+    resume: Boolean(taskSession?.session_id),
+    model,
+    workspace,
+  });
+  const execute = async (args, logPrefix) => {
+    args.unshift(...(config.cli.codex_prefix_args || []));
+    let eventBuffer = "";
+    return runProcess({
+      command: config.cli.codex || "codex",
+      args,
+      cwd: workspace,
+      timeoutSeconds: config.execution.codex_worker_timeout_seconds || 1800,
+      logDir: jobDir,
+      logPrefix,
+      maxLogBytes: config.execution.max_log_bytes,
+      env: config.cli.codex_env || {},
+      signal,
+      ...processHooks,
+      onStdoutChunk: async (chunk) => {
+        await processHooks.onStdoutChunk?.(chunk);
+        eventBuffer += chunk.toString("utf8");
+        const lines = eventBuffer.split(/\r?\n/);
+        eventBuffer = lines.pop() || "";
+        for (const line of lines.filter(Boolean)) {
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "thread.started" && event.thread_id) {
+              await processHooks.onSession?.(event.thread_id);
+            }
+          } catch {}
+        }
+      },
+    });
+  };
+
+  const initialResult = await execute(initialArgs, `codex-worker-round-${round}`);
+  const initialParsed = parseCodexWorkerOutput(initialResult.stdout, taskSession?.session_id || null);
+  const sandboxFailureText = [initialResult.stdout, initialResult.stderr, initialParsed.result].join("\n");
+  const mayBypass = process.platform === "win32" && config.cli.codex_worker_allow_windows_sandbox_bypass !== false;
+  let processResult = initialResult;
+  let parsed = initialParsed;
+  let sandboxFallback = null;
+
+  if (mayBypass && initialParsed.session_id && classifyCodexWindowsSandboxFailure(sandboxFailureText)) {
+    const fallbackArgs = buildCodexWorkerArgs({
+      prompt: [
+        "The prior turn could not execute because the local Windows sandbox helper failed to start.",
+        "Continue the exact same task now. The outer Agent Orch runtime already isolates this Git worktree and enforces writable/forbidden paths.",
+        prompt,
+      ].join("\n\n"),
+      sessionId: initialParsed.session_id,
+      resume: true,
+      model,
+      workspace,
+      bypassSandbox: true,
+    });
+    processResult = await execute(fallbackArgs, `codex-worker-round-${round}-sandbox-fallback`);
+    parsed = parseCodexWorkerOutput(processResult.stdout, initialParsed.session_id);
+    sandboxFallback = {
+      attempted: true,
+      reason: "windows_sandbox_helper_unavailable",
+      initial_exit_code: initialResult.exit_code,
+      initial_stdout_path: initialResult.stdout_path,
+      initial_stderr_path: initialResult.stderr_path,
+    };
+  }
+  return {
+    ...processResult,
+    parsed,
+    session_id: parsed.session_id,
+    model: model || null,
+    sandbox_fallback: sandboxFallback,
   };
 }

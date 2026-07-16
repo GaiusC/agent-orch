@@ -1,3 +1,0 @@
-[mcp_servers.agent-orch]
-command = "node"
-args = ["scripts/server.mjs"]

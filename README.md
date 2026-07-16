@@ -1,227 +1,217 @@
-﻿# Agent Orch
+# Agent Orch
 
-Agent Orch is a local multi-agent orchestration runtime for supervising external coding agents through MCP tools. Codex is the default planner/accepter, Claude Code or Antigravity implements, and Antigravity provides targeted investigation or verification.
+Agent Orch is a Codex plugin that provides a stage-first MCP workflow for planning, implementation, independent review, acceptance, and durable continuation across CC, AGY, and Codex Worker.
 
-Agent Orch is designed to be resumable across hosts. Codex, Claude Desktop/Claude Code, and plain terminal workflows all resume from `.agent-orchestrator/` state before continuing a project. When the current host is Codex, planning and acceptance happen in the current Codex session; Agent Orch must not start Codex CLI just to plan or accept.
+The plugin follows the Codex plugin layout:
 
-The default path:
+```text
+.codex-plugin/plugin.json
+.mcp.json
+skills/
+scripts/
+templates/
+tests/
+```
 
-- Codex owns task planning, scope boundaries, and final acceptance.
-- Codex does not author project patches while Agent Orch is active; it plans, delegates, verifies, and accepts or rejects.
-- Worker changes are produced in an isolated Git worktree by default and applied only after acceptance.
-- Sessions are reused by project, provider, task id, and model to keep context stable.
-- Machine continuity is recorded in `events.jsonl`, `current-state.json`, and `handoff.generated.md`.
+The manifest points to the root `.mcp.json`; the plugin does not ship a competing `.codex/config.toml`.
 
-## Routing
+## Codex host model compatibility
 
-Agent Orch supports three implementation paths:
+Agent Orch requires the active Codex host model to expose local MCP tools. With Codex CLI/Desktop `0.144.4`, the same installed `agent_orch` server was verified as follows:
 
-| Path | Command | Description |
-| --- | --- | --- |
-| CC implementation | `cc-exec` / `cc-continue` | Claude Code as the primary writer (isolated worktree + patch + verify + apply/cleanup) |
-| AGY write | `agy-exec` / `agy-continue` | Antigravity as the primary writer with Thinking models (same worktree/patch/verify/apply cycle) |
-| Automatic | `auto` | CC-first routing: all complexities start with CC. Low/medium use deepseek-v4-flash, high uses deepseek-v4-pro. After two failed CC verification cycles, escalates to AGY write with Claude Sonnet 4.6 (Thinking). |
+| Host model | Agent Orch MCP |
+| --- | --- |
+| `gpt-5.6-terra` | PASS |
+| `gpt-5.6-luna` | PASS |
+| `gpt-5.5` | PASS |
+| `gpt-5.4` | PASS |
+| `gpt-5.4-mini` | PASS |
+| `gpt-5.6-sol` | FAIL: MCP tools are not exposed to the model |
 
-### Model defaults
+`gpt-5.6-terra` is the default Planner/Accepter model. Generated `gpt-5.6-sol` project routes are migrated to `gpt-5.6-terra`; unrelated custom model names are preserved.
 
-CC uses a two-tier default policy:
-- **Low and medium** complexity -> `deepseek-v4-flash` (for cc-exec, cc-continue, and all auto routing)
-- **High** complexity -> `deepseek-v4-pro`
-- Per-contract explicit model overrides take priority over defaults
+If `codex mcp list` shows `agent_orch` but a new task cannot call `health`, switch the task model from `gpt-5.6-sol` to `gpt-5.6-terra` and start a new task. Reinstalling or restarting cannot make a model expose a tool type it does not support.
 
-AGY read-only (investigate/verify): Gemini 3.5 Flash (low) / Gemini 3.1 Pro (medium/high)
-AGY write: Claude Sonnet 4.6 (Thinking) (medium) / Claude Opus 4.6 (Thinking) (high)
+## Primary MCP contract
 
-### Automatic routing with CC-first + AGY escalation
+The default MCP surface is provider-neutral:
 
-The `auto` command routes all implementation contracts to CC by default. Low and medium complexity use `deepseek-v4-flash`; high complexity uses `deepseek-v4-pro`. If CC completes with `verification_failed` after at least two verification/review cycles (the initial attempt plus at least one repair), the router escalates the contract to AGY write using the exact model `Claude Sonnet 4.6 (Thinking)`. If AGY write fails with a quota/credit/rate-exhaustion error during escalation, the router cleans up the AGY workspace and retries with CC at high complexity using `deepseek-v4-pro`, recording the full escalation chain as evidence. Other AGY failures (authentication, permission, internal errors) are NOT silently swallowed - they surface normally so Codex can respond.
+| Tool | Purpose |
+| --- | --- |
+| `stage-plan` | Persist the Planner contract and immutable Plan execution identity |
+| `stage-work` | Execute one Planner subtask using configured provider routes |
+| `stage-work-continue` | Continue the exact provider session and worktree |
+| `stage-review` | Produce formal reviewer evidence bound to the current patch |
+| `stage-accept` | Run the formal acceptance kernel with the Plan identity |
+| `wait-for-job` | Wait for a locally managed asynchronous job |
+| `status`, `result` | Inspect durable job state and evidence |
+| `apply`, `cleanup`, `cancel` | Apply accepted work, remove worktrees, or stop jobs |
+| `health` | Check CC, AGY, Codex Worker, trust, and project configuration |
 
-Direct `agy-exec` and `agy-continue` commands bypass the auto router and write with AGY directly.
-
-Provider-aware calibration: ordinary work estimated as CC-high may generally be treated as AGY-medium/Sonnet. Reserve AGY-high/Opus for exceptional complexity or risk.
-
-### Migration compatibility
-
-The default `routing.auto` policy is `"cc_first"` (all complexities route to CC; AGY escalation after CC verification failure). Legacy configs with `routing.auto: "agy_preferred"` route low to CC and medium/high to AGY write. Legacy configs with `"cc"` route all contracts to CC without escalation. Existing project configs with `primary_writer: "cc"` still work without changes.
-
-### Review gate
-
-Agent Orch enforces a review gate for implementation jobs by default. After a CC or AGY write implementation completes, the `apply` command requires one of:
-
-- A completed reviewer verification job (`reviewer-verify`) for the same project and `task_id`, confirming the implementation evidence; or
-- An explicit `review_waiver: true` set on the job contract metadata.
-
-Configurable in `.agent-orchestrator/config.json`:
+Provider-specific wrappers are hidden by default. Diagnostic exposure requires both:
 
 ```json
 {
-  "review_gate": {
-    "require_reviewer_for_implementation": true,
-    "allow_waiver": true
+  "mcp": {
+    "expose_provider_tools": true
   }
 }
 ```
 
-- Set `require_reviewer_for_implementation` to `false` to disable the gate entirely. Legacy `require_agy_verify_for_implementation: false` is still honored for older projects.
-- Set `allow_waiver` to `false` to require reviewer evidence on every implementation apply - no exceptions.
-- Reviewer `investigate` and `verify` jobs are exempt (they are read-only review work, not implementation).
-- Review-gate status, blocked jobs, and explicit waivers are visible in the audit dashboard and in `current-state.json`.
+and MCP server environment `AGENT_ORCH_EXPOSE_PROVIDER_TOOLS=1`.
 
-### AGY proxy injection
+## Project setup
 
-Agent Orch can inject proxy environment variables into every AGY subprocess (`agy-exec`, `agy-continue`, `reviewer-investigate`, `reviewer-verify`) through the `cli.agy_env` configuration map. This works without modifying WinHTTP, without a wrapper script, and without requiring MCP callers to pass proxy fields.
+Initialize and resume through the CLI:
 
-The project template defaults `agy_env` to an empty object `{}`, disabling injection. Set `agy_env` to `{}` explicitly to confirm no proxy is needed.
+```powershell
+powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 init -ProjectDir <project> -HostProvider codex
+powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
+```
 
-Configure proxy values in `.agent-orchestrator/config.json` only if your environment requires them:
+`resume` performs two durable operations:
+
+1. rebuilds `.agent-orchestrator/current-state.json` and the generated handoff;
+2. captures an allowlisted provider runtime environment in `.agent-orchestrator/runtime-env.json`.
+
+The runtime snapshot includes proxy, CA, AGY-home, and Windows home-resolution variables, but never arbitrary tokens or secrets. Every AGY invocation reloads this snapshot. Explicit `cli.agy_env` values override it.
+
+If AGY prints an OAuth URL or an interactive sign-in request, Agent Orch terminates the invocation immediately with remediation instead of waiting for the normal provider timeout.
+
+## Configuration v2
+
+`.agent-orchestrator/config.json` uses provider-neutral stage routes:
 
 ```json
 {
-  "cli": {
-    "agy_env": {
-      "HTTP_PROXY": "http://127.0.0.1:10100",
-      "HTTPS_PROXY": "http://127.0.0.1:10100",
-      "ALL_PROXY": "http://127.0.0.1:10100",
-      "NO_PROXY": "localhost,127.0.0.1,::1"
+  "version": 2,
+  "trusted": true,
+  "mcp": {
+    "enabled": true,
+    "expose_provider_tools": false
+  },
+  "host": {
+    "provider": "codex"
+  },
+  "stages": {
+    "plan": {
+      "routes": {
+        "high": [
+          { "provider": "codex", "model": "gpt-5.6-terra", "invocation": "in_session" }
+        ]
+      }
+    },
+    "work": {
+      "routes": {
+        "medium": [
+          { "provider": "cc", "model": "deepseek-v4-flash" },
+          { "provider": "agy_write", "model": "Claude Sonnet 4.6 (Thinking)" },
+          { "provider": "codex_worker", "model": null }
+        ]
+      }
+    },
+    "review": {
+      "routes": {
+        "medium": [
+          { "provider": "agy", "model": "Gemini 3.5 Flash (High)" }
+        ]
+      }
+    },
+    "accept": {
+      "inherit_from": "plan"
     }
   }
 }
 ```
 
-The values shown (`http://127.0.0.1:10100`) are only a localhost example. Adjust host and port to match your actual proxy. The process environment is always preserved; explicit `agy_env` values override it.
+Version 1 configurations are migrated in memory on load and written as v2 by `init`/`resume`. Custom model names are preserved; known obsolete AGY aliases are migrated to current CLI display names.
 
-### Audit dashboard views
+## Provider execution guarantees
 
-> The `audit-orch` standalone skill is disabled in v0.4.0. The dashboard remains
-> available through the CLI (`agent-orch dashboard`). Use the CLI to inspect job
-> state, review-gate status, and run evidence.
+- CC runs non-interactively in an isolated Git worktree with `bypassPermissions`.
+- AGY write runs in the isolated worktree with explicit non-interactive write permission. AGY review receives headless tool permission, but Agent Orch compares the implementation patch digest before and after review, rejects conversation-store fallback text, and requires an explicit `VERDICT: PASS`.
+- Codex Worker first runs with `--sandbox workspace-write` and `approval_policy="never"`. On Windows only, a recognized sandbox-helper startup failure is continued in the same thread with Codex's externally-isolated bypass flag; the Agent Orch worktree and path-policy gates remain enforced and the fallback is recorded in evidence.
+- Provider PIDs, cwd, session IDs, models, and worktrees are persisted under `.agent-orchestrator/`.
+- CC binds its session before launch. AGY and Codex Worker bind conversation/thread IDs as soon as they appear in output.
+- After an MCP restart, `status - project_dir` checks the persisted OS PID. A missing in-memory promise is not treated as proof that the worker died.
+- `stage-work-continue` never reroutes. It requires the exact original provider session and worktree and fails closed with remediation if either is missing.
 
-The audit dashboard (launched via `agent-orch dashboard`) exposes role/provider/stage
-views for every project:
+Fallback only occurs for classified retryable provider/runtime failures such as executable unavailability, timeout, quota exhaustion, or transient connectivity. Authentication, sandbox, permission, forbidden-path, and read-only failures are surfaced directly.
 
-- **Role lanes**: Planner (Codex or configured planner), Executor (CC/AGY write), Reviewer (configured reviewer, currently AGY-backed), Accepter/Coordinator.
-- **Provider counts**: CC, AGY, AGY write, Codex.
-- **Lifecycle stages**: plan, execute, review, repair, accept, cleanup.
-- **Stale running jobs**: jobs running but with no recent update (15-minute threshold), flagged in project summary and handoff.
-- **Fallback/escalation chains**: jobs that triggered quota fallback or CC-to-AGY escalation, with chain evidence.
-- **Review-gate status**: jobs blocked by the review gate (ready for acceptance but missing reviewer evidence).
+## Acceptance
 
-Dashboard data is read-only and served from `.agent-orchestrator/runs/` and `current-state.json`.
+Worker output is never applied directly. `stage-accept` calls the formal acceptance kernel and requires:
 
-## Parallel allocation policy
+- a persisted Planner contract;
+- immutable Plan provider/model/invocation/session identity;
+- current patch digest;
+- deterministic verification evidence;
+- reviewer evidence when the review gate is enabled;
+- matching repository and workspace provenance.
 
-- Multiple CC workers can run in parallel for read-only contracts or clearly disjoint writable paths.
-- One AGY write worker should be allocated whenever multiple disjoint contracts run in parallel.
-- Retain at most one concurrent AGY by default on this machine.
-- Multiple concurrent AGY write jobs require a successful multi-AGY smoke test.
+`apply` validates the acceptance artifact again before applying the patch.
 
-## Requirements
+## MCP installation
 
-- Codex CLI/Desktop with plugin support.
-- Node.js 18.18 or newer.
-- Git.
-- Local `claude` CLI.
-- Local `agy` CLI if AGY verification or writing is desired.
-
-## Install
+The plugin manifest supplies its MCP server automatically when installed through Codex. Project-local MCP maintenance remains available for non-plugin hosts:
 
 ```powershell
-git clone git@github.com:GaiusC/agent-orch.git
-cd agent-orch
-npm install
+agent-orch mcp status  -ProjectDir <project>
+agent-orch mcp install -ProjectDir <project>
+agent-orch mcp repair  -ProjectDir <project>
+agent-orch mcp remove  -ProjectDir <project>
 ```
 
-Add the cloned plugin to a personal Codex plugin marketplace, then install:
+Generated `.mcp.json` entries use `cwd: "."` and forward-slash script paths so Windows project paths resolve consistently.
 
-```powershell
-codex plugin add agent-orch@personal
-```
+## Development and update flow
 
-Open a new Codex session after installation.
-
-## Project Setup
-
-Initialize each target project:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 init -ProjectDir <project>
-```
-
-For a partially built project, add `-ExistingProject`.
-
-This creates:
+Always edit the source checkout, never the installed cache:
 
 ```text
-.agent-orchestrator/
-  config.json
-  state/
-  runs/
+C:\Users\<user>\plugins\agent-orch
 ```
 
-Review `.agent-orchestrator/config.json`, keep `duplicate_implementation` false, and configure real verification commands before accepting worker output. The default template launches CC with `bypassPermissions` and AGY without sandbox so both workers can run non-interactively in local desktop workflows; tighten these settings only if your local CLIs can still complete delegated contracts without blocking.
+Standard release loop:
 
-## Usage
+1. Modify source, tests, README, and skill documentation.
+2. Run `npm test`.
+3. Validate the plugin:
 
-In any host, resume project state first:
+   ```powershell
+   python <CODEX_HOME>\skills\.system\plugin-creator\scripts\validate_plugin.py <source-root>
+   ```
+
+4. Bump the manifest cachebuster/version using the plugin-creator update helper.
+5. Reinstall:
+
+   ```powershell
+   codex plugin add agent-orch@personal
+   ```
+
+6. Open a new Codex task. Existing tasks keep their previously loaded skill and MCP tool catalog.
+7. Select an MCP-capable host model and verify that `health` and `stage-*` tools are callable while provider wrappers remain hidden.
+
+Source and installed cache versions must match before release verification.
+
+## Tests
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
+npm test
+npm run test:e2e-codex-mcp
 ```
 
-Use `-HostProvider cc_desktop` from Claude/CC Desktop hosts and `-HostProvider terminal` from a plain shell.
+The suite covers config migration, Windows paths, MCP cwd behavior, `mcp.enabled=false`, runtime environment capture, OAuth fail-fast, permission flags, StageRun lifecycle, immutable Plan identity, exact continuation, and provider routing.
 
-In a Codex session for a configured project, use MCP tools to route work:
+`test:e2e-codex-mcp` performs a real Codex-hosted MCP call and defaults to `gpt-5.4-mini`; set `AGENT_ORCH_CODEX_MCP_MODEL` to probe another model. Release verification additionally performs real E2E work-stage invocations for CC, AGY, and Codex Worker and an independent reviewer gate.
 
-- Delegate implementation via `auto`, `cc-exec`/`cc-continue`, or `agy-exec`/`agy-continue`.
-- Route verification or investigation through `reviewer-verify` or `reviewer-investigate`.
-- Inspect job evidence with `status` (compact snapshot with bounded assistant-only progress) and `result` (full evidence pack).
-- Apply an accepted patch with `apply`, then clean up with `cleanup`.
+## Safety
 
-Codex should inspect evidence under `.agent-orchestrator\runs` before accepting, request same-session repair via continuation tools if needed, and apply the patch only after verification.
-
-Open the dashboard without talking to an agent:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 dashboard -ProjectDir <project>
-```
-
-For substantial work, Codex should first split the goal into small contracts, route implementation contracts via `auto` (which handles provider and model selection), route required investigation or verification gates through `reviewer-investigate` or `reviewer-verify`, and record any waived gate or residual risk for the user.
-
-## CLI Commands
-
-The CLI handles project lifecycle, dashboard, and MCP configuration maintenance. Worker implementation, reviewer, and job-control operations are only available through MCP tools.
-
-```
-agent-orch init              -ProjectDir <project> [-ExistingProject] [-HostProvider codex|cc_desktop|terminal]
-agent-orch health            -ProjectDir <project>
-agent-orch resume            -ProjectDir <project> [-HostProvider codex|cc_desktop|terminal|unknown]
-agent-orch dashboard         -ProjectDir <project> [-PreferredPort 15788]
-agent-orch dashboard-close   -ProjectDir <project> [-PreferredPort 15788]
-agent-orch mcp status        -ProjectDir <project>
-agent-orch mcp install       -ProjectDir <project>
-agent-orch mcp repair        -ProjectDir <project>
-agent-orch mcp remove        -ProjectDir <project>
-```
-
-Worker, reviewer, and job-control commands (auto, cc-exec, cc-continue, agy-exec, agy-continue, reviewer-investigate, reviewer-verify, planner-plan, status, result, apply, cleanup) return an explicit MCP-only error if called from the CLI. Run `agent-orch mcp install` to set up the MCP server for a project.
-
-### Host tool access
-
-| Host | Available via MCP |
-| --- | --- |
-| Codex | cc-exec, cc-continue, agy-exec, agy-continue, auto, reviewer-investigate, reviewer-verify, status (includes bounded assistant-only progress), result, cancel, apply, cleanup, health |
-| CC Desktop / Claude Desktop | health, codex-exec, codex-continue, planner-plan, status (includes bounded assistant-only progress), result, cancel, cleanup |
-| Terminal | health, status (includes bounded assistant-only progress), result, cancel, cleanup |
-
-## Safety Notes
-
-- Keep `duplicate_implementation` false unless you have a very specific reason.
-- Do not commit `.agent-orchestrator/state/` or `.agent-orchestrator/runs/`.
-- Review project-provided `.agent-orchestrator/config.json` before setting `trusted` to true.
-- Treat worker output as a claim; Codex still needs to verify diffs, forbidden paths, and acceptance commands.
-- Do not let Codex become the implementation worker unless the user explicitly leaves Agent Orch mode for that task.
-- AGY write work produces the same isolated worktree + patch + verification evidence as CC. Apply and cleanup work identically.
-- Quota fallback from AGY to CC only triggers for explicit quota/credit/rate-exhaustion errors. Auth, permission, and internal errors are NOT silently swallowed.
+- Keep `trusted: false` until the repository and writable paths have been reviewed.
+- Use narrow `writable_paths` and explicit `forbidden_paths`.
+- Do not commit `.agent-orchestrator/state/`, `.agent-orchestrator/runs/`, or runtime environment artifacts.
+- Do not silently waive reviewer evidence or change provider/session identity during acceptance.
+- Do not use automatic repair for configuration failures; return explicit remediation.
 
 ## License
 

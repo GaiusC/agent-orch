@@ -3,17 +3,26 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StateStore } from "./lib/state.mjs";
-import { DEFAULT_CONFIG, loadProjectConfig, projectOrchestratorRoot, projectRunsRoot, projectStateRoot } from "./lib/config.mjs";
+import { DEFAULT_CODEX_MCP_MODEL, DEFAULT_CONFIG, loadProjectConfig, migrateProjectConfig, projectOrchestratorRoot, projectRunsRoot, projectStateRoot } from "./lib/config.mjs";
 import { commandExists, runProcess } from "./lib/process.mjs";
 import { deepMerge, pathExists, readJson, writeJsonAtomic } from "./lib/utils.mjs";
+import { captureRuntimeEnvironment } from "./lib/runtime-env.mjs";
 
 const command = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const MCP_SERVER_ID = "agent_orch";
+const LEGACY_MCP_SERVER_ID = "agent-orch";
 
 // Tool names that have been removed from the CLI and are only available
 // via MCP.  Calling one of these produces an explicit MCP-only error.
 const MCP_ONLY_COMMANDS = new Set([
+  "stage-plan",
+  "stage-work",
+  "stage-work-continue",
+  "stage-review",
+  "stage-accept",
+  "wait-for-job",
   "auto",
   "cc-exec",
   "cc-continue",
@@ -62,9 +71,10 @@ Examples:
   agent-orch dashboard -ProjectDir . -PreferredPort 15788
   agent-orch dashboard-close -ProjectDir . -PreferredPort 15788
 
-Worker, reviewer, and job-control operations (auto, cc-exec, cc-continue,
-agy-exec, agy-continue, reviewer-investigate, reviewer-verify, planner-plan,
-status, result, apply, cleanup) are only available through MCP tools.
+Stage, worker, reviewer, and job-control operations (stage-plan, stage-work,
+stage-work-continue, stage-review, stage-accept, wait-for-job, status, result,
+apply, cleanup) are only available through MCP tools. Provider-specific wrappers
+are hidden by default.
 The \`status\` tool returns a compact snapshot including bounded assistant-only
 progress (at most two newest messages, no tool calls or raw logs). Raw
 transcripts and tool output remain local artifacts — use \`result\` for full
@@ -119,6 +129,10 @@ async function projectStore(projectDir) {
 }
 
 function materializeProjectConfig(existing = {}, { trusted = true, hostProvider = null } = {}) {
+  const explicitMcpEnabled = typeof existing?.mcp?.enabled === "boolean"
+    ? existing.mcp.enabled
+    : null;
+  existing = migrateProjectConfig(existing);
   const existingHostRoles = existing?.host?.in_session_roles;
   const normalizedHostProvider = hostProvider || existing?.host?.provider || "unknown";
   const base = deepMerge(DEFAULT_CONFIG, {
@@ -128,19 +142,11 @@ function materializeProjectConfig(existing = {}, { trusted = true, hostProvider 
   const next = deepMerge(base, existing);
   next.mode = "cli";
 
-  // mcp.enabled gate: cc_desktop/claude_desktop init/resume enables MCP;
-  // other hosts preserve the existing value (or default to false for new projects).
+  // Codex and desktop hosts use MCP as the primary stage surface. Preserve an
+  // explicit existing false until `mcp install` or `mcp repair` enables it.
   if (!next.mcp) next.mcp = {};
-  const isCcDesktop = ["cc_desktop", "claude_desktop"].includes(normalizedHostProvider);
-  if (isCcDesktop) {
-    // cc_desktop init/resume: enable MCP as the primary orchestration surface.
-    next.mcp.enabled = true;
-  } else if (!hostProvider) {
-    // Resume without explicit host: preserve existing mcp.enabled or default to false.
-    next.mcp.enabled = next.mcp.enabled === true;
-  }
-  // When an explicit non-cc_desktop host is given (codex, terminal), keep the
-  // existing mcp.enabled value — only cc_desktop explicitly toggles it on.
+  const isMcpHost = ["codex", "cc_desktop", "claude_desktop"].includes(normalizedHostProvider);
+  next.mcp.enabled = explicitMcpEnabled ?? isMcpHost;
 
   if (!next.roles) next.roles = {};
   next.roles.primary_writer = next.roles.primary_writer || "cc";
@@ -171,7 +177,13 @@ function materializeProjectConfig(existing = {}, { trusted = true, hostProvider 
   next.providers.cc = { roles: ["executor"], invocation: "cli", ...(next.providers.cc || {}) };
   next.providers.agy = { roles: ["reviewer", "executor_fallback"], invocation: "cli", ...(next.providers.agy || {}) };
   if (!next.models) next.models = {};
-  if (!next.models.codex) next.models.codex = { planner: "gpt-5.6-sol", accepter: "gpt-5.6-sol", reasoning_effort: "high" };
+  if (!next.models.codex) {
+    next.models.codex = {
+      planner: DEFAULT_CODEX_MCP_MODEL,
+      accepter: DEFAULT_CODEX_MCP_MODEL,
+      reasoning_effort: "high",
+    };
+  }
   if (!next.models.agy_write) {
     next.models.agy_write = { low: null, medium: "Claude Sonnet 4.6 (Thinking)", high: "Claude Opus 4.6 (Thinking)" };
   }
@@ -222,6 +234,7 @@ async function initProject() {
     await fs.writeFile(dashboardLauncher, launcher, "utf8");
   }
   const store = await projectStore(projectDir);
+  const runtimeEnvironment = await captureRuntimeEnvironment(projectDir);
   await store.resume({ projectDir, hostProvider: next.host.provider || "unknown" });
   output({
     ok: true,
@@ -238,6 +251,11 @@ async function initProject() {
     dashboard_launcher: dashboardLauncher,
     existing_project: Boolean(args.ExistingProject || args.existingProject),
     mode: "cli",
+    runtime_environment: {
+      file: runtimeEnvironment.file,
+      captured_at: runtimeEnvironment.captured_at,
+      keys: Object.keys(runtimeEnvironment.env),
+    },
   });
 }
 
@@ -246,8 +264,9 @@ async function health() {
   const config = await loadProjectConfig(projectDir);
   const claude = await commandExists(config.cli.claude);
   const agy = await commandExists(config.cli.agy);
+  const codexWorker = await commandExists(config.cli.codex);
   output({
-    ok: claude.found && agy.found,
+    ok: claude.found && agy.found && codexWorker.found,
     mode: config.mode,
     mcp_enabled: config.mcp?.enabled === true,
     project_dir: projectDir,
@@ -256,25 +275,32 @@ async function health() {
     host_provider: config.host?.provider || "unknown",
     claude,
     agy,
+    codex_worker: codexWorker,
   });
 }
 
 async function resumeProject() {
   const projectDir = projectDirArg();
-  const hostProvider = args.HostProvider || args.hostProvider || args.Host || args.host || "unknown";
   const configPath = path.join(projectOrchestratorRoot(projectDir), "config.json");
   const existing = await pathExists(configPath) ? await readJson(configPath) : {};
+  const hostProvider = args.HostProvider || args.hostProvider || args.Host || args.host || existing.host?.provider || "unknown";
   await fs.mkdir(projectOrchestratorRoot(projectDir), { recursive: true });
   // resume: preserve existing mcp.enabled profile when no explicit HostProvider
   // is given that would override it; otherwise let materializeProjectConfig decide.
   const next = materializeProjectConfig(existing, { trusted: existing.trusted ?? false, hostProvider: String(hostProvider) });
   await writeJsonAtomic(configPath, next);
+  const runtimeEnvironment = await captureRuntimeEnvironment(projectDir);
   const store = await projectStore(projectDir);
   const state = await store.resume({ projectDir, hostProvider: String(hostProvider) });
   output({
     ...state,
     mcp_enabled: next.mcp?.enabled === true,
     host_provider: next.host.provider,
+    runtime_environment: {
+      file: runtimeEnvironment.file,
+      captured_at: runtimeEnvironment.captured_at,
+      keys: Object.keys(runtimeEnvironment.env),
+    },
   });
 }
 
@@ -302,7 +328,9 @@ async function mcpStatus() {
   const config = await readProjectConfig(projectDir);
   const mcpJsonPath = path.join(projectDir, ".mcp.json");
   const mcpJson = await pathExists(mcpJsonPath) ? await readJson(mcpJsonPath) : null;
-  const agentOrchEntry = mcpJson?.mcpServers?.["agent-orch"] || null;
+  const agentOrchEntry = mcpJson?.mcpServers?.[MCP_SERVER_ID]
+    || mcpJson?.mcpServers?.[LEGACY_MCP_SERVER_ID]
+    || null;
 
   output({
     ok: true,
@@ -333,9 +361,11 @@ async function mcpInstall() {
   const mcpJsonPath = path.join(projectDir, ".mcp.json");
   let mcpJson = await pathExists(mcpJsonPath) ? await readJson(mcpJsonPath) : {};
   if (!mcpJson.mcpServers) mcpJson.mcpServers = {};
-  mcpJson.mcpServers["agent-orch"] = {
+  delete mcpJson.mcpServers[LEGACY_MCP_SERVER_ID];
+  mcpJson.mcpServers[MCP_SERVER_ID] = {
     command: "node",
-    args: [path.relative(projectDir, path.resolve(scriptDir, "server.mjs")).replaceAll("\\", "/")],
+    args: [path.relative(projectDir, path.resolve(scriptDir, "mcp-stdio-bridge.mjs")).replaceAll("\\", "/")],
+    cwd: ".",
   };
   await writeJsonAtomic(mcpJsonPath, mcpJson);
 
@@ -345,7 +375,7 @@ async function mcpInstall() {
     mcp_enabled: true,
     config_path: await projectConfigPath(projectDir),
     mcp_json_path: mcpJsonPath,
-    mcp_server_entry: mcpJson.mcpServers["agent-orch"],
+    mcp_server_entry: mcpJson.mcpServers[MCP_SERVER_ID],
     message: "MCP server installed. Restart your MCP client to pick up the new configuration.",
   });
 }
@@ -363,9 +393,11 @@ async function mcpRepair() {
   const mcpJsonPath = path.join(projectDir, ".mcp.json");
   let mcpJson = await pathExists(mcpJsonPath) ? await readJson(mcpJsonPath) : {};
   if (!mcpJson.mcpServers) mcpJson.mcpServers = {};
-  mcpJson.mcpServers["agent-orch"] = {
+  delete mcpJson.mcpServers[LEGACY_MCP_SERVER_ID];
+  mcpJson.mcpServers[MCP_SERVER_ID] = {
     command: "node",
-    args: [path.relative(projectDir, path.resolve(scriptDir, "server.mjs")).replaceAll("\\", "/")],
+    args: [path.relative(projectDir, path.resolve(scriptDir, "mcp-stdio-bridge.mjs")).replaceAll("\\", "/")],
+    cwd: ".",
   };
   await writeJsonAtomic(mcpJsonPath, mcpJson);
 
@@ -389,12 +421,13 @@ async function mcpRemove() {
   config.mcp.enabled = false;
   await writeProjectConfig(projectDir, config);
 
-  // Remove agent-orch entry from .mcp.json.
+  // Remove current and legacy Agent Orch entries from .mcp.json.
   const mcpJsonPath = path.join(projectDir, ".mcp.json");
   if (await pathExists(mcpJsonPath)) {
     const mcpJson = await readJson(mcpJsonPath);
-    if (mcpJson.mcpServers?.["agent-orch"]) {
-      delete mcpJson.mcpServers["agent-orch"];
+    if (mcpJson.mcpServers?.[MCP_SERVER_ID] || mcpJson.mcpServers?.[LEGACY_MCP_SERVER_ID]) {
+      delete mcpJson.mcpServers[MCP_SERVER_ID];
+      delete mcpJson.mcpServers[LEGACY_MCP_SERVER_ID];
       if (Object.keys(mcpJson.mcpServers).length === 0) delete mcpJson.mcpServers;
       await writeJsonAtomic(mcpJsonPath, mcpJson);
     }

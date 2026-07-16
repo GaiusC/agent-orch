@@ -1,9 +1,10 @@
 {
-  "version": 1,
+  "version": 2,
   "mode": "cli",
   "trusted": true,
   "mcp": {
-    "enabled": false
+    "enabled": false,
+    "expose_provider_tools": false
   },
   "roles": {
     "primary_writer": "cc",
@@ -26,12 +27,11 @@
     "agy": {
       "roles": ["reviewer", "executor_fallback"],
       "invocation": "cli"
+    },
+    "codex_worker": {
+      "roles": ["executor_fallback"],
+      "invocation": "cli"
     }
-  },
-  "routing": {
-    "auto": "cc_first",
-    "agy_write_fallback_to_cc_on_quota": true,
-    "cc_verify_fail_escalate_to_agy": true
   },
   "review_gate": {
     "require_reviewer_for_implementation": true,
@@ -41,17 +41,20 @@
   "cli": {
     "claude": "claude",
     "agy": "agy",
+    "codex": "codex",
     "claude_prefix_args": [],
     "claude_permission_mode": "bypassPermissions",
     "agy_prefix_args": [],
     "agy_sandbox": false,
+    "agy_write_permission_mode": "dangerously-skip-permissions",
+    "codex_worker_allow_windows_sandbox_bypass": true,
     "agy_project": null,
     "agy_project_id": null,
     "agy_env": {}
   },
   "agy": {
     "enabled": true,
-    "launch": "codex_cli",
+    "launch": "cli",
     "auth_probe_required": true,
     "fail_fast_on_auth_window": true
   },
@@ -62,13 +65,14 @@
     "cc_timeout_seconds": 1800,
     "agy_timeout_seconds": 900,
     "agy_write_timeout_seconds": 1800,
+    "codex_worker_timeout_seconds": 1800,
     "max_log_bytes": 4194304,
     "max_result_chars": 8000
   },
   "models": {
     "codex": {
-      "planner": "gpt-5.6-sol",
-      "accepter": "gpt-5.6-sol",
+      "planner": "gpt-5.6-terra",
+      "accepter": "gpt-5.6-terra",
       "reasoning_effort": "high"
     },
     "cc": {
@@ -77,14 +81,60 @@
       "high": "deepseek-v4-pro"
     },
     "agy": {
-      "low": "Gemini 3.5 Flash",
-      "medium": "Gemini 3.1 Pro",
-      "high": "Gemini 3.1 Pro"
+      "low": "Gemini 3.5 Flash (Low)",
+      "medium": "Gemini 3.5 Flash (High)",
+      "high": "Gemini 3.1 Pro (High)"
     },
     "agy_write": {
-      "low": null,
+      "low": "Claude Sonnet 4.6 (Thinking)",
       "medium": "Claude Sonnet 4.6 (Thinking)",
       "high": "Claude Opus 4.6 (Thinking)"
+    },
+    "codex_worker": {
+      "low": null,
+      "medium": null,
+      "high": null
+    }
+  },
+  "stages": {
+    "plan": {
+      "default_complexity": "high",
+      "routes": {
+        "low": [{ "provider": "codex", "model": "gpt-5.6-terra", "invocation": "in_session" }],
+        "medium": [{ "provider": "codex", "model": "gpt-5.6-terra", "invocation": "in_session" }],
+        "high": [{ "provider": "codex", "model": "gpt-5.6-terra", "invocation": "in_session" }]
+      }
+    },
+    "work": {
+      "default_complexity": "medium",
+      "routes": {
+        "low": [
+          { "provider": "cc", "model": "deepseek-v4-flash" },
+          { "provider": "agy_write", "model": "Claude Sonnet 4.6 (Thinking)" },
+          { "provider": "codex_worker", "model": null }
+        ],
+        "medium": [
+          { "provider": "cc", "model": "deepseek-v4-flash" },
+          { "provider": "agy_write", "model": "Claude Sonnet 4.6 (Thinking)" },
+          { "provider": "codex_worker", "model": null }
+        ],
+        "high": [
+          { "provider": "cc", "model": "deepseek-v4-pro" },
+          { "provider": "agy_write", "model": "Claude Opus 4.6 (Thinking)" },
+          { "provider": "codex_worker", "model": null }
+        ]
+      }
+    },
+    "review": {
+      "default_complexity": "medium",
+      "routes": {
+        "low": [{ "provider": "agy", "model": "Gemini 3.5 Flash (Low)" }],
+        "medium": [{ "provider": "agy", "model": "Gemini 3.5 Flash (High)" }],
+        "high": [{ "provider": "agy", "model": "Gemini 3.1 Pro (High)" }]
+      }
+    },
+    "accept": {
+      "inherit_from": "plan"
     }
   },
   "scope": {

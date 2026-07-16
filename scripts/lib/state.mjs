@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { dataRoot } from "./config.mjs";
+import { processExists } from "./process.mjs";
 import { newId, nowIso, projectKey, readJson, truncate, writeJsonAtomic } from "./utils.mjs";
 
 const IN_SESSION_ROLES_BY_HOST = {
@@ -255,6 +256,7 @@ function buildCurrentState({ projectDir, jobs, events, sessions }) {
 
   // Detect stale running jobs: started > STALE_MS ago with no update in STALE_MS
   const staleJobs = activeJobs.filter((job) => {
+    if (job.process_pid && processExists(job.process_pid)) return false;
     const startedAt = job.started_at ? new Date(job.started_at).getTime() : null;
     const updatedAt = job.updated_at ? new Date(job.updated_at).getTime() : null;
     const checkpoint = startedAt || updatedAt;
@@ -381,6 +383,7 @@ function publicJobSnapshot(job) {
     evidence_path: job.evidence_path || null,
     patch_path: job.patch_path || null,
     error: job.error || null,
+    process_pid: job.process_pid || null,
     created_at: job.created_at,
     updated_at: job.updated_at,
     finished_at: job.finished_at || null,
@@ -427,7 +430,7 @@ function roleFor(provider, type = "", phase = "") {
   // applied CC jobs still carry cc provider and cc_execute type)
   if (phase === "applied" || phase === "applied_and_cleaned") return "accepter";
   // Executor role: CC or AGY write implementation jobs
-  if (provider === "agy_write" || (provider === "cc" && /exec|cont/.test(type))) return "executor";
+  if (provider === "agy_write" || provider === "codex_worker" || (provider === "cc" && /exec|cont|stage_work/.test(type))) return "executor";
   if (provider === "cc" && /auto/.test(type)) return "executor";
   // Planner/coordinator: Codex in-session or unknown
   if (provider === "codex") return "planner";

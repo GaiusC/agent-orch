@@ -3,13 +3,15 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import path from "node:path";
-import { loadProjectConfig, projectOrchestratorRoot, projectRunsRoot, projectStateRoot } from "./lib/config.mjs";
+import { DEFAULT_CODEX_MCP_MODEL, loadProjectConfig, projectOrchestratorRoot, projectRunsRoot, projectStateRoot } from "./lib/config.mjs";
 import { validateHostToolTrust } from "./lib/policy.mjs";
 import { runProcess, commandExists } from "./lib/process.mjs";
 import { StateStore } from "./lib/state.mjs";
 import { WorkerOrchestrator } from "./lib/orchestrator.mjs";
 import { requireString } from "./lib/utils.mjs";
-import { persistPlannerContract } from "./lib/contracts.mjs";
+import { loadPlannerContract, loadPlannerSubtask, persistPlannerContract } from "./lib/contracts.mjs";
+import { resolveStageRoutes } from "./lib/provider-registry.mjs";
+import { StageRuntime } from "./lib/stage-runtime.mjs";
 
 const commonTaskProperties = {
   project_dir: { type: "string", description: "Absolute path to the trusted project root." },
@@ -24,6 +26,103 @@ const commonTaskProperties = {
 };
 
 const tools = [
+  {
+    name: "stage-plan",
+    description: "Persist the in-session Planner contract and immutable Plan execution identity. This stage does not invoke an external planner when Codex is the host.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        task_id: { type: "string" },
+        contract: { type: "object" },
+        planner_session_id: { type: "string" },
+      },
+      required: ["project_dir", "task_id", "contract", "planner_session_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, idempotentHint: false },
+  },
+  {
+    name: "stage-work",
+    description: "Start the configured work-stage route for one persisted Planner subtask. Provider/model selection and retryable fallback are server-managed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        task_id: { type: "string" },
+        subtask_id: { type: "string" },
+        review_waiver: { type: "boolean" },
+      },
+      required: ["project_dir", "task_id", "subtask_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
+    name: "stage-work-continue",
+    description: "Continue the exact provider session and isolated worktree from a prior work-stage job. It never silently reroutes or creates an unrelated session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        task_id: { type: "string" },
+        job_id: { type: "string" },
+        feedback: { type: "string" },
+      },
+      required: ["project_dir", "task_id", "job_id", "feedback"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
+    name: "stage-review",
+    description: "Start the configured formal reviewer stage for a persisted review_id and bind its evidence to the implementation patch.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        task_id: { type: "string" },
+        review_id: { type: "string" },
+      },
+      required: ["project_dir", "task_id", "review_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, idempotentHint: false },
+  },
+  {
+    name: "stage-accept",
+    description: "Run the formal acceptance kernel using the immutable Plan execution identity. No provider/model/session fallback is allowed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        task_id: { type: "string" },
+        job_id: { type: "string" },
+        accepter_session_id: { type: "string" },
+        decision: { type: "string", enum: ["accepted", "rejected"] },
+        summary: { type: "string" },
+        conditions: { type: "array", items: { type: "string" } },
+        unresolved_risks: { type: "array", items: { type: "string" } },
+      },
+      required: ["project_dir", "task_id", "job_id", "accepter_session_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
+    name: "wait-for-job",
+    description: "Wait for a job managed by the current MCP process, then return durable status. If the MCP host restarted, status reports the preserved external PID/session state instead of declaring the worker dead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_dir: { type: "string" },
+        job_id: { type: "string" },
+      },
+      required: ["project_dir", "job_id"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, idempotentHint: true },
+  },
   {
     name: "health",
     description: "Check whether the local Claude Code and Antigravity CLI executables are available and inspect project trust configuration.",
@@ -186,6 +285,17 @@ const tools = [
   },
 ];
 
+const PROVIDER_TOOL_NAMES = new Set([
+  "cc-exec", "cc-continue", "agy-exec", "agy-continue", "auto",
+  "reviewer-investigate", "reviewer-verify", "planner-plan",
+  "codex-exec", "codex-continue", "accepter-accept",
+]);
+const PRIMARY_TOOL_NAMES = new Set([
+  "stage-plan", "stage-work", "stage-work-continue", "stage-review", "stage-accept",
+  "wait-for-job", "health", "status", "result", "cancel", "apply", "cleanup",
+]);
+const exposeProviderTools = process.env.AGENT_ORCH_EXPOSE_PROVIDER_TOOLS === "1";
+
 // -- Project-scoped orchestrator cache --
 // Each project gets its own StateStore rooted under .agent-orchestrator/,
 // so job state, sessions, events, and handoff files live alongside the
@@ -204,8 +314,10 @@ async function getProjectOrchestrator(projectDir) {
       },
     );
     await store.init();
-    const orchestrator = new WorkerOrchestrator(store);
-    entry = { store, orchestrator };
+    const stageRuntime = new StageRuntime(store, resolved);
+    await stageRuntime.init();
+    const orchestrator = new WorkerOrchestrator(store, { stageRuntime });
+    entry = { store, orchestrator, stageRuntime };
     projectOrchestrators.set(resolved, entry);
   }
   return entry;
@@ -230,7 +342,9 @@ const server = new Server(
   { capabilities: { tools: {} } },
 );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: tools.filter((tool) => PRIMARY_TOOL_NAMES.has(tool.name) || (exposeProviderTools && PROVIDER_TOOL_NAMES.has(tool.name))),
+}));
 
 function response(value, isError = false) {
   return {
@@ -263,7 +377,7 @@ function denialResponse(denial) {
  */
 async function projectPolicyContext(projectDir) {
   if (!projectDir || !String(projectDir).trim()) {
-    return { host: "unknown", trusted: false, mcpEnabled: false };
+    return { host: "unknown", trusted: false, mcpEnabled: false, exposeProviderTools: false };
   }
   try {
     const config = await loadProjectConfig(projectDir);
@@ -271,9 +385,10 @@ async function projectPolicyContext(projectDir) {
       host: config.host?.provider || "unknown",
       trusted: config.trusted === true,
       mcpEnabled: config.mcp?.enabled === true,
+      exposeProviderTools: config.mcp?.expose_provider_tools === true,
     };
   } catch {
-    return { host: "unknown", trusted: false, mcpEnabled: false };
+    return { host: "unknown", trusted: false, mcpEnabled: false, exposeProviderTools: false };
   }
 }
 
@@ -288,7 +403,7 @@ async function runCodexReadOnly(args, { continuation = false } = {}) {
   const codexModels = config.models?.codex || {};
   const command = codexConfig.command || config.cli?.codex || "codex";
   const mode = String(args.mode || "plan");
-  const model = args.model || codexConfig.model || (mode === "accept" ? codexModels.accepter : codexModels.planner) || "gpt-5.6-sol";
+  const model = args.model || codexConfig.model || (mode === "accept" ? codexModels.accepter : codexModels.planner) || DEFAULT_CODEX_MCP_MODEL;
   const effort = args.reasoning_effort || codexConfig.reasoning_effort || codexModels.reasoning_effort || "medium";
   const prompt = mode === "plan"
     ? [
@@ -377,6 +492,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // Resolve policy context from the effective project directory.
     const ctx = await projectPolicyContext(effectiveProjectDir);
+    if (PROVIDER_TOOL_NAMES.has(name) && !(exposeProviderTools && ctx.exposeProviderTools)) {
+      throw new Error("Provider-specific MCP wrappers are disabled. Use stage-* tools, or enable both mcp.expose_provider_tools and AGENT_ORCH_EXPOSE_PROVIDER_TOOLS=1 for diagnostics.");
+    }
 
     // Validate this tool call against host, trust, and MCP-enabled gates.
     const validation = validateHostToolTrust({
@@ -391,9 +509,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // For project-scoped tools, get the per-project orchestrator.
     let orchestrator;
+    let stageRuntime;
     if (effectiveProjectDir) {
       const entry = await getProjectOrchestrator(effectiveProjectDir);
       orchestrator = entry.orchestrator;
+      stageRuntime = entry.stageRuntime;
     }
 
     // For job-control tools resolved via job lookup, use that project's orchestrator.
@@ -403,6 +523,138 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // Tool dispatch — only reachable after policy validation passes.
     switch (name) {
+      case "stage-plan": {
+        const projectDir = path.resolve(requireString(args, "project_dir"));
+        const config = await loadProjectConfig(projectDir);
+        const [route] = resolveStageRoutes(config, "plan", config.stages?.plan?.default_complexity || "high");
+        const contract = await persistPlannerContract(projectDir, requireString(args, "task_id"), args.contract, requireString(args, "planner_session_id"));
+        const identity = await stageRuntime.savePlanIdentity(args.task_id, {
+          provider: route.provider,
+          model: route.model,
+          invocation: route.invocation,
+          session_id: args.planner_session_id,
+          contract_id: contract.contract_id,
+          contract_digest: contract.contract_digest,
+        });
+        const stageRun = await stageRuntime.create("plan", {
+          status: "completed",
+          task_id: args.task_id,
+          provider: route.provider,
+          model: route.model,
+          invocation: route.invocation,
+          session_id: args.planner_session_id,
+          contract_id: contract.contract_id,
+          finished_at: new Date().toISOString(),
+        });
+        return response({ stage_run: stageRun, contract, plan_execution_identity: identity });
+      }
+      case "stage-work": {
+        const projectDir = path.resolve(requireString(args, "project_dir"));
+        const config = await loadProjectConfig(projectDir);
+        const { subtask } = await loadPlannerSubtask(projectDir, requireString(args, "task_id"), requireString(args, "subtask_id"));
+        const complexity = subtask.complexity === "mid" ? "medium" : subtask.complexity;
+        const routes = resolveStageRoutes(config, "work", complexity);
+        const stageRun = await stageRuntime.create("work", {
+          task_id: args.task_id,
+          subtask_id: args.subtask_id,
+          route_chain: routes,
+        });
+        try {
+          const job = await orchestrator.startStageWork(args, routes, { stageRunId: stageRun.stage_run_id });
+          const linked = await stageRuntime.update(stageRun.stage_run_id, { job_id: job.id, provider: job.provider, model: job.model });
+          return response({ stage_run: linked, job });
+        } catch (error) {
+          await stageRuntime.update(stageRun.stage_run_id, { status: "failed", error: error?.message || String(error), finished_at: new Date().toISOString() });
+          throw error;
+        }
+      }
+      case "stage-work-continue": {
+        const stageRun = await stageRuntime.create("work", {
+          task_id: args.task_id,
+          continued_from_job_id: args.job_id,
+        });
+        try {
+          const job = await orchestrator.startStageWork(args, [], { continuation: true, stageRunId: stageRun.stage_run_id });
+          const linked = await stageRuntime.update(stageRun.stage_run_id, { job_id: job.id, provider: job.provider, model: job.model });
+          return response({ stage_run: linked, job });
+        } catch (error) {
+          await stageRuntime.update(stageRun.stage_run_id, { status: "failed", error: error?.message || String(error), finished_at: new Date().toISOString() });
+          throw error;
+        }
+      }
+      case "stage-review": {
+        const projectDir = path.resolve(requireString(args, "project_dir"));
+        const config = await loadProjectConfig(projectDir);
+        const contract = await loadPlannerContract(projectDir, requireString(args, "task_id"));
+        const review = contract.reviewer_tasks.find((item) => item.review_id === requireString(args, "review_id"));
+        if (!review) throw new Error(`Invalid reviewer review_id=${args.review_id}`);
+        const complexity = review.complexity === "mid" ? "medium" : review.complexity;
+        const [route] = resolveStageRoutes(config, "review", complexity);
+        if (route.provider !== "agy") throw new Error(`Unsupported review provider: ${route.provider}`);
+        const stageRun = await stageRuntime.create("review", {
+          task_id: args.task_id,
+          review_id: args.review_id,
+          provider: route.provider,
+          model: route.model,
+          invocation: route.invocation,
+        });
+        try {
+          const job = await orchestrator.startVerify({ ...args, stage_run_id: stageRun.stage_run_id, model: route.model });
+          const linked = await stageRuntime.update(stageRun.stage_run_id, { job_id: job.id });
+          return response({ stage_run: linked, job });
+        } catch (error) {
+          await stageRuntime.update(stageRun.stage_run_id, { status: "failed", error: error?.message || String(error), finished_at: new Date().toISOString() });
+          throw error;
+        }
+      }
+      case "stage-accept": {
+        const projectDir = path.resolve(requireString(args, "project_dir"));
+        const config = await loadProjectConfig(projectDir);
+        const identity = await stageRuntime.loadPlanIdentity(requireString(args, "task_id"));
+        const [route] = resolveStageRoutes(config, "accept", config.stages?.plan?.default_complexity || "high");
+        const accepterSessionId = requireString(args, "accepter_session_id");
+        for (const [field, actual, expected] of [
+          ["provider", route.provider, identity.provider],
+          ["model", route.model, identity.model],
+          ["invocation", route.invocation, identity.invocation],
+          ["session_id", accepterSessionId, identity.session_id],
+        ]) {
+          if ((actual || null) !== (expected || null)) {
+            throw new Error(`acceptance_identity_mismatch: ${field} expected=${expected || "(null)"} actual=${actual || "(null)"}`);
+          }
+        }
+        const stageRun = await stageRuntime.create("accept", {
+          task_id: args.task_id,
+          job_id: args.job_id,
+          provider: route.provider,
+          model: route.model,
+          invocation: route.invocation,
+          session_id: accepterSessionId,
+        });
+        try {
+          const acceptance = await orchestrator.accept({
+            ...args,
+            session_id: accepterSessionId,
+            accepter_provider: route.provider,
+            accepter_model: route.model,
+            accepter_invocation: route.invocation,
+          });
+          const completed = await stageRuntime.update(stageRun.stage_run_id, {
+            status: "completed",
+            acceptance_id: acceptance.acceptance_id,
+            finished_at: new Date().toISOString(),
+          });
+          return response({ stage_run: completed, acceptance });
+        } catch (error) {
+          await stageRuntime.update(stageRun.stage_run_id, { status: "failed", error: error?.message || String(error), finished_at: new Date().toISOString() });
+          throw error;
+        }
+      }
+      case "wait-for-job": {
+        const job = await orchestrator.wait(requireString(args, "job_id"));
+        if (job.stage_run_id) await stageRuntime.syncWithJob(job.stage_run_id);
+        return response(job);
+      }
       case "health": {
         const entry = effectiveProjectDir ? await getProjectOrchestrator(effectiveProjectDir) : null;
         return response(entry ? await entry.orchestrator.health(effectiveProjectDir) : await fallbackHealth());
@@ -418,8 +670,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "agy-continue": return response(await orchestrator.startAgyWrite(args, true));
       case "auto": return response(await orchestrator.startAuto(args));
       case "accepter-accept": return response(await orchestrator.accept(args));
-      case "status": return response(await orchestrator.status(requireString(args, "job_id")));
-      case "result": return response(await orchestrator.result(requireString(args, "job_id")));
+      case "status": {
+        const job = await orchestrator.status(requireString(args, "job_id"));
+        if (job.stage_run_id) await stageRuntime.syncWithJob(job.stage_run_id);
+        return response(job);
+      }
+      case "result": {
+        const value = await orchestrator.result(requireString(args, "job_id"));
+        if (value.job?.stage_run_id) await stageRuntime.syncWithJob(value.job.stage_run_id);
+        return response(value);
+      }
       case "cancel": return response(await orchestrator.cancel(requireString(args, "job_id")));
       case "apply": return response(await orchestrator.apply(requireString(args, "job_id")));
       case "cleanup": return response(await orchestrator.cleanup(requireString(args, "job_id")));

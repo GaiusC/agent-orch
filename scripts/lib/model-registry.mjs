@@ -4,13 +4,13 @@ export const MODEL_REGISTRY = Object.freeze({
   "cc.exec.low": { provider: "cc", role: "executor", tier: "low", display_name: "DeepSeek V4 Flash", canonical_id: "deepseek-v4-flash" },
   "cc.exec.mid": { provider: "cc", role: "executor", tier: "mid", display_name: "DeepSeek V4 Flash", canonical_id: "deepseek-v4-flash" },
   "cc.exec.high": { provider: "cc", role: "executor", tier: "high", display_name: "DeepSeek V4 Pro", canonical_id: "deepseek-v4-pro" },
-  "agy.review.low": { provider: "agy", role: "reviewer", tier: "low", display_name: "Gemini 3.5 Flash", canonical_id: "gemini-3.5-flash" },
-  "agy.review.mid": { provider: "agy", role: "reviewer", tier: "mid", display_name: "Gemini 3.5 Flash", canonical_id: "gemini-3.5-flash" },
-  "agy.review.high": { provider: "agy", role: "reviewer", tier: "high", display_name: "Gemini 3.1 Pro", canonical_id: "gemini-3.1-pro" },
-  "agy.investigate.low": { provider: "agy", role: "investigator", tier: "low", display_name: "Gemini 3.5 Flash", canonical_id: "gemini-3.5-flash" },
+  "agy.review.low": { provider: "agy", role: "reviewer", tier: "low", display_name: "Gemini 3.5 Flash (Low)", canonical_id: "Gemini 3.5 Flash (Low)" },
+  "agy.review.mid": { provider: "agy", role: "reviewer", tier: "mid", display_name: "Gemini 3.5 Flash (High)", canonical_id: "Gemini 3.5 Flash (High)" },
+  "agy.review.high": { provider: "agy", role: "reviewer", tier: "high", display_name: "Gemini 3.1 Pro (High)", canonical_id: "Gemini 3.1 Pro (High)" },
+  "agy.investigate.low": { provider: "agy", role: "investigator", tier: "low", display_name: "Gemini 3.5 Flash (Low)", canonical_id: "Gemini 3.5 Flash (Low)" },
   "fallback.agy_exec": { provider: "anthropic", role: "executor", tier: "fallback", display_name: "Claude Sonnet 4.6 (Thinking)", canonical_id: "Claude Sonnet 4.6 (Thinking)" },
   "fallback.planner": { provider: "anthropic", role: "planner", tier: "fallback", display_name: "Claude Opus 4.6 (Thinking)", canonical_id: "Claude Opus 4.6 (Thinking)" },
-  "planner.primary": { provider: "codex", role: "planner", tier: "high", display_name: "GPT-5.6 Sol", canonical_id: "gpt-5.6-sol" },
+  "planner.primary": { provider: "codex", role: "planner", tier: "high", display_name: "GPT-5.6 Terra", canonical_id: "gpt-5.6-terra" },
 });
 
 const TIERS = new Set(["low", "mid", "high"]);

@@ -132,7 +132,7 @@ test("auto falls back to CC on AGY quota exhaustion (orchestrator API)", async (
   });
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-quota-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const project = await createProject(root);
 
   const store = new StateStore(path.join(root, "state"));
@@ -165,7 +165,7 @@ test("auto falls back to CC on AGY rate limit (orchestrator API)", async (t) => 
   });
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-ratelim-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const project = await createProject(root);
 
   const store = new StateStore(path.join(root, "state"));
@@ -196,7 +196,7 @@ test("auto does NOT fall back for AGY auth errors (orchestrator API)", async (t)
   });
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-nofb-auth-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const project = await createProject(root);
 
   const store = new StateStore(path.join(root, "state"));
@@ -225,7 +225,7 @@ test("auto does NOT fall back for AGY internal errors (orchestrator API)", async
   });
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-nofb-int-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  t.after(() => fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const project = await createProject(root);
 
   const store = new StateStore(path.join(root, "state"));

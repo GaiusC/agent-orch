@@ -33,3 +33,18 @@ test("process runner times out and terminates", async (t) => {
   });
   assert.equal(result.timed_out, true);
 });
+
+test("process runner aborts immediately on interactive OAuth output", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-oauth-abort-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", "console.error('Open https://accounts.google.com/o/oauth2/auth to sign in'); setTimeout(() => {}, 10000)"],
+    cwd: root,
+    timeoutSeconds: 20,
+    logDir: root,
+    abortOnOutput: ({ text }) => text.includes("accounts.google.com") ? "oauth required" : null,
+  });
+  assert.equal(result.aborted_by_output, "oauth required");
+  assert.ok(result.duration_ms < 5000);
+});

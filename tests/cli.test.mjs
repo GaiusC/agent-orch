@@ -62,6 +62,8 @@ test("CLI initializes a project and runs a CC implementation to apply (via orche
   assert.equal(resumed.host_provider, "codex");
   assert.equal(resumed.external_invocation_allowed.codex, false);
   assert.ok(resumed.in_session_roles.includes("planner"));
+  assert.ok(resumed.runtime_environment.file.endsWith("runtime-env.json"));
+  assert.ok(await fs.stat(resumed.runtime_environment.file));
 
   // Configure for CC execution via orchestrator API
   const configPath = path.join(project, ".agent-orchestrator", "config.json");

@@ -178,7 +178,7 @@ test("AGY falls back to conversation store when stdout and transcript are empty"
     else process.env.AGENT_ORCH_FAKE_AGY_STORE_ONLY = previousStoreOnly;
     if (previousAgyHome === undefined) delete process.env.AGENT_ORCH_AGY_HOME;
     else process.env.AGENT_ORCH_AGY_HOME = previousAgyHome;
-    return fs.rm(root, { recursive: true, force: true });
+    return removeTempRoot(root);
   });
   const project = await createProject(root);
   const store = new StateStore(path.join(root, "state"));
@@ -1701,7 +1701,7 @@ test("accept method returns full provenance acceptance artifact", async (t) => {
   assert.ok(artifact.workspace_identity, "artifact should include workspace_identity");
   assert.equal(artifact.accepter_host, "codex", "artifact should include accepter_host");
   assert.equal(artifact.accepter_provider, "codex", "artifact should include accepter_provider");
-  assert.equal(artifact.accepter_model, "gpt-5.6-sol", "artifact should include accepter_model");
+  assert.equal(artifact.accepter_model, "gpt-5.6-terra", "artifact should include accepter_model");
   assert.equal(artifact.accepter_session_id, "test-session-1", "artifact should include accepter_session_id");
   assert.ok(artifact.summary, "artifact should include summary");
   assert.ok(Array.isArray(artifact.conditions), "artifact should include conditions array");

@@ -415,7 +415,7 @@ function latestJobsByTask(jobs) {
 
 function latestImplementationJob(jobs) {
   return jobs
-    .filter((job) => ["auto_execute", "cc_execute", "cc_continue", "agy_execute", "agy_continue"].includes(job.type))
+    .filter((job) => ["auto_execute", "cc_execute", "cc_continue", "agy_execute", "agy_continue", "stage_work", "stage_work_continue"].includes(job.type))
     .sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")))[0] || null;
 }
 

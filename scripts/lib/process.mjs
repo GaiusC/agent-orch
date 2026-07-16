@@ -30,7 +30,22 @@ function appendLimited(stream, chunk, state, maxBytes) {
   if (state.bytes > maxBytes) state.truncated = true;
 }
 
-export async function runProcess({ command, args = [], cwd, timeoutSeconds = 600, logDir, logPrefix = "process", maxLogBytes = 4 * 1024 * 1024, env, shell = false, signal }) {
+export async function runProcess({
+  command,
+  args = [],
+  cwd,
+  timeoutSeconds = 600,
+  logDir,
+  logPrefix = "process",
+  maxLogBytes = 4 * 1024 * 1024,
+  env,
+  shell = false,
+  signal,
+  onSpawn,
+  onStdoutChunk,
+  onStderrChunk,
+  abortOnOutput,
+}) {
   await fsp.mkdir(logDir, { recursive: true });
   const stdoutPath = path.join(logDir, `${logPrefix}.stdout.log`);
   const stderrPath = path.join(logDir, `${logPrefix}.stderr.log`);
@@ -42,6 +57,7 @@ export async function runProcess({ command, args = [], cwd, timeoutSeconds = 600
   let child;
   let timedOut = false;
   let cancelled = false;
+  let abortedByOutput = null;
 
   const result = await new Promise((resolve, reject) => {
     child = spawn(command, args, {
@@ -52,6 +68,7 @@ export async function runProcess({ command, args = [], cwd, timeoutSeconds = 600
       shell,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    Promise.resolve(onSpawn?.({ pid: child.pid, command, args, cwd })).catch(() => {});
     const timer = setTimeout(async () => {
       timedOut = true;
       await killTree(child);
@@ -67,8 +84,27 @@ export async function runProcess({ command, args = [], cwd, timeoutSeconds = 600
       else signal.addEventListener("abort", abort, { once: true });
     }
 
-    child.stdout.on("data", (chunk) => appendLimited(stdoutStream, chunk, stdoutState, maxLogBytes));
-    child.stderr.on("data", (chunk) => appendLimited(stderrStream, chunk, stderrState, maxLogBytes));
+    const handleChunk = (streamName, chunk) => {
+      if (streamName === "stdout") {
+        appendLimited(stdoutStream, chunk, stdoutState, maxLogBytes);
+        Promise.resolve(onStdoutChunk?.(chunk)).catch(() => {});
+      } else {
+        appendLimited(stderrStream, chunk, stderrState, maxLogBytes);
+        Promise.resolve(onStderrChunk?.(chunk)).catch(() => {});
+      }
+      if (!abortedByOutput && abortOnOutput) {
+        const reason = abortOnOutput({
+          stream: streamName,
+          text: Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk),
+        });
+        if (reason) {
+          abortedByOutput = typeof reason === "string" ? reason : "process output matched abort policy";
+          killTree(child).catch(() => {});
+        }
+      }
+    };
+    child.stdout.on("data", (chunk) => handleChunk("stdout", chunk));
+    child.stderr.on("data", (chunk) => handleChunk("stderr", chunk));
     child.once("error", (error) => {
       clearTimeout(timer);
       reject(error);
@@ -90,6 +126,8 @@ export async function runProcess({ command, args = [], cwd, timeoutSeconds = 600
     signal: result.signal,
     timed_out: timedOut,
     cancelled,
+    aborted_by_output: abortedByOutput,
+    pid: child?.pid || null,
     duration_ms: Date.now() - startedAt,
     stdout: Buffer.concat(stdoutState.chunks).toString("utf8"),
     stderr: Buffer.concat(stderrState.chunks).toString("utf8"),
@@ -98,6 +136,24 @@ export async function runProcess({ command, args = [], cwd, timeoutSeconds = 600
     stdout_truncated: stdoutState.truncated,
     stderr_truncated: stderrState.truncated,
   };
+}
+
+export function processExists(pid) {
+  const value = Number(pid);
+  if (!Number.isInteger(value) || value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+export async function terminateProcessTree(pid) {
+  const value = Number(pid);
+  if (!Number.isInteger(value) || value <= 0) return false;
+  await killTree({ pid: value });
+  return true;
 }
 
 export async function commandExists(command) {

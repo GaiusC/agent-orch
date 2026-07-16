@@ -58,6 +58,12 @@ const SAFE_DIAGNOSTIC_TOOLS = [
 // Codex must NOT self-invoke via codex-exec / codex-continue.
 // MCP maintenance (mcp status|install|repair|remove) is CLI-only.
 const CODEX_TOOLS = [
+  "stage-plan",
+  "stage-work",
+  "stage-work-continue",
+  "stage-review",
+  "stage-accept",
+  "wait-for-job",
   "cc-exec",
   "cc-continue",
   "agy-exec",
@@ -79,6 +85,12 @@ const CODEX_TOOLS = [
 // never becomes an executor itself: cc-exec/agy-exec start external workers.
 // MCP maintenance remains CLI-only.
 const CC_DESKTOP_TOOLS = [
+  "stage-plan",
+  "stage-work",
+  "stage-work-continue",
+  "stage-review",
+  "stage-accept",
+  "wait-for-job",
   "health",
   "codex-exec",
   "codex-continue",
@@ -102,6 +114,7 @@ const CC_DESKTOP_TOOLS = [
 // MCP maintenance is CLI-only.
 const TERMINAL_TOOLS = [
   "health",
+  "wait-for-job",
   "status",
   "result",
   "cleanup",

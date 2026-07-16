@@ -1,135 +1,124 @@
 ---
 name: orchestrate-agents
-description: Use the Agent Orch MCP-driven workflow to plan and supervise multi-agent software work with CC Codex and AGY providers. Use for project initialization, partially built projects, bug fixes, refactors, test repair, UI verification, long-running engineering tasks, and Codex-coordinated multi-agent orchestration. Worker and reviewer operations are only available through MCP tools.
+description: Use the Agent Orch stage-first MCP workflow to plan and supervise software work with CC, AGY, and Codex Worker providers. Use for project initialization, partially built projects, bug fixes, refactors, test repair, independent review, long-running tasks, and durable continuation.
 ---
 
 # Orchestrate Agents
 
-Use Agent Orch as a platform-neutral MCP-driven orchestration runtime. Worker implementation, reviewer investigation, verification, and job control are only available through MCP tools. The CLI handles project lifecycle (init, resume, health), dashboard, and MCP configuration maintenance (mcp status, mcp install, mcp repair, mcp remove).
+Use Agent Orch as a Codex-standard, stage-first plugin. The CLI manages project lifecycle; all planning persistence, provider work, formal review, acceptance, and job control occur through MCP.
 
-In a Codex-hosted session, keep the current Codex session responsible for planning, scope, routing, acceptance, and user communication. Do not invoke Codex CLI from inside Codex for planner or accepter work; those roles are in-session. Codex is the orchestrator/accepter, not the implementation worker: do not edit project code, tests, schemas, migrations, build files, or deployment files directly while this skill is in use unless the user explicitly cancels Agent Orch for that task.
+When Codex is the host, keep planning and acceptance in the current Codex task. Do not invoke Codex CLI as an external planner/accepter. Codex Worker is a distinct work-stage provider and may edit only inside its isolated worktree.
 
-Read [role-boundaries-and-workflow.md](references/role-boundaries-and-workflow.md) before planning substantial work, when the user asks about Agent Orch policy, or when role ownership is ambiguous.
+Read [role-boundaries-and-workflow.md](references/role-boundaries-and-workflow.md) when ownership or acceptance responsibility is unclear.
 
-## Prepare the project
+## Require an MCP-capable host model
 
-1. Read applicable `AGENTS.md`, `CLAUDE.md`, and project rules.
-2. Resume project state before deciding what to do:
+Before using the stage workflow, require a Codex host model that exposes local MCP tools. `gpt-5.6-terra` is the default and has been verified with Agent Orch. `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, and `gpt-5.4-mini` are also verified.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
-```
+Codex `0.144.4` does not expose local MCP tools to `gpt-5.6-sol`. If `agent_orch` is enabled but `health` or `stage-*` is unavailable, do not reinstall repeatedly and do not replace the MCP call with a shell client. Switch to `gpt-5.6-terra`, start a new Codex task, and retry the MCP call.
 
-3. If `.agent-orchestrator/config.json` is missing, initialize the project:
+## Prepare
 
-```powershell
-powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 init -ProjectDir <project>
-```
+1. Read project `AGENTS.md`, `CLAUDE.md`, and local rules.
+2. Run:
 
-4. For a partially built project, add `-ExistingProject`.
-5. Ensure the project continuity docs exist: `.agent-orchestrator/PROJECT.md`, `.agent-orchestrator/TODO.md`, `.agent-orchestrator/HANDOFF.md`, plus generated state files `.agent-orchestrator/current-state.json` and `.agent-orchestrator/handoff.generated.md`.
-6. For a new project or early project framing, use the installed `grill-me` skill before launching implementation workers when the goal, users, scope, architecture, or definition of done is still fluid. Record the resulting decisions in `PROJECT.md`, convert the work into contracts in `TODO.md`, and initialize `HANDOFF.md` with the current state.
-7. Ensure `trusted` is true only after reviewing the repository config.
-8. Ensure `verification.commands` covers the requested outcome.
-9. For CC Desktop hosts, run `agent-orch mcp install` to enable the MCP server. Codex hosts use MCP tools directly (MCP is auto-configured).
-10. Read [project-configuration.md](references/project-configuration.md) when creating or changing config.
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
+   ```
 
-## Host and provider switching
+3. If uninitialized, run `init` first.
+4. Review `.agent-orchestrator/config.json`; require `version: 2`, `trusted: true`, `mcp.enabled: true`, and an MCP-capable Codex Plan route.
+5. Confirm continuity documents and `verification.commands`.
+6. Treat `.agent-orchestrator/runtime-env.json` as the durable provider environment snapshot. If AGY requests OAuth, resume from the shell whose proxy/runtime environment makes `agy --print` work.
 
-Agent Orch must be resumed with the current host before routing work. Use `-HostProvider codex` for Codex Desktop/CLI, `-HostProvider cc_desktop` or `claude_desktop` for Claude-hosted control, and `-HostProvider terminal` for shell-driven control.
+## Use the stage contract
 
-Each host has a specific set of MCP tools it is permitted to use via the shared policy module:
+The default MCP workflow is:
 
-- **Codex**: planner-plan, cc-exec, cc-continue, agy-exec, agy-continue, auto, reviewer-investigate, reviewer-verify, accepter-accept, status, result, cancel, apply, cleanup, health. Codex uses planner-plan only to persist the contract it produced in the current session; this does not invoke an external planner. Codex must NOT self-invoke via codex-exec/codex-continue.
-- **CC Desktop**: health, codex-exec, codex-continue, planner-plan, status, result, cleanup, cancel. CC Desktop must NOT launch workers, reviewers, auto, or apply.
-- **Terminal**: health, status, result, cleanup, cancel (minimum maintenance set).
+1. `stage-plan`
+2. `stage-work`
+3. `wait-for-job`, `status`, and `result`
+4. `stage-work-continue` when focused repair is needed
+5. `stage-review` when the contract requires independent evidence
+6. `stage-accept`
+7. `apply`
+8. `cleanup`
 
-For platform or provider changes, inspect and update `.agent-orchestrator/config.json` explicitly:
+Do not route by calling provider-specific wrappers. They are hidden by default and exist only for explicitly enabled diagnostics.
 
-- `host.provider` and `host.in_session_roles`: which platform is currently coordinating and which roles it performs in-session.
-- `mcp.enabled`: single project-level gate for MCP tool access. Set to true to enable MCP tools; only health is available when disabled.
-- `providers.codex`, `providers.cc`, and `providers.agy`: which provider can act as planner, executor, reviewer, accepter, or coordinator.
-- `roles.primary_writer`, `roles.specialist`, and `roles.duplicate_implementation`: implementation ownership and duplicate-work policy.
-- `routing.auto`: automatic executor routing policy.
-- `models.cc`, `models.agy`, and `models.agy_write`: provider-specific model names.
+### Plan
 
-When the host is Codex, do not invoke Codex CLI for planner/accepter work; planning and acceptance stay in the current session. When the host is not Codex, only invoke an external Codex planner/accepter if `providers.codex.external_invocation` permits it for that host and the exact Codex CLI model/reasoning settings have been verified.
+Call `stage-plan` with a stable `task_id`, the current Planner contract, and a stable identifier for the current Codex planning/acceptance task. The runtime persists an immutable Plan execution identity containing provider, model, invocation mode, session, contract id, and contract digest.
 
-## Plan before delegating
+Contracts must define narrow executor subtasks with:
 
-Start with a Codex-owned plan. For non-trivial work, split the goal into small, durable contracts before launching workers. Each contract should be independently reviewable, have narrow writable paths, and produce evidence that can survive session rollover.
-
-Before delegating substantial work, read `.agent-orchestrator/current-state.json`, `.agent-orchestrator/handoff.generated.md`, `.agent-orchestrator/PROJECT.md`, `.agent-orchestrator/TODO.md`, and `.agent-orchestrator/HANDOFF.md`. Treat generated state as the machine fact source and Markdown docs as human context.
-
-Create one contract per work unit with:
-
-- stable `task_id`;
-- concrete goal and approved plan;
+- `subtask_id`;
+- objective and complexity;
+- dependencies;
 - writable and forbidden paths;
-- public API, dependency, data, and security boundaries;
-- acceptance commands;
-- expected reviewer gate, when verification needs independent evidence;
-- complexity and optional model override.
+- deterministic tests;
+- acceptance criteria;
+- reviewer tasks where independent evidence is required.
 
-Make architecture, dependency, schema, security, and scope decisions in Codex. Let the implementation worker handle code edits, tests, mechanical debugging, and local implementation choices inside the contract. Codex may read files, inspect diffs, run deterministic verification, and write orchestration or handoff documentation, but must not become the project patch author.
+The contract must not select a provider or model. Stage routing belongs to project configuration.
 
-## Route work with MCP tools
+### Work
 
-Worker implementation, reviewer, and job-control operations are ONLY available through MCP tools — the CLI no longer supports these commands. Use the MCP tools directly from your host:
+Call `stage-work` with `task_id` and `subtask_id`. The runtime resolves `stages.work.routes` and records the complete route chain.
 
-### MCP tool reference
+Fallback is allowed only for classified retryable runtime failures. Authentication, OAuth, permission, sandbox, read-only, forbidden-path, and out-of-scope failures must be surfaced rather than hidden by rerouting.
 
-| Tool | Hosts | Description |
-| --- | --- | --- |
-| `health` | all | Check CLI availability and project trust/mcp configuration |
-| `cc-exec` | codex | Delegate implementation to Claude Code in isolated worktree |
-| `cc-continue` | codex | Continue an existing CC session with repair feedback |
-| `agy-exec` | codex | Delegate implementation to AGY as primary writer |
-| `agy-continue` | codex | Continue an existing AGY write session |
-| `auto` | codex | Auto-route implementation (CC-first with AGY escalation) |
-| `reviewer-investigate` | codex | Read-only specialist investigation via AGY |
-| `reviewer-verify` | codex | Read-only review/verification via AGY |
-| `codex-exec` | cc_desktop | External Codex planner/accepter (NOT for codex hosts) |
-| `codex-continue` | cc_desktop | Continue external Codex session |
-| `planner-plan` | codex, cc_desktop | Persist the fixed Planner contract; for a Codex host this records the current in-session plan without invoking Codex CLI |
-| `status` | all* | Compact job status, including `progress` with at most two newest assistant-only messages (no tool calls, no raw logs). Use `result` for full evidence. |
-| `result` | all* | Job result/evidence |
-| `cancel` | all* | Cancel running job |
-| `apply` | codex | Apply accepted patch to project |
-| `cleanup` | all* | Remove worktree and clear session |
+Provider write guarantees:
 
-*Subject to host allow-list and trust gate.
+- CC: isolated worktree, non-interactive `bypassPermissions`;
+- AGY write: isolated worktree, explicit non-interactive write permission;
+- Codex Worker: isolated worktree, `workspace-write`, approval policy `never`; on Windows, a recognized sandbox-helper startup failure may continue in the same thread using Codex's externally-isolated bypass mode, with the reason recorded in evidence.
 
-### PowerShell usage
+### Continue
 
-- Dashboard operations are CLI-driven:
-  `powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 dashboard -ProjectDir <project>`
-  `powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 dashboard-close -ProjectDir <project>`
-- MCP configuration maintenance:
-  `powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 mcp status -ProjectDir <project>`
-  `powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 mcp install -ProjectDir <project>`
-  `powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 mcp repair -ProjectDir <project>`
-  `powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 mcp remove -ProjectDir <project>`
+Use `stage-work-continue` only for the same task and prior work job. It must reuse the exact provider, model, session, and worktree. Never use it to change provider or restart an unrelated implementation.
 
-Do not ask CC and AGY to implement the same solution. AGY write is a primary writer, not a duplicate. Use `reviewer-investigate` and `reviewer-verify` as real workflow gates for high-risk, user-facing, remote-runtime, database, authentication, migration, security, or ambiguous behavior changes. If the reviewer provider is unavailable, report the missing gate and either reduce scope to low-risk deterministic checks or ask the user before accepting higher-risk work.
+If status reports `external_process_alive`, do not continue yet. If it reports `interrupted`, inspect preserved logs, session, PID, and worktree. Continue only when the exact session is present; otherwise fail closed and request an explicitly approved new work stage.
 
-Read [routing-and-sessions.md](references/routing-and-sessions.md) for session rollover, model escalation, CC-first auto routing, CC-to-AGY escalation on verify failure, and quota fallback.
+### Review
 
-## Accept or reject
+Use `stage-review` for the persisted `review_id`. Reviewer evidence must be read-only, patch-bound, contract-bound, and newer than the implementation it evaluates.
 
-Treat worker prose as a claim, not proof. Verify:
+AGY review may run headless verification commands, but Agent Orch enforces read-only behavior by comparing the implementation patch digest before and after review. Formal review rejects conversation-store fallback text and requires `VERDICT: PASS`. An OAuth URL is a provider availability failure, not review evidence.
 
-- changed files match approved scope;
-- forbidden paths are untouched;
-- diff implements the approved plan without hidden redesign;
-- deterministic commands passed;
-- required reviewer gate passed or was explicitly waived;
-- review-gate status is visible in the dashboard: apply requires reviewer evidence or an explicit `review_waiver` for implementation jobs;
-- unresolved risks are acceptable;
-- evidence corresponds to the current Git baseline.
+### Accept
 
-If rejected, send delta feedback through the same `task_id` continuation tool; do not start a duplicate implementation. If accepted, apply the patch with `apply`, inspect the applied diff, then run `cleanup`.
+Treat worker and reviewer prose as claims. Inspect the diff and deterministic evidence before calling `stage-accept`.
 
-After every accepted contract or abandoned job, update `.agent-orchestrator/HANDOFF.md` and `.agent-orchestrator/TODO.md` with completed work, remaining contracts, job IDs, evidence paths, failed or waived gates, and the next recommended action.
+`stage-accept` must use the same Plan provider, model, invocation, and session identity recorded by `stage-plan`. It calls the formal acceptance kernel; it must not create a shortcut artifact or silently fall back.
 
-Report the plan, delegated work, verification evidence, deviations, remaining risks, selected models, route evidence (including any quota fallback), generated handoff state, and session continuity to the user.
+After acceptance, call `apply`, inspect the applied diff, run final deterministic checks, then call `cleanup`.
+
+## Durable state
+
+Use explicit `project_dir` with job-control tools, especially after a task or MCP restart. Durable state includes:
+
+- jobs and evidence under `.agent-orchestrator/runs/`;
+- provider sessions under `.agent-orchestrator/state/sessions.json`;
+- StageRuns under `.agent-orchestrator/stages/`;
+- Plan execution identities under `.agent-orchestrator/plans/`;
+- `events.jsonl`, `current-state.json`, and generated handoff;
+- allowlisted provider environment in `runtime-env.json`.
+
+An absent in-memory promise is not proof that a worker is dead. Status checks the persisted PID before classifying the run.
+
+## Plugin updates
+
+Develop in the source checkout, never in `.codex/plugins/cache`.
+
+Before releasing:
+
+1. run `npm test`;
+2. validate the plugin manifest and skill;
+3. bump the plugin cachebuster/version;
+4. reinstall `agent-orch@personal`;
+5. open a new Codex task;
+6. use an MCP-capable host model and verify real calls to `health` and `stage-*`;
+7. run real CC, AGY, and Codex Worker E2E tasks and an independent reviewer gate.
+
+Existing Codex tasks do not automatically reload a changed plugin tool catalog.

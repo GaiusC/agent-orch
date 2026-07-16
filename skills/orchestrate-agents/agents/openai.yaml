@@ -1,7 +1,14 @@
 interface:
   display_name: "Agent Orch"
-  short_description: "Delegate code to CC and AGY with auto routing"
-  default_prompt: "Use $orchestrate-agents to plan this project, delegate implementation via the auto router, and verify the result through the Agent Orch CLI."
+  short_description: "Stage-first orchestration with CC, AGY, and Codex Worker"
+  default_prompt: "Use $orchestrate-agents with an MCP-capable Codex host model to persist a plan with stage-plan, delegate one contract with stage-work, obtain review evidence, and accept through the formal stage-accept gate."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "agent_orch"
+      description: "Stage-first CC, AGY, and Codex Worker orchestration server"
+      transport: "stdio"
 
 policy:
   allow_implicit_invocation: true
