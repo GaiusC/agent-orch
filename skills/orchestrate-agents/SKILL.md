@@ -13,9 +13,7 @@ Read [role-boundaries-and-workflow.md](references/role-boundaries-and-workflow.m
 
 ## Require an MCP-capable host model
 
-Before using the stage workflow, require a Codex host model that exposes local MCP tools. `gpt-5.6-terra` is the default and has been verified with Agent Orch. `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, and `gpt-5.4-mini` are also verified.
-
-Codex `0.144.4` does not expose local MCP tools to `gpt-5.6-sol`. If `agent_orch` is enabled but `health` or `stage-*` is unavailable, do not reinstall repeatedly and do not replace the MCP call with a shell client. Switch to `gpt-5.6-terra`, start a new Codex task, and retry the MCP call.
+Before using the stage workflow, require a Codex host model that exposes local MCP tools. `gpt-5.6-terra` is the default and has been verified with Agent Orch. `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.6-sol` are also verified.
 
 ## Prepare
 

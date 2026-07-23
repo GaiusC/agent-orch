@@ -33,4 +33,4 @@ Provider CLI settings:
 
 `resume` writes `.agent-orchestrator/runtime-env.json`. Explicit `cli.agy_env` values override the captured environment.
 
-Version 1 configuration is migrated to v2. Known obsolete AGY aliases and the known MCP-incompatible Codex Planner default are translated; unknown custom model names are retained.
+Version 1 configuration is migrated to v2. Known obsolete AGY aliases are translated; unknown custom model names are retained.
