@@ -1,6 +1,6 @@
 {
   "name": "agent-orch",
-  "version": "0.4.0+codex.20260716155646",
+  "version": "0.4.0+codex.20260716161736",
   "description": "Stage-first Codex orchestration with durable CC, AGY, and Codex Worker execution, independent review, acceptance, and continuation.",
   "author": {
     "name": "Jieli Chen"

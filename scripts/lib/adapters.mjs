@@ -746,7 +746,7 @@ function codexWorkerPrompt({ goal, plan, acceptance, readPaths, writablePaths, f
   ].filter(Boolean).join("\n\n");
 }
 
-export function buildCodexWorkerArgs({ prompt, sessionId, resume = false, model, workspace, bypassSandbox = false }) {
+export function buildCodexWorkerArgs({ prompt, sessionId, resume = false, model, workspace, bypassSandbox = false, reasoningEffort = null }) {
   if (resume) {
     const args = [
       "exec", "resume",
@@ -754,6 +754,7 @@ export function buildCodexWorkerArgs({ prompt, sessionId, resume = false, model,
     ];
     if (bypassSandbox) args.push("--dangerously-bypass-approvals-and-sandbox");
     else args.push("-c", 'approval_policy="never"', "-c", 'sandbox_mode="workspace-write"');
+    if (reasoningEffort) args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
     args.push("--skip-git-repo-check");
     if (model) args.push("--model", model);
     args.push(sessionId, prompt);
@@ -765,6 +766,7 @@ export function buildCodexWorkerArgs({ prompt, sessionId, resume = false, model,
   ];
   if (bypassSandbox) args.push("--dangerously-bypass-approvals-and-sandbox");
   else args.push("--sandbox", "workspace-write", "-c", 'approval_policy="never"');
+  if (reasoningEffort) args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
   args.push("--skip-git-repo-check", "-C", workspace);
   if (model) args.push("--model", model);
   args.push(prompt);
@@ -812,12 +814,14 @@ export async function runCodexWorker({
   processHooks = {},
 }) {
   const prompt = codexWorkerPrompt({ goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, repairContext });
+  const reasoningEffort = ["gpt-5.6-terra", "gpt-5.6-sol"].includes(model) ? "medium" : null;
   const initialArgs = buildCodexWorkerArgs({
     prompt,
     sessionId: taskSession?.session_id || null,
     resume: Boolean(taskSession?.session_id),
     model,
     workspace,
+    reasoningEffort,
   });
   const execute = async (args, logPrefix) => {
     args.unshift(...(config.cli.codex_prefix_args || []));
@@ -869,6 +873,7 @@ export async function runCodexWorker({
       resume: true,
       model,
       workspace,
+      reasoningEffort,
       bypassSandbox: true,
     });
     processResult = await execute(fallbackArgs, `codex-worker-round-${round}-sandbox-fallback`);

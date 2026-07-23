@@ -131,6 +131,20 @@ test("Codex Worker continuation uses cwd filtering and writable sandbox config",
   assert.equal(args.includes("-C"), false, "codex exec resume does not support -C; cwd is supplied to spawn");
 });
 
+test("Codex Worker supports explicit medium reasoning for Terra and Sol routes", () => {
+  for (const model of ["gpt-5.6-terra", "gpt-5.6-sol"]) {
+    const args = buildCodexWorkerArgs({
+      prompt: "implement",
+      sessionId: null,
+      resume: false,
+      model,
+      workspace: "C:\\repo",
+      reasoningEffort: "medium",
+    });
+    assert.ok(args.includes('model_reasoning_effort="medium"'), `${model} must use medium reasoning`);
+  }
+});
+
 test("Codex Worker Windows sandbox failures are classified for same-session bypass", () => {
   assert.equal(classifyCodexWindowsSandboxFailure("codex-windows-sandbox-setup.exe: Access denied (os error 5)"), true);
   assert.equal(classifyCodexWindowsSandboxFailure("normal task failure"), false);
