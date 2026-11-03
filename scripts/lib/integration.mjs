@@ -8,6 +8,7 @@ import { captureChanges } from './workspace.mjs';
 import { runVerification } from './verify.mjs';
 import crypto from 'node:crypto';
 import { prepareProgressChannel, reportProgress } from './notifications.mjs';
+import { recordGitOperation } from './git-events.mjs';
 
 export async function startIntegration(orchestrator, args) {
   return repositoryLock(path.resolve(args.project_dir), () => startIntegrationUnlocked(orchestrator, args));
@@ -40,6 +41,7 @@ async function startIntegrationUnlocked(orchestrator, args) {
 
 async function executeIntegration(orchestrator, job, config, signal) {
   const store = orchestrator.store, directory = store.jobDir(job.id);
+  const operation = (kind,fact={}) => recordGitOperation({projectDir:job.project_dir,jobDir:directory,store,job,kind,...fact});
   let current = await store.getJob(job.id);
   const inputs = [];
   for (const id of job.integration_job_ids) {
@@ -54,11 +56,13 @@ async function executeIntegration(orchestrator, job, config, signal) {
     const staged = await scopedTree(source.workspace.path, evidence.changes.changed_files, path.join(directory, 'inputs', source.id));
     try {
       const previous = current.integration_inputs?.find(input => input.id === id);
-      const saved = previous?.commit || await git(source.workspace.path, ['commit-tree', staged.tree, '-p', before.head, '-m', `Agent Orch integration input ${source.id}`]);
-      if (await git(source.workspace.path, ['rev-parse', `${saved}^{tree}`]) !== staged.tree) throw new Error('Integration source tree differs from the saved input');
       const reference = `refs/agent-orch/results/${source.id}`;
+      const recordedCommit = await git(job.project_dir,['rev-parse','--verify',reference+'^{commit}'],{allowFailure:true});
+      const saved = previous?.commit || recordedCommit || await git(source.workspace.path, ['commit-tree', staged.tree, '-p', before.head, '-m', `Agent Orch integration input ${source.id}`]);
+      if (await git(source.workspace.path, ['rev-parse', `${saved}^{tree}`]) !== staged.tree) throw new Error('Integration source tree differs from the saved input');
       await git(job.project_dir, ['update-ref', reference, saved]);
       inputs.push({ id, commit: saved, reference, patch_digest: evidence.changes.patch_digest });
+      await operation('integration.input',{key:id,source_job_id:id,commit_id:saved,after_head:saved,before_head:before.head,ref:reference,workspace:source.workspace.path,patch_digest:evidence.changes.patch_digest,recovered:Boolean(previous || recordedCommit)});
     } finally { await removeIndex(staged.index); }
   }
   if (!current.workspace) {
@@ -74,16 +78,25 @@ async function executeIntegration(orchestrator, job, config, signal) {
     const workspace = current.workspace.path;
     for (let n = current.integration_position || 0; n < inputs.length; n++) {
       if (signal.aborted) throw new Error('Integration cancelled');
+      const beforeHead = await git(workspace,['rev-parse','HEAD']);
       const mergeHead = await git(workspace, ['rev-parse', '--verify', 'MERGE_HEAD'], { allowFailure: true });
       if (mergeHead) {
         if (mergeHead !== inputs[n].commit) throw new Error('Integration MERGE_HEAD changed unexpectedly');
-        if (await git(workspace, ['ls-files', '--unmerged'])) throw new Error('INTEGRATION_CONFLICT: resolve the existing integration worktree, stage resolutions, then resume this job');
+        if (await git(workspace, ['ls-files', '--unmerged'])) {
+          await operation('integration.conflict',{key:crypto.randomUUID(),status:'failed',workspace,source_job_id:inputs[n].id,before_head:beforeHead,input_commit:inputs[n].commit});
+          throw new Error('INTEGRATION_CONFLICT: resolve the existing integration worktree, stage resolutions, then resume this job');
+        }
         await git(workspace, ['commit', '-m', `Integrate ${inputs[n].id}`]);
       } else {
         const merged = await git(workspace, ['merge', '--no-ff', '--no-commit', inputs[n].commit], { allowFailure: true });
-        if (merged === null) throw new Error('INTEGRATION_CONFLICT: inspect preserved integration workspace; source workspaces are unchanged');
+        if (merged === null) {
+          await operation('integration.conflict',{key:crypto.randomUUID(),status:'failed',workspace,source_job_id:inputs[n].id,before_head:beforeHead,input_commit:inputs[n].commit});
+          throw new Error('INTEGRATION_CONFLICT: inspect preserved integration workspace; source workspaces are unchanged');
+        }
         if (await git(workspace, ['rev-parse', '--verify', 'MERGE_HEAD'], { allowFailure: true })) await git(workspace, ['commit', '-m', `Integrate ${inputs[n].id}`]);
       }
+      const afterHead = await git(workspace,['rev-parse','HEAD']);
+      await operation('integration.merged',{key:inputs[n].id,workspace,source_job_id:inputs[n].id,before_head:beforeHead,after_head:afterHead,input_commit:inputs[n].commit,resolved_conflict:Boolean(mergeHead),recovered:afterHead===beforeHead});
       await store.updateJob(job.id, { integration_position: n + 1 });
     }
     let combined = await git(workspace, ['rev-parse', 'HEAD']);
@@ -94,6 +107,7 @@ async function executeIntegration(orchestrator, job, config, signal) {
       finally { await removeIndex(staged.index); }
     }
     await git(job.project_dir, ['update-ref', `refs/agent-orch/integrations/${job.id}`, combined]);
+    await operation('integration.checkpoint',{key:combined,workspace,commit_id:combined,after_head:combined,before_head:current.workspace.base_commit,ref:`refs/agent-orch/integrations/${job.id}`});
     // Keep the reviewed deliverable as a patch against the integration base.
     // This reset is confined to the plugin-owned integration index and HEAD.
     await git(workspace, ['reset', '--mixed', current.workspace.base_commit]);

@@ -1,10 +1,18 @@
 param(
     [string]$ProjectDir = (Get-Location).Path,
     [int]$PreferredPort = 15788,
-    [switch]$Close
+    [switch]$Close,
+    [Alias('Home')][switch]$ProjectHome,
+    [switch]$NoBrowser
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-DashboardUrl {
+    param([int]$Port)
+    if ($ProjectHome) { return "http://127.0.0.1:$Port/" }
+    return "http://127.0.0.1:$Port/?project=$([Uri]::EscapeDataString($resolvedProjectFull))"
+}
 
 function Resolve-OrchestratorDir {
     param([string]$StartDir)
@@ -87,12 +95,12 @@ if ($Close -and -not $targetOrchestrator) {
     Write-Output "stopped=$($closed.ToString().ToLowerInvariant())"
     exit 0
 }
-if (-not $targetOrchestrator) {
+if (-not $targetOrchestrator -and -not $ProjectHome) {
     throw ".agent-orchestrator not found from project dir: $resolvedProject"
 }
 
-$target = [System.IO.Path]::GetFullPath($targetOrchestrator).TrimEnd('\')
-$requiredServerVersion = "audit-orch-project-bound-v3"
+$target = if ($targetOrchestrator) { [System.IO.Path]::GetFullPath($targetOrchestrator).TrimEnd('\') } else { $resolvedProjectFull }
+$requiredServerVersion = "audit-orch-workspace-v6"
 $port = $null
 
 if ($Close) {
@@ -118,12 +126,18 @@ if ($Close) {
 
 for ($candidate = $PreferredPort; $candidate -lt $PreferredPort + 50; $candidate++) {
     $status = Get-DashboardStatus -Port $candidate
+    if ($ProjectHome -and $status -and $status.server_version -eq $requiredServerVersion -and $status.server_path -ieq $serverPath) {
+        if (-not $NoBrowser) { Start-Process (Get-DashboardUrl -Port $candidate) }
+        Write-Output "dashboard_url=$(Get-DashboardUrl -Port $candidate)"
+        Write-Output "orchestrator_dir=$($status.orchestrator_dir)"
+        exit 0
+    }
     if ($status -and $status.orchestrator_dir) {
         $current = [System.IO.Path]::GetFullPath([string]$status.orchestrator_dir).TrimEnd('\')
         if ($current -ieq $target -and $status.server_version -eq $requiredServerVersion) {
             $port = $candidate
-            Start-Process "http://127.0.0.1:$port"
-            Write-Output "dashboard_url=http://127.0.0.1:$port"
+            if (-not $NoBrowser) { Start-Process (Get-DashboardUrl -Port $port) }
+            Write-Output "dashboard_url=$(Get-DashboardUrl -Port $port)"
             Write-Output "orchestrator_dir=$targetOrchestrator"
             exit 0
         }
@@ -165,8 +179,8 @@ if (Test-PortAvailable -Port $port) {
     if ($status -and $status.orchestrator_dir) {
         $current = [System.IO.Path]::GetFullPath([string]$status.orchestrator_dir).TrimEnd('\')
         if ($current -ieq $target) {
-            Start-Process "http://127.0.0.1:$port"
-            Write-Output "dashboard_url=http://127.0.0.1:$port"
+            if (-not $NoBrowser) { Start-Process (Get-DashboardUrl -Port $port) }
+            Write-Output "dashboard_url=$(Get-DashboardUrl -Port $port)"
             Write-Output "orchestrator_dir=$targetOrchestrator"
             exit 0
         }
@@ -174,7 +188,7 @@ if (Test-PortAvailable -Port $port) {
     throw "Port $port is occupied by a dashboard or service for another project."
 }
 
-Start-Process "http://127.0.0.1:$port"
-Write-Output "dashboard_url=http://127.0.0.1:$port"
+if (-not $NoBrowser) { Start-Process (Get-DashboardUrl -Port $port) }
+Write-Output "dashboard_url=$(Get-DashboardUrl -Port $port)"
 Write-Output "orchestrator_dir=$($newStatus.orchestrator_dir)"
 exit 0

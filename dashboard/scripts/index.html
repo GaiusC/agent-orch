@@ -2507,6 +2507,10 @@
       if (el) el.textContent = value ?? '';
     }
 
+    function isWorkProvider(job) {
+      return ['cc', 'codex_worker', 'agy_write'].includes(job.provider);
+    }
+
     function updateJobDetailInPlace(data, modelStr, startStr, endStr, statusClass) {
       const container = document.getElementById('detailPane') || document.getElementById('dashboardView');
       const job = data.job || {};
@@ -2523,7 +2527,7 @@
       setFieldText(container, 'workspacePath', job.workspace?.path || '-');
       setFieldText(container, 'sessionId', job.session_id || '-');
       setFieldText(container, 'jobJsonPath', data.job_json_path || '-');
-      setFieldText(container, 'transcriptPath', job.provider === 'cc' ? (data.transcript_path || 'No transcript path found yet.') : (data.agy_transcript_path || 'No AGY transcript path found yet.'));
+      setFieldText(container, 'transcriptPath', isWorkProvider(job) ? (data.transcript_path || 'No transcript path found yet.') : (data.agy_transcript_path || 'No AGY transcript path found yet.'));
       setFieldText(container, 'transcriptReason', data.transcript_match_reason || '-');
 
       const statusEl = container.querySelector('[data-field="status"]');
@@ -2532,8 +2536,11 @@
         statusEl.style.cssText = 'font-size:0.8rem; padding: 4px 8px;';
       }
 
-      if (job.provider === 'cc') {
+      if (isWorkProvider(job)) {
         syncEventStream(data.transcript_events, 'conversation');
+        const report = container.querySelector('[data-field="workReport"]');
+        if (report) report.innerHTML = parseMarkdown(data.work_report || 'No execution summary has been recorded yet.');
+        setFieldText(container, 'rawMetadata', JSON.stringify({ job, evidence: data.evidence || null }, null, 2));
         setFieldText(container, 'debugLog', data.debug_log || 'No debug logs written yet.');
         setFieldText(container, 'stdoutLog', data.stdout_log || '');
         setFieldText(container, 'stderrLog', data.stderr_log || '');
@@ -2586,17 +2593,19 @@
       let tabHtml = '';
       let paneHtml = '';
 
-      if (job.provider === 'cc') {
+      if (isWorkProvider(job)) {
         tabHtml = `
-          <button class="tab-btn" data-tab="tab-conversation" onclick="switchTab('tab-conversation')">Conversation</button>
+          <button class="tab-btn" onclick="switchTab('tab-work-report')">Work Report</button>
+          <button class="tab-btn" data-tab="tab-conversation" onclick="switchTab('tab-conversation')">${job.provider === 'cc' ? 'Conversation' : 'Transcript'}</button>
           <button class="tab-btn" onclick="switchTab('tab-conclusion')">Conclusion</button>
           <button class="tab-btn" onclick="switchTab('tab-log')">Debug</button>
           <button class="tab-btn" onclick="switchTab('tab-stdio')">Stdout/Stderr</button>
           <button class="tab-btn" onclick="switchTab('tab-patch')">Patch</button>
           <button class="tab-btn" onclick="switchTab('tab-git')">Git Status (Worktree)</button>
-          <button class="tab-btn" onclick="switchTab('tab-raw')">Raw job.json</button>
+          <button class="tab-btn" onclick="switchTab('tab-raw')">Raw Metadata</button>
         `;
         paneHtml = `
+          <div class="tab-pane md-text" id="tab-work-report" data-field="workReport">${parseMarkdown(data.work_report || 'No execution summary has been recorded yet.')}</div>
           <div class="tab-pane" id="tab-conversation">
             <div class="content-box"><div class="content-box-title">Transcript Path</div><div class="content-box-body" data-field="transcriptPath" style="font-family:var(--font-mono);">${escapeHtml(data.transcript_path || 'No transcript path found yet.')}</div></div>
             <div class="content-box"><div class="content-box-title">Transcript Match</div><div class="content-box-body" data-field="transcriptReason">${escapeHtml(data.transcript_match_reason || '-')}</div></div>
@@ -2610,7 +2619,7 @@
           <div class="tab-pane" id="tab-stdio"><h3>stdout</h3><pre data-field="stdoutLog">${escapeHtml(data.stdout_log || '')}</pre><h3>stderr</h3><pre data-field="stderrLog">${escapeHtml(data.stderr_log || '')}</pre></div>
           <div class="tab-pane" id="tab-patch"><pre data-field="patchLog">${escapeHtml(data.patch || 'No changes.patch found yet.')}</pre></div>
           <div class="tab-pane" id="tab-git"><pre data-field="gitLog">${escapeHtml(data.git_status || 'Isolated worktree has no uncommitted changes.')}</pre></div>
-          <div class="tab-pane" id="tab-raw"><pre>${escapeHtml(JSON.stringify(job, null, 2))}</pre></div>
+          <div class="tab-pane" id="tab-raw"><pre data-field="rawMetadata">${escapeHtml(JSON.stringify({ job, evidence: data.evidence || null }, null, 2))}</pre></div>
         `;
       } else {
         const reportText = data.evidence ? data.evidence.result : 'AGY investigation evidence file not found.';
@@ -2685,7 +2694,7 @@
       container.dataset.jobId = String(job.id || '');
       container.dataset.provider = String(job.provider || '');
 
-      const defaultTab = job.provider === 'cc' ? 'tab-conversation' : 'tab-report';
+      const defaultTab = isWorkProvider(job) ? (job.provider === 'cc' ? 'tab-conversation' : 'tab-work-report') : 'tab-report';
       const tabToRestore = previousTab && document.getElementById(previousTab) ? previousTab : defaultTab;
       switchTab(tabToRestore, false);
       attachConversationAutofollow();

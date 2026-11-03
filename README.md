@@ -8,6 +8,13 @@ reviewed integration of parallel results. Existing uncommitted changes are
 preserved; dirty state is never a reason to automatically clone the repository.
 See [Git lifecycle](skills/orchestrate-agents/references/git-lifecycle.md).
 
+Version 0.7.1 includes the updated local Auditor: manual-refresh project and plan
+navigation, execution timelines, dependency graphs, Git history, and English /
+Chinese controls. Durable Git operation receipts link execution evidence to
+internal checkpoints and delivery commits. The server binds to loopback and
+validates Host/Origin. The previous inspector remains available at `/legacy`.
+See [Auditor documentation](dashboard/README.md).
+
 The plugin follows the Codex plugin layout:
 
 ```text
@@ -311,7 +318,7 @@ The suite covers config migration, Windows paths, MCP cwd behavior, `mcp.enabled
 
 ## Dashboard
 
-Agent Orch includes an inspection-oriented HTTP dashboard for reviewing project state, job history, contract DAGs, and live process status. The dashboard is a lightweight Python HTTP server (`dashboard/scripts/server.py`) launched by a PowerShell launcher (`dashboard/scripts/open-dashboard.ps1`).
+Agent Orch includes a manual-refresh Auditor workspace for plans, execution timelines, dependencies, and Git history. The dashboard is a lightweight Python HTTP server (`dashboard/scripts/server.py`) launched by a PowerShell launcher (`dashboard/scripts/open-dashboard.ps1`). The default UI uses `workspace.html`, `workspace.js`, `workspace.css` and `i18n.js`; the previous job inspector remains available at `/legacy` for compatibility.
 
 ### Launch and close
 
@@ -325,6 +332,17 @@ agent-orch dashboard-close -ProjectDir <project> -PreferredPort 15788
 
 The dashboard opens automatically in the default browser. Use the CLI from within the project directory.
 
+The header **EN / 中文** toggle switches the interface language and remembers it
+for the current host/port. Language changes preserve the current view and reuse
+the loaded snapshot. User content and original evidence are not translated.
+
+To create or update the desktop **Agent Orch Auditor** shortcut, run
+`dashboard/scripts/install-auditor-shortcut.ps1`. It backs up the old shortcut,
+preserves its icon, and points it to the current source launcher with `-ProjectHome`
+and preferred port `43188`, using a hidden PowerShell window. Run it again after
+moving the checkout or changing the launcher. See [Auditor documentation](dashboard/README.md)
+for exact commands, verification and shortcut recovery.
+
 ### Port behavior
 
 - The default starting port is `15788`. The launcher scans up to 50 ports upward from this base.
@@ -333,7 +351,8 @@ The dashboard opens automatically in the default browser. Use the CLI from withi
 
 ### Project selection
 
-The initial view shows **known projects** discovered from safe local sources:
+The root URL opens the project homepage; an explicit project/thread URL opens
+that workspace. Use the project button in the header to select **known projects** discovered from safe local sources:
 
 1. The server-bound project directory (always included).
 2. Codex Desktop thread `cwd` values from `~/.codex/state_5.sqlite`.
@@ -342,17 +361,19 @@ The initial view shows **known projects** discovered from safe local sources:
 5. Bounded scans of common workspace folders (`~/Documents/Codex`, `~/Documents/Hermes Build`, and sibling directories).
 6. Recent Agent Orch `job.json` files that reference distinct project directories.
 
-Projects with an `.agent-orchestrator` directory display an **Agent Orch** badge. Each project card shows job counts, running-job status, and available plans. You can manually add a project path or hide a discovered one; the reset button restores only hidden projects (manually added paths are preserved).
+The project picker also accepts an explicit local path. A project without `.agent-orchestrator` can still display its Git history when the server is started directly with `python dashboard/scripts/server.py --project-dir <path>`.
 
-Click a project card, or pass `?project=<path>` as a URL parameter, to open the per-project dashboard.
+Pass `?project=<path>` to open a particular project. `?thread=<local-chat-UUID>` resolves that exact chat's `cwd` from Codex's local read-only index, preserving worktree identity. Conflicting thread/project values and unknown chat IDs fail explicitly. Page selection never changes shared server globals. This binds a page to a chat; it does not detect the currently visible chat or guarantee automatic right-panel opening on application launch.
 
 ### Dashboard views
 
-**Contract DAG** — displays persisted Planner contracts as a grid of nodes with dependency edges. Each node shows the task identifier, state (planned, running, failed, applied, blocked, review_blocked, ready_for_acceptance), goal, and scoped read/write/forbidden paths. Switch between **DAG** and **Contracts** mode to show full contract metadata alongside the visualization. Click a node to select its latest job.
+**Plan history** — the sidebar presents plans by recorded creation time, with a compact node/line history, readable titles, and execution summaries. It reads all job records instead of truncating at 30, preserves empty manifests, retries and failures, and keeps unassociated historical stages in an explicit group. Contracts, subtasks, reviewer tasks, jobs and StageRuns retain their separate identities. Search/provider/status filters are removed from the default UI.
 
-**Sidebar job list** — the left sidebar groups jobs by plan (formal, ad-hoc, or legacy) and task. Filter by status (All / Running / Done / Failed) and provider (All / CC / AGY / Codex), or search by task or job ID. Click a job to load its detail view.
+**Execution view** — the main timeline has actual event times, per-unit lanes, work durations, continuation links and clickable stage/job records. Missing timestamps remain unknown. The dependency view draws directed SVG edges from declared subtask dependencies; dashed arrows denote reviewer targets. It never invents task dependencies from timestamps. Review PASS summaries require current contract and patch bindings, and old-contract executions cannot complete a new contract. Execution, acceptance and delivery states remain distinct.
 
-**Job detail pane** — a tabbed detail view with:
+**Git history** — the second sidebar mode shows branches, exact parent edges and commit subjects, strictly ordered by committer time before pagination. A dashed working-tree node connects to the actual HEAD and shows staged, unstaged and untracked counts. Clicking a commit opens its message and diff. Plan/commit navigation uses explicit `commit_id` or finalization receipts plus live Git-object/reachability checks; absence of a mapping is labeled **提交未关联**, not proof that no commit exists. No fetch, checkout, commit or index refresh is performed.
+
+**Job details** open on demand with execution metadata, sanitized Markdown reports, conversation/tool records, patch, stdout/stderr and evidence. Raw logs and IDs are collapsed by default. The compatibility inspector at `/legacy` retains its previous detailed tabs:
 
 | Tab | Content |
 | --- | --- |
@@ -364,7 +385,13 @@ Click a project card, or pass `?project=<path>` as a URL parameter, to open the 
 | Git Status | Current isolated-worktree state |
 | Raw job.json | Complete job metadata |
 
-**Process column** — the right-side panel lists active Claude, AGY, orchestrator, and dashboard processes discovered via `Win32_Process`. Collapse to a compact dot summary when not needed.
+Opening `/` without a project/thread restores the project homepage. Project cards support explicit directories, hiding, restoring, and existing `agentOrchAuditProjectPreferences` custom/hidden paths. In a project, **All projects** returns home and the project name opens the quick switcher. Project links retain their explicit context.
+
+Plan timelines include a separate Git lane and chronological Git operation records. Operations expose repository/worktree identity, before/after SHA, source execution, patch digest and durable evidence; Git commits link back to related plans. The sidebar distinguishes delivery commits from baselines and internal integration checkpoints. **Show internal checkpoints** is opt-in and includes `refs/agent-orch/*` without changing the repository. A worktree is not represented as a branch unless Git actually has that branch.
+
+The runtime writes immutable per-operation receipts under `runs/<job>/git-operations/` before projecting them to the existing `events.jsonl`. Stable operation IDs prevent duplicate successful events on retry and repair an interrupted projection. Conflicts/blocked attempts remain separate records. Existing jobs, integration evidence and finalization receipts are read as legacy facts without rewriting them; missing occurrence times and unknown ownership remain explicit. This records operations performed by Agent Orch, not arbitrary external Git commands.
+
+The new UI has no persistent process column or nested frames. At narrow panel widths, history and detail use a single-column navigation with a back action. It reads once on opening and thereafter only on explicit user actions (refresh, first Git load, branch selection, loading older commits, or opening details). Switching browser focus does not refresh the data.
 
 ### Durable data and conclusion behavior
 
@@ -376,7 +403,7 @@ Click a project card, or pass `?project=<path>` as a URL parameter, to open the 
 
 The dashboard is inspection-oriented: all GET endpoints read from disk and runtime caches without modifying orchestrator state. The one exception is the conclusion-generation endpoint (`POST /api/conclusion/`), which writes prompt files and results to the audit-conclusions directory. The vendor route (`/vendor/`) uses a strict allowlist (`marked.min.js`, `purify.min.js`) and rejects path-traversal attempts.
 
-The Python HTTP server uses `server_address = ("", port)`, meaning it listens on **all network interfaces** with no built-in authentication. The launcher opens `http://127.0.0.1:<port>` in the default browser for convenient local access, but any machine that can reach the server's port can read job data and trigger conclusion generation. Restrict access through a local firewall, bind the server to a specific interface by editing the invocation, or run the dashboard only on a trusted machine or network.
+The server binds to `127.0.0.1` and validates the HTTP Host/Origin. Wildcard CORS is removed. There is no remote hosting or account authentication; this remains a local desktop tool. The new workspace only reads data; conclusion generation remains an explicit action in the compatibility inspector.
 
 ### Troubleshooting
 
@@ -387,7 +414,7 @@ The Python HTTP server uses `server_address = ("", port)`, meaning it listens on
 | "Orchestrator root folder not detected" | `init` has not been run or the project has no `.agent-orchestrator/`. Run `agent-orch init` first. |
 | "Port X is occupied by a dashboard or service for another project" | A port race: the port was available during scan but claimed by another process before the dashboard could start. Retry or use a different `-PreferredPort`. |
 | Dashboard did not become reachable | The Python HTTP server may have failed. Run `python dashboard/scripts/server.py --project-dir <project>` manually to see errors. |
-| No projects appear | Project discovery depends on Codex Desktop, Claude Code settings, or `.agent-orchestrator` presence. Add the path manually with the **+** button. |
+| No projects appear | Open the project picker and enter a local directory explicitly. Discovery depends on Codex Desktop, Claude Code settings, or `.agent-orchestrator` presence. |
 
 ## Safety
 

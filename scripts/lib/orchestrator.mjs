@@ -13,6 +13,7 @@ import { invalidateAcceptance, assertAcceptanceArtifactValid, saveAcceptance, va
 import { normalizeWorkerOptions } from "./model-selection.mjs";
 import { compactJob, JobNotifications, resultSummary, prepareProgressChannel, reportProgress } from "./notifications.mjs";
 import { GitLifecycle } from "./git-lifecycle.mjs";
+import { recordGitOperation } from './git-events.mjs';
 import { repositoryLock, inventory, digest as lifecycleDigest, canonicalPath, git as lifecycleGit, gitFileState, json as lifecycleJson } from "./lifecycle-git.mjs";
 
 // -- Formal review evidence builder --
@@ -1552,7 +1553,13 @@ export class WorkerOrchestrator {
   async applyUnlocked(jobId) {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
-    if (job.applied_at) return { applied: false, already_applied: true, project_dir: job.project_dir };
+    const appliedEvent = async (recovered=false) => {
+      const head = await lifecycleGit(job.project_dir,['rev-parse','HEAD'],{allowFailure:true});
+      if (!head) return;
+      const appliedEvidence = job.evidence_path ? await lifecycleJson(job.evidence_path) : null;
+      return recordGitOperation({projectDir:job.project_dir,jobDir:this.store.jobDir(jobId),store:this.store,job,kind:'patch.applied',workspace:job.project_dir,patch_digest:job.acceptance_patch_digest,files:appliedEvidence?.changes?.changed_files || [],before_head:job.workspace?.source_inventory?.head,after_head:head,recovered,occurred_at:recovered?job.applied_at:null});
+    };
+    if (job.applied_at) { await appliedEvent(true); return { applied: false, already_applied: true, project_dir: job.project_dir }; }
 
     // Gate 1: Job must be completed and ready for acceptance
     if (job.status !== "completed" || job.phase !== "ready_for_acceptance") throw new Error("Only a completed job ready for acceptance can be applied.");
@@ -1647,12 +1654,14 @@ export class WorkerOrchestrator {
 
     if (recoveredApplication) {
       await this.store.updateJob(jobId, { applied_at: nowIso(), phase: 'applied', application_recovered: true });
+      await appliedEvent(true);
       return { applied: false, already_applied: true, recovered: true, project_dir: job.project_dir };
     }
 
     // Gate 7: Workspace mode check
     if (job.workspace.mode === "in_place") {
       await this.store.updateJob(jobId, { applied_at: nowIso(), phase: "applied" });
+      await appliedEvent();
       return { applied: false, already_in_place: true, project_dir: job.project_dir };
     }
 
@@ -1668,6 +1677,7 @@ export class WorkerOrchestrator {
     // Gate 8: Git apply check (done inside applyPatch)
     const result = await applyPatch({ originalProjectDir: job.workspace.original_project_dir, patchPath: job.patch_path, logDir: this.store.jobDir(jobId) });
     await this.store.updateJob(jobId, { applied_at: nowIso(), phase: "applied" });
+    await appliedEvent();
     return result;
   }
 

@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
-  "version": "0.7.0+codex.20261103.1",
-  "description": "Stage-first orchestration with environment audits, user-selected model routes, concise worker events, reviewed parallel integration, recoverable Git commits, and safe worktree retirement.",
+  "version": "0.7.1+codex.20261104.1",
+  "description": "Stage-first orchestration with environment audits, selected models, concise worker events, reviewed parallel integration, recoverable Git commits, and a local Auditor workspace for execution and Git history.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "Agent Orch",
     "shortDescription": "Audit environments, commit tasks, and retire worktrees.",
-    "longDescription": "Select stage models and Worker reasoning/service tier. Audit inherited Git changes without guessing ownership, approve concrete reconciliation, and supervise isolated CC, AGY, or Codex workers with concise events. Independently review and accept implementations, integrate parallel results with fresh review, then verify, commit exact task changes and safely retire worktrees. Preserve unrelated edits and durable recovery evidence. Hooks do not wake idle chats.",
+    "longDescription": "Select stage models and Worker reasoning/service tier. Audit inherited Git changes without guessing ownership, approve concrete reconciliation, and supervise isolated CC, AGY, or Codex workers with concise events. Independently review and accept implementations, integrate parallel results with fresh review, then verify, commit exact task changes and safely retire worktrees. Inspect plans, execution timelines, Git operations and delivery evidence in the manual-refresh, bilingual local Auditor. Preserve unrelated edits and durable recovery evidence. Hooks do not wake idle chats.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [

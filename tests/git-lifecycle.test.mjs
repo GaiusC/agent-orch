@@ -85,6 +85,10 @@ test('accepted task finalizes through real Git commit and worktree removal, idem
   assert.equal(await git(p.source, ['status', '--porcelain']), '');
   assert.equal((await p.orch.finalize(job.id, { confirm_commit: true })).commit_id, result.commit_id);
   assert.equal((await p.store.getJob(job.id)).continuation_available, false);
+  const operations=(await p.store.readEvents({limit:0})).filter(e=>e.git_operation).map(e=>e.git_operation);
+  for (const kind of ['workspace.created','patch.applied','delivery.committed','workspace.cleaned']) assert.equal(operations.filter(e=>e.kind===kind).length,1,kind);
+  assert.equal(operations.find(e=>e.kind==='delivery.committed').commit_id,result.commit_id);
+  assert.equal(operations.find(e=>e.kind==='delivery.committed').recovered,false);
 });
 
 test('failed final verification preserves applied files and worktree; retry commits once', async t => {
@@ -93,6 +97,7 @@ test('failed final verification preserves applied files and worktree; retry comm
   await p.store.updateJob(job.id, { acceptance_commands: ['node -e "process.exit(1)"'] });
   await assert.rejects(p.orch.finalize(job.id, { confirm_commit: true }), /verification failed/);
   assert.equal((await p.store.getJob(job.id)).closeout_phase, 'applied_pending_commit');
+  assert((await p.store.readEvents({limit:0})).some(e=>e.git_operation?.kind==='finalization.blocked'));
   assert.ok(await fs.stat(job.workspace.path));
   await p.store.updateJob(job.id, { acceptance_commands: ['node verify.cjs'] });
   await p.orch.finalize(job.id, { confirm_commit: true });
@@ -211,6 +216,8 @@ test('commit receipt recovers a crash after Git commit without committing twice'
   const result = await p.orch.finalize(job.id, { confirm_commit: true });
   assert.equal(result.status, 'closed');
   assert.equal(await git(p.source, ['rev-list', '--count', 'HEAD']), '2');
+  const committed=(await p.store.readEvents({limit:0})).find(e=>e.git_operation?.kind==='delivery.committed').git_operation;
+  assert.equal(committed.recovered,true);assert.equal(committed.occurred_at,null);
 });
 
 test('cleanup intent recovers interruption after worktree removal', async t => {

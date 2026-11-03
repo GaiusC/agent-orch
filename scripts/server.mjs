@@ -382,7 +382,7 @@ async function resolveJobOrchestrator(jobId) {
 }
 
 const server = new Server(
-  { name: "agent-orch-mcp", version: "0.7.0" },
+  { name: "agent-orch-mcp", version: "0.7.1" },
   { capabilities: { tools: {} } },
 );
 

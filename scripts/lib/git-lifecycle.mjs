@@ -6,6 +6,7 @@ import { processExists } from './process.mjs';
 import { runVerification } from './verify.mjs';
 import { assertProject } from './config.mjs';
 import { releaseWorkspace, directoryBytes } from './workspace-pool.mjs';
+import { recordGitOperation } from './git-events.mjs';
 
 const terminal = job => ['completed', 'failed', 'cancelled'].includes(job.status);
 const alive = job => !terminal(job) || (job.process_pid && !job.process_exited_at && processExists(job.process_pid));
@@ -20,6 +21,9 @@ export const DEFAULT_GIT_POLICY = {
 export class GitLifecycle {
   constructor(orchestrator) { this.orchestrator = orchestrator; this.store = orchestrator.store; }
   root(project) { return path.join(project, '.agent-orchestrator', 'environment'); }
+  async operation(job, kind, fact = {}) {
+    return recordGitOperation({projectDir:job.project_dir,jobDir:this.store.jobDir(job.id),store:this.store,job,kind,...fact});
+  }
   async policy(project) {
     const policy = { ...DEFAULT_GIT_POLICY, ...(await assertProject(project)).git_lifecycle };
     if (!['ask', 'auto', 'manual'].includes(policy.commit_policy)) throw new Error('Invalid local commit policy');
@@ -260,10 +264,15 @@ export class GitLifecycle {
       let job = await this.store.getJob(jobId);
       const directory = path.join(this.store.jobDir(jobId), 'finalization');
       let receipt = await json(path.join(directory, 'receipt.json'));
-      if (receipt?.status === 'closed') return receipt;
+      if (receipt?.status === 'closed') {
+        await this.operation(job,'delivery.committed',{commit_id:job.commit_id || receipt.commit_id,after_head:job.commit_id || receipt.commit_id,workspace:job.project_dir,recovered:true,occurred_at:job.committed_at});
+        if (job.cleaned_at) await this.operation(job,'workspace.cleaned',{workspace:job.workspace?.path,commit_id:job.commit_id,recovered:true,occurred_at:job.cleaned_at});
+        return receipt;
+      }
       const policy = await this.policy(job.project_dir);
       if (!args.record_commit && (policy.commit_policy === 'manual' || (policy.commit_policy !== 'auto' && args.confirm_commit !== true))) throw new Error('Local commit needs approval under the project commit policy; manual mode can record an existing commit');
       const state = await assertNoOperation(job.project_dir);
+      let recoveredCommit = Boolean(job.commit_id);
       if (policy.target_branch && state.branch !== `refs/heads/${policy.target_branch}`) throw new Error('Target branch differs from the approved policy');
       const evidence = await json(job.evidence_path);
       if (!evidence?.changes?.changed_files?.length) throw new Error('No task changes available to finalize');
@@ -304,6 +313,7 @@ export class GitLifecycle {
           if (![intent.index_digest, intent.final_index_digest].includes(interrupted.index_digest) || !sameFiles(interrupted.files, intent.working_files)) throw new Error('Files/index changed during interrupted commit; inspect manually');
           await git(job.project_dir, ['reset', '--quiet', 'HEAD', '--', ...intent.files]);
           job = await this.store.updateJob(jobId, { commit_id: state.head, closeout_phase: 'committed' });
+          recoveredCommit = true;
         }
         if (!job.applied_at && !job.commit_id) {
           if (args.signal?.aborted) throw new Error('Finalization cancelled');
@@ -327,6 +337,8 @@ export class GitLifecycle {
           await this.event(job.project_dir, 'task.committed', { id: jobId, task_id: job.task_id });
         }
         await git(job.project_dir, ['update-ref', `refs/agent-orch/deliveries/${safeId(jobId)}`, job.commit_id]);
+        const parents = (await git(job.project_dir,['show','-s','--format=%P',job.commit_id])).split(' ').filter(Boolean);
+        await this.operation(job,'delivery.committed',{commit_id:job.commit_id,after_head:job.commit_id,before_head:parents[0] || null,parents,workspace:job.project_dir,ref:`refs/agent-orch/deliveries/${safeId(jobId)}`,patch_digest:evidence.changes.patch_digest,files,manual:job.manual_commit_recorded === true,recovered:recoveredCommit,occurred_at:job.committed_at});
         if (args.signal?.aborted) throw new Error('Finalization cancelled after atomic commit; cleanup remains pending');
         await this.carryReadiness(job.project_dir);
         if (job.integration_job_ids) {
@@ -345,15 +357,24 @@ export class GitLifecycle {
       } catch (error) {
         const current = await this.store.getJob(jobId);
         await this.store.updateJob(jobId, { closeout_phase: current.commit_id ? 'committed_pending_cleanup' : current.applied_at ? 'applied_pending_commit' : 'blocked', closeout_error: error.message });
+        await this.operation(current,'finalization.blocked',{key:crypto.randomUUID(),status:'failed',workspace:job.project_dir,error:error.message,commit_id:current.commit_id || null});
         throw error;
       }
     });
   }
   async cleanup(jobId) {
+    try { return await this.cleanupRecorded(jobId); }
+    catch (error) {
+      const job = await this.store.getJob(jobId);
+      if (job) await this.operation(job,'workspace.cleanup_blocked',{key:crypto.randomUUID(),status:'failed',workspace:job.workspace?.path,commit_id:job.commit_id,error:error.message});
+      throw error;
+    }
+  }
+  async cleanupRecorded(jobId) {
     safeId(jobId);
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error('Unknown job');
-    if (job.cleaned_at) return { removed: false, already_cleaned: true };
+    if (job.cleaned_at) { await this.operation(job,'workspace.cleaned',{workspace:job.workspace?.path,commit_id:job.commit_id,recovered:true,occurred_at:job.cleaned_at}); return { removed: false, already_cleaned: true }; }
     if (!terminal(job) || alive(job)) throw new Error('Active process or task prevents cleanup');
     if (!job.commit_id) throw new Error('Cleanup requires a committed finalization receipt; preserve unfinished work');
     if (job.workspace?.mode === 'in_place') {
@@ -367,7 +388,7 @@ export class GitLifecycle {
     if (!await fs.stat(workspace).catch(() => null)) {
       if (!previous || previous.job_id !== jobId || previous.workspace !== workspace || previous.commit_id !== job.commit_id) throw new Error('Missing worktree without a cleanup receipt requires inspection');
       await releaseWorkspace(job.project_dir, job.workspace.owner_job_id || job.id);
-      await this.markCleaned(job);
+      await this.markCleaned(job,true);
       return { removed: true, recovered: true, continuation_available: false };
     }
     const repo = await identity(job.project_dir);
@@ -406,8 +427,9 @@ export class GitLifecycle {
     readiness.fingerprint = current.fingerprint; readiness.carried_at = now();
     await save(file, readiness);
   }
-  async markCleaned(job) {
+  async markCleaned(job,recovered=false) {
     await this.store.updateJob(job.id, { cleaned_at: now(), closeout_phase: 'closed', phase: 'applied_and_cleaned', continuation_available: false });
+    await this.operation(job,'workspace.cleaned',{workspace:job.workspace?.path,commit_id:job.commit_id,recovered});
     if (job.provider && job.task_id) {
       const session = await this.store.getSession(job.project_dir, job.provider, job.task_id);
       if (session?.workspace_path && await canonicalPath(session.workspace_path) === await canonicalPath(job.workspace.path)) await this.store.clearSession(job.project_dir, job.provider, job.task_id, { session_id: session.session_id, last_job_id: session.last_job_id });

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, identity, inventory, json, save, repositoryLock, scopedTree, removeIndex, canonicalPath } from './lifecycle-git.mjs';
+import { recordGitOperation } from './git-events.mjs';
 
 export async function directoryBytes(directory, stopAfter = Infinity) {
   let bytes = 0;
@@ -37,6 +38,7 @@ export async function reserveWorkspace({ projectDir, jobDir, config, signal, kin
       if (registry[owner]) {
         const source = await inventory(projectDir);
         if (path.resolve(registry[owner].path) !== path.resolve(worktree)) throw new Error('Worktree owner collision');
+        await recordGitOperation({projectDir,jobDir,job:await json(path.join(jobDir,'job.json'),{}),kind:'workspace.created',workspace:worktree,before_head:source.head,after_head:registry[owner].base_commit,ref:null,recovered:true,occurred_at:registry[owner].created_at});
         return { mode: 'isolated', path: worktree, original_project_dir: repo.root, git: { is_git: true, root: repo.root, head: source.head }, base_commit: registry[owner].base_commit, source_inventory: source, owner_job_id: owner };
       }
       const present = [];
@@ -73,6 +75,7 @@ export async function reserveWorkspace({ projectDir, jobDir, config, signal, kin
       await git(projectDir, ['worktree', 'add', '--detach', worktree, base]);
       registry[owner] = { owner_job_id: owner, path: worktree, project_dir: repo.root, kind, base_commit: base, created_at: new Date().toISOString() };
       await save(registryFile, registry);
+      await recordGitOperation({projectDir,jobDir,job:await json(path.join(jobDir,'job.json'),{}),kind:'workspace.created',workspace:worktree,before_head:source.head,after_head:base,ref:null,occurred_at:registry[owner].created_at});
       return { mode: 'isolated', path: worktree, original_project_dir: repo.root, git: { is_git: true, root: repo.root, head: source.head }, base_commit: base, source_inventory: source, owner_job_id: owner };
     });
     if (allocation) return allocation;

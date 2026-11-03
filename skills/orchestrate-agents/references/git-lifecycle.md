@@ -94,6 +94,16 @@ are exceptions for takeover/recovery, not the normal way to end completed work.
 
 ## Task finalization and recovery
 
+Git operations also produce durable audit receipts in `runs/<job>/git-operations/`
+and project into the existing `events.jsonl`. Auditor combines these with Plan,
+Work, Review and Accept records. Worktree bases and integration input/checkpoint
+objects are internal evidence, not delivery commits or invented feature branches.
+Only finalization (or a verified recorded manual commit) establishes delivery.
+Do not hand-edit receipts or infer missing occurrence times from file mtimes.
+Retries reuse successful operation IDs; conflicts and blocked attempts remain
+visible. Auditor refresh is manual and does not monitor arbitrary external Git
+commands.
+
 After formal Review/Accept, use stage-finalize with job_id, optional commit_message,
 confirm_commit under ask policy, and cleanup (default true). It validates the
 accepted patch, applies once, checks actual target content, reruns acceptance

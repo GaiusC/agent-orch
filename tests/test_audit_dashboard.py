@@ -18,6 +18,138 @@ SPEC.loader.exec_module(SERVER)
 
 
 class AuditDashboardTests(unittest.TestCase):
+    def test_codex_worker_details_read_rounds_fallback_and_work_evidence(self):
+        with tempfile.TemporaryDirectory() as root:
+            job_id = "work-codex-logs"
+            run_dir = Path(root) / "runs" / job_id
+            run_dir.mkdir(parents=True)
+            job = {"id": job_id, "provider": "codex_worker", "status": "completed"}
+            (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+            evidence = {"status": "ready_for_acceptance", "attempts": [{"result_summary": "truncated summary"}],
+                        "verification": {"passed": True}}
+            (run_dir / "evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
+            for round_number in (0, 2, 10):
+                log_name = f"codex-worker-round-{round_number}.stdout.log"
+                event = {"type": "item.completed", "item": {"type": "agent_message", "text": f"round {round_number}"}}
+                (run_dir / log_name).write_text(json.dumps(event) + "\n", encoding="utf-8")
+            fallback = run_dir / "codex-worker-round-10-sandbox-fallback.stdout.log"
+            command = {"type": "item.completed", "item": {"type": "command_execution", "command": "python -m unittest",
+                        "aggregated_output": "All tests passed", "exit_code": 0}}
+            final = {"type": "item.completed", "item": {"type": "agent_message", "text": "Full final summary"}}
+            fallback.write_text("malformed tail\n" + json.dumps(command) + "\n" + json.dumps(final), encoding="utf-8")
+            (run_dir / "codex-worker-round-10-sandbox-fallback.stderr.log").write_text("diagnostic", encoding="utf-8")
+            handler = SERVER.DashboardAPIHandler.__new__(SERVER.DashboardAPIHandler)
+            detail = handler.get_run_detail(root, job_id)
+            events = detail["transcript_events"]
+            self.assertEqual([e["text"] for e in events if e["kind"] == "assistant_text"],
+                             ["round 0", "round 2", "round 10", "Full final summary"])
+            self.assertTrue(any(e["kind"] == "tool_result" and e["text"] == "All tests passed" for e in events))
+            self.assertEqual(detail["transcript_path"], str(fallback))
+            self.assertIn("Full final summary", detail["work_report"])
+            self.assertIn('"passed": true', detail["work_report"])
+            self.assertEqual(detail["stderr_log"], "diagnostic")
+
+    def test_cc_details_fall_back_to_result_stdout_and_latest_round(self):
+        with tempfile.TemporaryDirectory() as root:
+            run_dir = Path(root) / "runs" / "work-cc-summary"
+            run_dir.mkdir(parents=True)
+            (run_dir / "job.json").write_text(json.dumps({"id": run_dir.name, "provider": "cc", "status": "completed"}), encoding="utf-8")
+            (run_dir / "cc-round-3.stdout.log").write_text(json.dumps({"type": "result", "result": "CC finished implementation"}), encoding="utf-8")
+            handler = SERVER.DashboardAPIHandler.__new__(SERVER.DashboardAPIHandler)
+            detail = handler.get_run_detail(root, run_dir.name)
+            self.assertEqual(detail["transcript_events"][-1]["text"], "CC finished implementation")
+            self.assertIn("CC finished implementation", detail["work_report"])
+
+    def test_missing_work_logs_have_explicit_report_without_fake_transcript(self):
+        with tempfile.TemporaryDirectory() as root:
+            run_dir = Path(root) / "runs" / "work-no-logs"
+            run_dir.mkdir(parents=True)
+            (run_dir / "job.json").write_text(json.dumps({"id": run_dir.name, "provider": "codex_worker", "status": "running"}), encoding="utf-8")
+            handler = SERVER.DashboardAPIHandler.__new__(SERVER.DashboardAPIHandler)
+            detail = handler.get_run_detail(root, run_dir.name)
+            self.assertEqual(detail["transcript_events"], [])
+            self.assertIn("No execution summary has been recorded yet.", detail["work_report"])
+
+    def test_work_detail_frontend_renders_and_refreshes_provider_content(self):
+        node_script = r'''
+const fs = require('fs');
+const assert = require('assert');
+const { JSDOM } = require('jsdom');
+const html = fs.readFileSync('dashboard/scripts/index.html', 'utf8');
+const dom = new JSDOM(html, { runScripts: 'outside-only', url: 'http://localhost:15788/' });
+const w = dom.window;
+w.setInterval = () => 0;
+w.fetch = () => new Promise(() => {});
+w.HTMLElement.prototype.scrollTo = () => {};
+const scripts = [...w.document.querySelectorAll('script:not([src])')].map(s => s.textContent).join('\n');
+w.eval(scripts);
+w.eval('loadConclusion = async () => {};');
+const data = {job: {id: 'work-ui', provider: 'codex_worker', status: 'completed'},
+  evidence: {status: 'ready_for_acceptance'}, work_report: 'Worker final summary',
+  transcript_path: 'codex-worker-round-0.stdout.log',
+  transcript_events: [{kind: 'assistant_text', role: 'assistant', text: 'Worker conversation'}],
+  stdout_log: 'Captured stdout', stderr_log: 'Captured diagnostic', patch: 'diff --git a/test b/test'};
+for (const provider of ['codex_worker', 'cc', 'agy_write']) {
+  data.job.provider = provider;
+  w.renderJobDetail(data);
+  const doc = w.document;
+  assert(doc.querySelector('#tab-work-report').textContent.includes('Worker final summary'));
+  assert(doc.querySelector('#tab-conversation').textContent.includes('Worker conversation'));
+  assert(doc.querySelector('#tab-stdio').textContent.includes('Captured stdout'));
+  assert(doc.querySelector('#tab-stdio').textContent.includes('Captured diagnostic'));
+  assert(!doc.querySelector('#tab-agy-transcript'));
+  w.renderJobDetail({...data, work_report: 'Updated report', stdout_log: 'Updated stdout',
+    transcript_events: [...data.transcript_events, {kind: 'assistant_text', role: 'assistant', text: 'New message'}]});
+  assert(doc.querySelector('#tab-work-report').textContent.includes('Updated report'));
+  assert(doc.querySelector('#tab-conversation').textContent.includes('New message'));
+  assert(doc.querySelector('#tab-stdio').textContent.includes('Updated stdout'));
+}
+w.renderJobDetail({job: {id: 'agy-review', provider: 'agy'}, evidence: {result: 'Formal audit result'}});
+assert(w.document.querySelector('#tab-report').textContent.includes('Formal audit result'));
+assert(!w.document.querySelector('#tab-work-report'));
+dom.window.close();
+console.log('OK');
+'''
+        result = subprocess.run(["node", "-e", node_script], cwd=ROOT,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OK", result.stdout)
+
+    def test_safe_run_path_accepts_runtime_job_prefixes(self):
+        with tempfile.TemporaryDirectory() as root:
+            for prefix in ("auto", "cc", "agy", "agy-probe", "work", "investigate"):
+                with self.subTest(prefix=prefix):
+                    job_id = f"{prefix}-20261027171538-42c9d56a"
+                    self.assertEqual(
+                        SERVER.safe_run_path(root, job_id),
+                        os.path.join(root, "runs", job_id),
+                    )
+
+    def test_safe_run_path_rejects_invalid_ids_and_path_traversal(self):
+        with tempfile.TemporaryDirectory() as root:
+            for job_id in (None, "", "work-", "unknown-job", "../work-job",
+                           "work-../secret", "work-..\\secret", "work-job/child",
+                           "work-job\\child", "C:\\work-job", "work-job\n",
+                           "work-job\x00", "work-job?project=other"):
+                with self.subTest(job_id=job_id):
+                    with self.assertRaisesRegex(ValueError, "Invalid job id"):
+                        SERVER.safe_run_path(root, job_id)
+
+    def test_completed_stage_job_details_load_for_cc_and_codex_worker(self):
+        with tempfile.TemporaryDirectory() as root:
+            handler = SERVER.DashboardAPIHandler.__new__(SERVER.DashboardAPIHandler)
+            for provider in ("cc", "codex_worker"):
+                with self.subTest(provider=provider):
+                    job_id = f"work-completed-{provider}"
+                    run_dir = Path(root) / "runs" / job_id
+                    run_dir.mkdir(parents=True)
+                    job = {"id": job_id, "provider": provider, "status": "completed"}
+                    (run_dir / "job.json").write_text(json.dumps(job), encoding="utf-8")
+                    (run_dir / "evidence.json").write_text('{"ok": true}', encoding="utf-8")
+                    detail = handler.get_run_detail(root, job_id)
+                    self.assertEqual(detail["job"], job)
+                    self.assertEqual(detail["evidence"], {"ok": True})
+
     # Existing tests
 
     def test_continue_job_uses_task_session_registry(self):
@@ -869,11 +1001,11 @@ class AuditDashboardTests(unittest.TestCase):
             orch.mkdir(parents=True)
             parsed = SERVER.urlparse("/api/runs?project=" + str(project))
             project_dir, orchestrator_dir = SERVER.request_project_context(parsed)
-            self.assertEqual(os.path.normcase(project_dir), os.path.normcase(str(project)))
-            self.assertEqual(os.path.normcase(orchestrator_dir), os.path.normcase(str(orch)))
+            self.assertEqual(os.path.normcase(os.path.realpath(project_dir)), os.path.normcase(os.path.realpath(str(project))))
+            self.assertEqual(os.path.normcase(os.path.realpath(orchestrator_dir)), os.path.normcase(os.path.realpath(str(orch))))
 
-    def test_serve_file_rebinds_project_dir_on_query_param(self):
-        """serve_file should rebind SERVER_PROJECT_DIR when ?project= is in the query string."""
+    def test_serve_file_keeps_server_default_on_query_param(self):
+        """Per-page project selection must not change another chat's server default."""
         import io
         with tempfile.TemporaryDirectory() as root:
             new_project = os.path.join(root, "another-project")
@@ -898,10 +1030,10 @@ class AuditDashboardTests(unittest.TestCase):
 
                 SERVER.DashboardAPIHandler.serve_file(handler, "index.html", "text/html")
 
-                # After serve_file with ?project=, SERVER_PROJECT_DIR should be updated
+                # Query context is resolved by each API request, never by serving HTML.
                 self.assertEqual(
                     os.path.normcase(os.path.abspath(SERVER.SERVER_PROJECT_DIR)),
-                    os.path.normcase(os.path.abspath(new_project)),
+                    os.path.normcase(os.path.abspath(root)),
                 )
             finally:
                 SERVER.SERVER_PROJECT_DIR = old_project

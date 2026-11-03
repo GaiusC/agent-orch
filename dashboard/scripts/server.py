@@ -8,16 +8,21 @@ import tempfile
 import threading
 import time
 import argparse
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from auditor_data import build_workspace, context_from_query, ContextError
+from git_history import snapshot as git_snapshot, commit_detail as git_commit_detail, run_git as read_git_command, GitReadError
+
 PORT = 15788
-SERVER_VERSION = "audit-orch-project-bound-v3"
+SERVER_VERSION = "audit-orch-workspace-v6"
 MAX_TAIL_BYTES = 256 * 1024
 MAX_TRANSCRIPT_BYTES = 192 * 1024
 MAX_EVENTS = 120
 MAX_PROMPT_CONTENT_BYTES = 160 * 1024
-JOB_ID_RE = re.compile(r"^(auto|cc|agy|agy-probe)-[A-Za-z0-9_.-]+$")
+JOB_ID_RE = re.compile(r"(?:auto|cc|agy|agy-probe|work|investigate|integrate)-[A-Za-z0-9_.-]+")
 TRANSCRIPT_CACHE = {}
 PROCESS_CACHE = {"time": 0.0, "processes": [], "text": ""}
 CONCLUSION_LOCK = threading.Lock()
@@ -61,13 +66,53 @@ def safe_tail(path, max_bytes=MAX_TAIL_BYTES):
 
 
 def safe_run_path(orchestrator_dir, job_id):
-    if not JOB_ID_RE.match(job_id or ""):
+    if not JOB_ID_RE.fullmatch(job_id or ""):
         raise ValueError("Invalid job id")
     runs_root = os.path.abspath(os.path.join(orchestrator_dir, "runs"))
     run_path = os.path.abspath(os.path.join(runs_root, job_id))
     if os.path.commonpath([runs_root, run_path]) != runs_root:
         raise ValueError("Job path escapes runs directory")
     return run_path
+
+
+def round_logs(run_path, prefix, suffix):
+    pattern = re.compile(re.escape(prefix) + r"-(\d+)(-sandbox-fallback)?\." + re.escape(suffix))
+    matches = []
+    for name in os.listdir(run_path):
+        match = pattern.fullmatch(name)
+        if match and os.path.isfile(os.path.join(run_path, name)):
+            matches.append((int(match[1]), bool(match[2]), name))
+    # Bound the combined tail as well as each file; keep the latest rounds.
+    paths = [os.path.join(run_path, item[2]) for item in sorted(matches)]
+    remaining = MAX_TAIL_BYTES
+    chunks = []
+    for path in reversed(paths):
+        text = safe_tail(path, remaining)
+        chunks.append(text)
+        remaining -= len(text.encode("utf-8"))
+        if remaining <= 0:
+            break
+    return paths, "\n".join(reversed(chunks))
+
+
+def work_report(job, evidence, events):
+    attempts = evidence.get("attempts") or job.get("attempts") or []
+    result = evidence.get("result")
+    if not isinstance(result, str) or not result.strip():
+        result = next((e.get("text") for e in reversed(events)
+                       if e.get("kind") == "assistant_text"), "")
+    if not result:
+        result = next((a.get("result_summary") for a in reversed(attempts)
+                       if isinstance(a, dict) and a.get("result_summary")), "")
+    lines = ["## Work result", f"Status: {job.get('status', 'unknown')}",
+             f"Evidence: {evidence.get('status', 'not written yet')}",
+             "", result or "No execution summary has been recorded yet."]
+    verification = evidence.get("verification") or {}
+    if verification:
+        lines.extend(["", "## Verification", json.dumps(verification, ensure_ascii=False, indent=2)])
+    if evidence.get("warnings"):
+        lines.extend(["", "## Warnings", "\n".join(map(str, evidence["warnings"]))])
+    return "\n".join(lines)
 
 
 def project_name_for_claude(workspace_path):
@@ -638,7 +683,7 @@ def latest_job(jobs, predicate):
 
 
 def dag_node_state(contract, task_jobs, all_jobs):
-    implementation = latest_job(task_jobs, lambda job: job.get("type") in ("auto_execute", "cc_execute", "cc_continue", "agy_execute", "agy_continue"))
+    implementation = latest_job(task_jobs, lambda job: job.get("type") in ("stage_work", "stage_work_continue", "auto_execute", "cc_execute", "cc_continue", "agy_execute", "agy_continue"))
     verify = latest_job(task_jobs, lambda job: job.get("type") in ("agy_verify", "agy_review") and job.get("status") == "completed")
     blocked_by = [dep for dep in contract.get("dependencies", []) if not dependency_applied(dep, all_jobs)]
     if implementation and implementation.get("status") == "completed" and implementation.get("phase") in ("applied", "applied_and_cleaned"):
@@ -873,8 +918,23 @@ def project_summary(project_path, source="manual", process_text=None):
                 except Exception:
                     pass
 
+    plan_ids = set()
+    plans_dir = os.path.join(orch_dir, 'plans')
+    if os.path.isdir(plans_dir):
+        for name in os.listdir(plans_dir):
+            if not name.endswith('.json'): continue
+            try:
+                with open(os.path.join(plans_dir,name),encoding='utf-8-sig') as stream: manifest=json.load(stream)
+                if isinstance(manifest,dict) and manifest.get('type') in ('formal','adhoc') and manifest.get('plan_id'): plan_ids.add(manifest['plan_id'])
+            except (OSError,ValueError,TypeError): pass
+    branch = None
+    if os.path.exists(os.path.join(abs_path, '.git')):
+        try: branch = read_git_command(abs_path, 'symbolic-ref', '--short', '-q', 'HEAD', allow_failure=True) or 'detached HEAD'
+        except (GitReadError, OSError): pass
     return {
         "path": abs_path,
+        "git_branch": branch,
+        "total_plans": len(plan_ids),
         "display_name": project_display_name(abs_path),
         "has_orchestrator": has_orchestrator,
         "total_jobs": total_jobs,
@@ -1180,6 +1240,9 @@ def parse_claude_transcript(text):
         role = message.get("role") or item.get("type") or ""
         model = message.get("model") or item.get("model") or ""
         content = message.get("content")
+        if item.get("type") == "result" and isinstance(item.get("result"), str):
+            events.append({"kind": "assistant_text", "role": "assistant", "model": model,
+                           "timestamp": timestamp, "text": item["result"]})
 
         if isinstance(content, list):
             for part in content:
@@ -1209,6 +1272,37 @@ def model_from_events(events):
     return ""
 
 
+def parse_codex_worker_transcript(text):
+    events = []
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        item = event.get("item") or {}
+        timestamp = event.get("timestamp", "")
+        if event.get("type") == "item.completed" and isinstance(item, dict):
+            kind = item.get("type")
+            if kind in ("agent_message", "reasoning") and item.get("text"):
+                events.append({"kind": "assistant_text", "role": "assistant", "timestamp": timestamp,
+                               "text": item["text"]})
+            elif kind == "command_execution":
+                events.append({"kind": "tool_use", "role": "assistant", "timestamp": timestamp,
+                               "tool": "shell", "text": item.get("command", "")})
+                events.append({"kind": "tool_result", "role": "tool", "timestamp": timestamp,
+                               "is_error": item.get("exit_code") not in (None, 0),
+                               "text": item.get("aggregated_output", "")})
+            elif kind in ("file_change", "mcp_tool_call", "web_search", "error"):
+                events.append({"kind": "tool_result", "role": "tool", "timestamp": timestamp,
+                               "tool": kind, "text": summarize_json(item), "is_error": kind == "error"})
+        elif event.get("type") in ("error", "turn.failed"):
+            events.append({"kind": "message", "role": "error", "timestamp": timestamp,
+                           "is_error": True, "text": extract_text(event.get("message") or event.get("error"))})
+    return events[-MAX_EVENTS:]
+
+
 def parse_agy_transcript(text):
     events = []
     for line in text.splitlines():
@@ -1226,12 +1320,8 @@ def parse_agy_transcript(text):
 
 
 def request_project_context(parsed_url):
-    params = parse_qs(parsed_url.query)
-    requested = (params.get("project") or [""])[0]
-    if requested and os.path.isdir(requested):
-        project_dir = os.path.abspath(requested)
-    else:
-        project_dir = os.path.abspath(SERVER_PROJECT_DIR or os.getcwd())
+    context = context_from_query(parsed_url.query, SERVER_PROJECT_DIR or os.getcwd())
+    project_dir = context['cwd']
     return project_dir, find_orchestrator_dir(project_dir)
 
 
@@ -1239,24 +1329,44 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+    def same_origin(self):
+        host = self.headers.get('Host', '')
+        allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
+        return host in allowed and self.headers.get('Origin', 'http://' + host) == 'http://' + host
+
     def do_GET(self):
+        if not self.same_origin():
+            self.send_json({'error':'Forbidden'},403)
+            return
         parsed_url = urlparse(self.path)
         path = parsed_url.path
 
-        if path == "/" or path == "/index.html":
-            self.serve_file("index.html", "text/html")
-        elif path.startswith("/vendor/"):
-            self.serve_vendor(path)
-        elif path.startswith("/api/"):
-            self.serve_api(parsed_url)
-        else:
-            self.send_error(404, "File Not Found")
+        try:
+            if path in ("/", "/index.html"):
+                self.serve_file("workspace.html", "text/html; charset=utf-8")
+            elif path == "/legacy":
+                self.serve_file("index.html", "text/html; charset=utf-8")
+            elif path in ("/workspace.css", "/workspace.js", "/graph.js", "/i18n.js"):
+                self.serve_file(path[1:], "text/css; charset=utf-8" if path.endswith('.css') else "text/javascript; charset=utf-8")
+            elif path.startswith("/vendor/"):
+                self.serve_vendor(path)
+            elif path.startswith("/api/"):
+                self.serve_api(parsed_url)
+            else:
+                self.send_error(404, "File Not Found")
+        except ContextError as exc:
+            self.send_json({'error':str(exc)},exc.status)
+        except GitReadError as exc:
+            self.send_json({'error':str(exc)},422)
 
     def do_POST(self):
+        if not self.same_origin():
+            self.send_json({'error':'Forbidden'},403)
+            return
         parsed_url = urlparse(self.path)
         path = parsed_url.path
-        project_dir, orchestrator_dir = request_project_context(parsed_url)
         try:
+            project_dir, orchestrator_dir = request_project_context(parsed_url)
             if path.startswith("/api/conclusion/"):
                 job_id = unquote(path[len("/api/conclusion/"):])
                 detail = self.get_run_detail(orchestrator_dir, job_id)
@@ -1267,32 +1377,27 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                 self.send_json(response_data, status)
                 return
             self.send_json({"error": "Invalid API Endpoint"}, 404)
+        except ContextError as exc:
+            self.send_json({'error':str(exc)},exc.status)
         except Exception as exc:
             self.send_json({"error": str(exc)}, 500)
 
     def send_json(self, payload, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
     def serve_file(self, filename, content_type):
-        global SERVER_PROJECT_DIR, SERVER_ORCHESTRATOR_DIR
-        parsed = urlparse(self.path)
-        if parsed.query:
-            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-            project_param = params.get("project")
-            if project_param:
-                decoded = unquote(project_param)
-                if os.path.isdir(decoded):
-                    SERVER_PROJECT_DIR = os.path.abspath(decoded)
-                    SERVER_ORCHESTRATOR_DIR = find_orchestrator_dir(SERVER_PROJECT_DIR)
+        # Project selection belongs to the request, never shared server globals.
         file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
         if os.path.exists(file_path):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             with open(file_path, "rb") as fh:
                 self.wfile.write(fh.read())
@@ -1314,7 +1419,7 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header("Content-Type", "application/javascript")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         with open(file_path, "rb") as fh:
             self.wfile.write(fh.read())
@@ -1323,7 +1428,17 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
         path = parsed_url.path
         project_dir, orchestrator_dir = request_project_context(parsed_url)
         try:
-            if path == "/api/status":
+            if path == "/api/workspace":
+                response_data = build_workspace(project_dir, orchestrator_dir)
+                response_data['context'] = context_from_query(parsed_url.query, SERVER_PROJECT_DIR or os.getcwd())
+            elif path == "/api/context":
+                response_data = context_from_query(parsed_url.query, SERVER_PROJECT_DIR or os.getcwd())
+            elif path == "/api/git/history":
+                params = parse_qs(parsed_url.query)
+                response_data = git_snapshot(project_dir, (params.get('ref') or [''])[0], (params.get('limit') or ['150'])[0], include_internal=(params.get('internal') or ['0'])[0]=='1')
+            elif path.startswith('/api/git/commit/'):
+                response_data = git_commit_detail(project_dir,path[len('/api/git/commit/'):])
+            elif path == "/api/status":
                 response_data = self.get_status_data(project_dir, orchestrator_dir)
             elif path == "/api/projects":
                 projects_list = discover_projects()
@@ -1353,6 +1468,9 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                 response_data = self.get_run_detail(orchestrator_dir, job_id)
             else:
                 response_data = {"error": "Invalid API Endpoint"}
+        except (GitReadError, ValueError) as exc:
+            self.send_json({'error':str(exc)},422)
+            return
         except Exception as exc:
             response_data = {"error": str(exc)}
         self.send_json(response_data)
@@ -1361,6 +1479,7 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
         processes, _ = get_active_processes_snapshot()
         return {
             "server_version": SERVER_VERSION,
+            "server_path": os.path.abspath(__file__),
             "orchestrator_found": orchestrator_dir is not None,
             "orchestrator_dir": orchestrator_dir,
             "project_dir": project_dir,
@@ -1390,7 +1509,7 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
         _, process_text = get_active_processes_snapshot()
 
         runs_list = []
-        for folder in run_folders[:30]:
+        for folder in run_folders:
             job_file = os.path.join(runs_dir, folder, "job.json")
             if not os.path.exists(job_file):
                 continue
@@ -1451,9 +1570,11 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
             with open(evidence_file, "r", encoding="utf-8") as fh:
                 detail["evidence"] = json.load(fh)
 
-        detail["stdout_log"] = safe_tail(os.path.join(run_path, "cc-round-0.stdout.log"))
-        detail["stderr_log"] = safe_tail(os.path.join(run_path, "cc-round-0.stderr.log"))
-        detail["debug_log"] = safe_tail(os.path.join(run_path, "cc-round-0.claude-debug.log"))
+        provider = (detail.get("job") or {}).get("provider")
+        log_prefix = {"cc": "cc-round", "codex_worker": "codex-worker-round", "agy_write": "agy-write-round"}.get(provider, "cc-round")
+        stdout_paths, detail["stdout_log"] = round_logs(run_path, log_prefix, "stdout.log")
+        _, detail["stderr_log"] = round_logs(run_path, log_prefix, "stderr.log")
+        _, detail["debug_log"] = round_logs(run_path, "cc-round", "claude-debug.log")
         detail["patch"] = safe_tail(os.path.join(run_path, "changes.patch"))
 
         job = detail.get("job", {})
@@ -1472,9 +1593,8 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                 detail["inferred_session_id"] = inferred_session_id
                 detail["session_source"] = "live Claude process"
             transcript_paths = []
-            copied = os.path.join(run_path, "cc-round-0.claude-transcript.jsonl")
-            if os.path.exists(copied):
-                transcript_paths.append({"path": copied, "reason": "run directory transcript"})
+            copied_paths, _ = round_logs(run_path, "cc-round", "claude-transcript.jsonl")
+            transcript_paths.extend({"path": p, "reason": "run directory transcript"} for p in reversed(copied_paths))
             transcript_paths.extend(find_live_claude_transcripts(job))
             seen = set()
             transcript_paths = [p for p in transcript_paths if not (p["path"] in seen or seen.add(p["path"]))]
@@ -1490,7 +1610,21 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
             else:
                 detail["transcript_match_reason"] = "No run transcript or safely matched Claude transcript found."
 
-        if job.get("provider") == "agy":
+            if not detail.get("transcript_events") and detail["stdout_log"]:
+                detail["transcript_events"] = parse_claude_transcript(detail["stdout_log"])
+                detail["transcript_path"] = stdout_paths[-1] if stdout_paths else ""
+                detail["transcript_match_reason"] = "Captured CC stdout for this job."
+
+        if provider in ("codex_worker", "agy_write"):
+            detail["transcript_path"] = stdout_paths[-1] if stdout_paths else ""
+            detail["transcript_raw"] = detail["stdout_log"]
+            parser = parse_codex_worker_transcript if provider == "codex_worker" else parse_agy_transcript
+            detail["transcript_events"] = parser(detail["stdout_log"])
+            if provider == "agy_write" and not detail["transcript_events"] and detail["stdout_log"].strip():
+                detail["transcript_events"] = [{"kind": "assistant_text", "role": "assistant", "text": detail["stdout_log"]}]
+            detail["transcript_match_reason"] = "Captured provider stdout for this job; latest available rounds."
+
+        if provider in ("agy", "agy_write"):
             detail["agy_cli_log"] = safe_tail(os.path.join(run_path, "agy-investigate.cli.log")) or safe_tail(os.path.join(run_path, "agy-verify.cli.log"))
             detail["agy_stdout_log"] = safe_tail(os.path.join(run_path, "agy-investigate.stdout.log")) or safe_tail(os.path.join(run_path, "agy-verify.stdout.log"))
             detail["agy_stderr_log"] = safe_tail(os.path.join(run_path, "agy-investigate.stderr.log")) or safe_tail(os.path.join(run_path, "agy-verify.stderr.log"))
@@ -1502,12 +1636,17 @@ class DashboardAPIHandler(BaseHTTPRequestHandler):
                     detail["agy_transcript_path"] = agy_transcript
                     detail["agy_transcript_raw"] = text
                     detail["agy_transcript_events"] = parse_agy_transcript(text)
+                    if provider == "agy_write":
+                        detail["transcript_path"] = agy_transcript
+                        detail["transcript_events"] = detail["agy_transcript_events"]
+
+        if provider in ("cc", "codex_worker", "agy_write"):
+            detail["work_report"] = work_report(job, detail.get("evidence") or {}, detail.get("transcript_events") or [])
 
         worktree_path = (job.get("workspace") or {}).get("path")
         if worktree_path and os.path.exists(worktree_path):
             try:
-                res = subprocess.run(["git", "status"], cwd=worktree_path, capture_output=True, text=True, timeout=10)
-                detail["git_status"] = res.stdout
+                detail["git_status"] = read_git_command(worktree_path, "status")
             except Exception:
                 pass
         return detail
@@ -1520,7 +1659,7 @@ def run(project_dir=None, port=PORT):
     else:
         SERVER_PROJECT_DIR = os.getcwd()
     SERVER_ORCHESTRATOR_DIR = find_orchestrator_dir(SERVER_PROJECT_DIR)
-    server_address = ("", port)
+    server_address = ("127.0.0.1", port)
     httpd = ThreadingHTTPServer(server_address, DashboardAPIHandler)
     print(f"Starting server on port {port}...")
     print(f"Project dir: {SERVER_PROJECT_DIR}")

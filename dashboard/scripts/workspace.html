@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Orch · Auditor</title>
+<link rel="stylesheet" href="/workspace.css"><script src="/vendor/marked.min.js" defer></script><script src="/vendor/purify.min.js" defer></script><script type="module" src="/workspace.js"></script></head>
+<body>
+<header class="app-header"><div class="brand"><span class="brand-mark" aria-hidden="true">◈</span><strong>Agent Orch</strong><span class="brand-divider">/</span><span class="brand-subtitle">Auditor</span></div><button id="allProjects" class="all-projects" title="返回项目首页" data-i18n-title="返回项目首页" data-i18n="所有项目">所有项目</button><span id="projectCrumb" class="crumb-separator">›</span><button id="projectButton" class="project-button" title="切换项目" data-i18n-title="切换项目"><span data-i18n="选择项目">选择项目</span> <span aria-hidden="true">⌄</span></button><div id="branchSummary" class="branch-summary"></div><div class="header-actions"><button id="refreshButton" class="refresh-button">↻ <span data-i18n="刷新">刷新</span></button><button id="languageButton" data-language-toggle class="language-button" type="button" aria-label="Switch to English" title="Switch to English">EN</button><button id="themeButton" class="icon-button" aria-label="切换明暗主题" data-i18n-aria-label="切换明暗主题" title="切换明暗主题" data-i18n-title="切换明暗主题">◐</button></div></header>
+<div id="notice" class="notice" role="alert" hidden></div>
+<section id="projectHome" class="project-home" hidden aria-label="项目选择" data-i18n-aria-label="项目选择">
+  <div class="home-heading"><span class="eyebrow">YOUR WORKSPACES</span><h1 data-i18n="项目">项目</h1><p data-i18n="选择工作区，查看计划、执行与 Git 的完整过程。">选择工作区，查看计划、执行与 Git 的完整过程。</p></div>
+  <form id="homeProjectForm" class="home-project-form"><label for="homeProjectPath" data-i18n="添加项目目录">添加项目目录</label><div class="project-input-row"><input id="homeProjectPath" placeholder="C:\path\to\project" required><button type="submit" data-i18n="添加项目">添加项目</button><button type="button" id="restoreProjects" data-i18n="恢复显示">恢复显示</button></div></form>
+  <p id="homeFeedback" class="subtle-note" role="status"></p><div id="homeProjectList" class="project-grid"></div>
+  <p class="home-footnote" data-i18n="本地记录 · 仅手动刷新 · 隐藏项目不会删除文件">本地记录 · 仅手动刷新 · 隐藏项目不会删除文件</p>
+</section>
+<div class="app-layout" id="layout">
+  <aside class="history-sidebar" aria-label="项目历史" data-i18n-aria-label="项目历史">
+    <nav class="history-tabs" role="tablist" aria-label="历史类型" data-i18n-aria-label="历史类型"><button id="plansTab" role="tab" aria-selected="true" aria-controls="historyList" data-i18n="计划历史">计划历史</button><button id="gitTab" role="tab" aria-selected="false" aria-controls="historyList" data-i18n="Git 历史">Git 历史</button></nav>
+    <div id="historySummary" class="history-summary" data-i18n="读取项目记录…">读取项目记录…</div>
+    <div id="gitControls" class="git-controls" hidden><label><span data-i18n="分支">分支</span> <select id="branchFilter" aria-label="Git 分支" data-i18n-aria-label="Git 分支"><option value="" data-i18n="全部分支">全部分支</option></select></label><label class="internal-toggle"><input type="checkbox" id="internalRefs"><span data-i18n="显示内部检查点">显示内部检查点</span></label></div>
+    <div id="historyList" class="history-list" role="tabpanel" aria-label="历史记录" data-i18n-aria-label="历史记录"></div>
+    <div class="sidebar-footer"><span id="snapshotTime" data-i18n="手动刷新">手动刷新</span><span data-i18n="本地 · 只读">本地 · 只读</span></div>
+  </aside>
+  <main id="main" class="main-content"><div class="initial-state"><span class="eyebrow">WORKSPACE AUDIT</span><h1 data-i18n="每一项工作，都有迹可循。">每一项工作，都有迹可循。</h1><p data-i18n="读取计划、执行与交付记录。">读取计划、执行与交付记录。</p></div></main>
+</div>
+<dialog id="detailDialog" class="detail-dialog"><header><div><span class="eyebrow" id="detailKind" data-i18n="执行记录">执行记录</span><h2 id="detailTitle"></h2></div><div class="dialog-actions"><button id="detailLanguageButton" data-language-toggle type="button" class="language-button" aria-label="Switch to English">EN</button><button id="closeDetail" class="icon-button" aria-label="关闭详情" data-i18n-aria-label="关闭详情">×</button></div></header><div id="detailBody" class="detail-body"></div></dialog>
+<dialog id="projectDialog" class="project-dialog"><header><h2 data-i18n="切换项目">切换项目</h2><div class="dialog-actions"><button id="projectLanguageButton" data-language-toggle type="button" class="language-button" aria-label="Switch to English">EN</button><button id="closeProjects" class="icon-button" aria-label="关闭项目选择" data-i18n-aria-label="关闭项目选择">×</button></div></header><form id="projectForm"><label for="projectPath" data-i18n="项目目录">项目目录</label><div class="project-input-row"><input id="projectPath" placeholder="C:\path\to\project" required><button type="submit" data-i18n="打开">打开</button></div></form><p id="projectFeedback" role="status"></p><div id="projectList" class="project-list"></div></dialog>
+</body></html>

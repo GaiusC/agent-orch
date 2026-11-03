@@ -10,7 +10,7 @@ Thanks for contributing to Agent Orch.
 
    ```bash
    npm test
-   python -m unittest tests/test_audit_dashboard.py
+   python -m unittest discover -s tests -p 'test_*.py'
    ```
 
 ## Contribution Guidelines
