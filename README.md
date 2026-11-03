@@ -2,6 +2,11 @@
 
 Agent Orch is a Codex plugin that provides a stage-first MCP workflow for planning, implementation, independent review, acceptance, and durable continuation across CC, AGY, and Codex Worker.
 
+Version 0.8.0 adds catalog-based **use recommended / edit recommended / custom**
+initialization, automatic current-host identity detection, bounded Worker
+complexity upgrades and quota-only reviewer fallback. Existing project routes
+remain unchanged until explicitly reconfigured.
+
 Version 0.7 adds environment takeover audits, explicit Git commit policies,
 recoverable task finalization, bounded worktree allocation, and independently
 reviewed integration of parallel results. Existing uncommitted changes are
@@ -90,16 +95,21 @@ powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 in
 powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
 ```
 
-`init` no longer assigns a fixed model name to a new project. In an interactive
-terminal, it lists discovered candidates and asks for Plan, ordered Work
-provider/model fallbacks, and Review. Accept inherits Plan's exact identity.
-Choose stage-wide models first, then optionally override low/medium/high tiers.
-The Plan model must match the actual host chat; selecting it does not switch the
-host model. Existing v2 model choices are preserved by `resume`.
+`init` builds a recommendation from the discovered catalog and offers **use
+recommended / edit recommended / custom**. The recommendation selects current
+Worker candidates by model generation and provider priority with
+medium/medium/high reasoning, Sonnet High / newest
+Gemini High / previous Gemini generation High reviewers, and the actual host
+for Plan/Accept. Accepting the matrix needs one total confirmation. Editing
+changes only chosen rows; custom retains the detailed wizard. No model release
+name is pinned in this policy. Missing catalog capabilities remain explicit.
+The host identity is detected from exact current-thread metadata, or supplied
+with `--HostModel`. Existing v2 model choices are preserved by `resume`.
 
 Outside a terminal, `init` returns `selection_required: true` (exit code 2), with
-candidates and provenance, before writing project files. The host should ask the
-user using that list, save the selections as JSON, and run:
+candidates, provenance and `recommendation`, before writing project files. The
+host should show the matrix and a single use/edit/custom option box, save the
+exact approved selection as JSON, and run:
 
 ```powershell
 node scripts/agent-orch.mjs init -ProjectDir <project> -HostProvider codex --RoutesFile <routes.json>
@@ -122,6 +132,16 @@ For per-tier choices, use `{"stages":{"plan":{"routes":{"low":[...],"medium":[..
 Every tier of a supplied stage must be present. Only explicitly selected Work
 routes are enabled. Repeating `init` asks again; `--UseExistingRoutes` explicitly
 reuses the existing routes. `resume` cannot initialize a project implicitly.
+
+Recommended Work escalation is low → medium → high after timeout or exhausted
+verification/repair, preserving partial work in one registered worktree and
+separate attempt logs. After two consecutive explicit negative review rounds,
+the next `stage-work` starts an upgraded attempt; exact continuation retains its
+original model. A PASS resets the streak. Review quota fallback goes high →
+medium → low while keeping the same patch/contract binding. A FAIL, permission
+or auth error, mutation or cancellation stops instead of downgrading. Both
+policies also respect a Planner task's explicit `fallback_policy.enabled`.
+See [configuration details](skills/orchestrate-agents/references/project-configuration.md).
 
 The candidate sources are the Codex local model cache (with its timestamp), CC's
 configured models, and `agy models`. Cache/configuration entries do not prove live

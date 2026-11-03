@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
-  "version": "0.7.2+codex.20261104.1",
-  "description": "Stage-first orchestration with environment audits, selected models, concise worker events, reviewed parallel integration, recoverable Git commits, and a local Auditor workspace for execution and Git history.",
+  "version": "0.8.0+codex.20261104.1",
+  "description": "Stage-first orchestration with catalog-based recommended routes, bounded Worker upgrades, quota-only reviewer fallback, environment audits, concise events, reviewed integration, exact Git commits and a local Auditor.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -17,8 +17,8 @@
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Agent Orch",
-    "shortDescription": "Audit environments, commit tasks, and retire worktrees.",
-    "longDescription": "Select stage models and Worker reasoning/service tier. Audit inherited Git changes without guessing ownership, approve concrete reconciliation, and supervise isolated CC, AGY, or Codex workers with concise events. Independently review and accept implementations, integrate parallel results with fresh review, then verify, commit exact task changes and safely retire worktrees. Inspect plans, execution timelines, Git operations and delivery evidence in the manual-refresh, bilingual local Auditor. Preserve unrelated edits and durable recovery evidence. Hooks do not wake idle chats.",
+    "shortDescription": "Recommend routes and supervise bounded worker/reviewer retries.",
+    "longDescription": "Choose catalog-based recommended routes, edit selected tiers, or customize. Plan and Accept stay in the current host; approved Codex Worker upgrades preserve partial work and evidence, and AGY reviewers fall back only for quota. Audit inherited Git changes, supervise concise events, independently review and accept changes, integrate parallel results, commit exact task changes and safely retire worktrees. Inspect plans and Git history in the bilingual local Auditor. Preserve unrelated edits and durable evidence. Hooks do not wake idle chats.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [
@@ -26,7 +26,7 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Initialize model routes and Git policies, audit existing changes and worktrees, and present concrete reconciliation choices.",
+      "Recommend current stage models, let me use, edit or customize the matrix, and initialize Git policies while preserving existing changes.",
       "Implement and independently review this task, then finalize its exact local commit and safely retire its worktree while preserving unrelated edits.",
       "Integrate accepted parallel task results, independently review and accept the combined patch, then commit and clean up."
     ]

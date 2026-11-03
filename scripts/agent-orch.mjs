@@ -8,7 +8,8 @@ import { commandExists, runProcess } from "./lib/process.mjs";
 import { deepMerge, pathExists, readJson, writeJsonAtomic } from "./lib/utils.mjs";
 import { captureRuntimeEnvironment } from "./lib/runtime-env.mjs";
 import { createInterface } from "node:readline/promises";
-import { applyModelSelection, discoverModelCatalog, promptModelSelection, selectionRequest, validateCatalogSelection } from "./lib/model-selection.mjs";
+import { applyModelSelection, discoverHostModel, discoverModelCatalog, promptInitializationSelection, selectionRequest, validateCatalogSelection } from "./lib/model-selection.mjs";
+import { recommendRoutes } from './lib/route-recommendations.mjs';
 import { git, inventory } from "./lib/lifecycle-git.mjs";
 import { WorkerOrchestrator } from "./lib/orchestrator.mjs";
 import { DEFAULT_GIT_POLICY } from "./lib/git-lifecycle.mjs";
@@ -72,6 +73,8 @@ Common options:
   --GitPolicyFile <json>        User-selected local commit and worktree policy.
   --ModelCatalog <json>         Provider model lists supplied by the caller.
   --UseExistingRoutes          Explicitly reuse existing routes during init.
+  --HostModel <id>             Exact current host model for in-session Plan/Accept.
+  --UseRecommendedRoutes       Explicitly approve the discovered recommendation.
 
 Examples:
   agent-orch init -ProjectDir . -HostProvider codex
@@ -220,23 +223,31 @@ async function initProject() {
   const existing = await pathExists(configPath) ? await readJson(configPath) : {};
   const catalogFile = args.ModelCatalog || args.modelCatalog;
   const routesFile = args.RoutesFile || args.routesFile;
+  const hostModel=args.HostModel || args.hostModel || (!routesFile && !args.UseExistingRoutes && !args.useExistingRoutes ? await discoverHostModel() : null);
   let selection;
   if (routesFile) selection = await readJson(path.resolve(String(routesFile)));
   else if (args.UseExistingRoutes || args.useExistingRoutes) selection = { stages: existing.stages };
   else {
     const catalog = await discoverModelCatalog({ catalogFile, projectDir, cli: existing.cli });
-    if (!process.stdin.isTTY || !process.stderr.isTTY) {
-      output({ ...selectionRequest(catalog), environment: { is_git: hasGit === "true", modified_paths: environmentBefore.changes?.length ?? null, inspection_error: environmentBefore.inspection_error || null }, git_policy_choices: ["ask", "auto", "manual"], git_policy_default: "ask" });
+    if (args.UseRecommendedRoutes || args.useRecommendedRoutes) {
+      const recommendation=recommendRoutes(catalog,{hostModel});
+      if (!recommendation.available) throw new Error('Recommendation incomplete: '+recommendation.missing.join(', '));
+      selection=recommendation.selection;
+    } else if (!process.stdin.isTTY || !process.stderr.isTTY) {
+      output({ ...selectionRequest(catalog,{hostModel}), environment: { is_git: hasGit === "true", modified_paths: environmentBefore.changes?.length ?? null, inspection_error: environmentBefore.inspection_error || null }, git_policy_choices: ["ask", "auto", "manual"], git_policy_default: "ask" });
       process.exitCode = 2;
       return;
     }
+    if (!selection) {
     const readline = createInterface({ input: process.stdin, output: process.stderr });
     try {
-      selection = await promptModelSelection({ catalog, ask: question => readline.question(question), write: text => process.stderr.write(text) });
+      selection = await promptInitializationSelection({ catalog, hostModel, ask: question => readline.question(question), write: text => process.stderr.write(text) });
       validateCatalogSelection(selection.stages, catalog);
     } finally { readline.close(); }
+    }
   }
   const selected = applyModelSelection(existing, selection);
+  if (hostModel && Object.values(selected.stages.plan.routes).some(chain=>chain[0].model!==hostModel)) throw new Error('Plan must match the exact current host model');
   if (catalogFile) validateCatalogSelection(selected.stages, await discoverModelCatalog({ catalogFile }));
   const next = materializeProjectConfig(selected, { trusted: true, hostProvider: hostProvider ? String(hostProvider) : null });
   const gitPolicyFile = args.GitPolicyFile || args.gitPolicyFile;

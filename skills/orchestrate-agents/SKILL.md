@@ -1,6 +1,6 @@
 ---
 name: orchestrate-agents
-description: Initialize selected model routes and Git lifecycle policies, audit inherited environments without guessing ownership, and supervise isolated CC, AGY, or Codex Worker tasks. Configure Worker reasoning and service tier; receive concise events; independently review and accept implementations; integrate parallel results, commit exact task changes, and safely retire worktrees with durable recovery. Use when Agent Orch orchestration is requested or appropriate for project initialization, implementation, repair, independent review, or workspace reconciliation.
+description: Recommend model routes from current catalogs with use, edit or custom initialization; configure bounded Worker upgrades and quota-only reviewer fallbacks. Audit inherited environments, supervise isolated workers with concise events, independently review and accept changes, integrate results, commit exact changes and safely retire worktrees. Use for Agent Orch initialization, implementation, repair, review and workspace reconciliation.
 ---
 
 # Orchestrate Agents
@@ -24,7 +24,7 @@ Before using the stage workflow, require a Codex host model that exposes local M
    powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
    ```
 
-3. If uninitialized, run `init` first. In a terminal it prompts for stage-wide models, ordered Work fallbacks, optional low/medium/high overrides, and Codex Worker reasoning/service tier. In a non-interactive host it returns `selection_required` (exit 2) with candidates and writes no project files. Present those candidates and provenance to the user using questions/options, collect their selections, save a routes JSON, then rerun `init --RoutesFile <json>`. Accept inherits Plan's identity. Never silently fill missing routes using old model names or choose routes on the user's behalf. Repeated `init` asks again; `--UseExistingRoutes` is allowed only when the user explicitly chooses to keep their existing routes. `resume` preserves configured v2 model identities.
+3. If uninitialized, run `init` first. It returns `selection_required` (exit 2) in a non-interactive host, with the live/cache catalog and a recommendation; it writes no project files. Show the recommended matrix and provenance, then ask **Use recommended / Edit recommended / Custom** in an option box. Do not repeat model/effort/tier questions when the user accepts the matrix. Edit only chosen rows; custom retains the detailed wizard. Save the exact approved selection to a routes JSON and rerun `init --RoutesFile <json>`. Plan/Accept use the current host, detected from exact thread metadata; pass `--HostModel` only with a verified current identity if detection is unavailable. Missing catalog families or capabilities require customization, not guessed model ids. Repeated `init` asks again; explicit `--UseExistingRoutes` and `resume` preserve existing selections. Read [project-configuration.md](references/project-configuration.md) for recommendation and fallback policy details.
 4. Review `.agent-orchestrator/config.json`; require `version: 2`, `trusted: true`, `mcp.enabled: true`, and an MCP-capable Codex Plan route.
 5. Confirm continuity documents and `verification.commands`.
 6. Treat `.agent-orchestrator/runtime-env.json` as the durable provider environment snapshot. If AGY requests OAuth, resume from the shell whose proxy/runtime environment makes `agy --print` work.
@@ -92,13 +92,13 @@ Contracts must define narrow executor subtasks with:
 - acceptance criteria;
 - reviewer tasks where independent evidence is required.
 
-The contract must not select a provider or model. Stage routing belongs to project configuration.
+The contract must not select a provider or model. Stage routing belongs to project configuration. When the user approved the recommended automatic fallback policy, set `fallback_policy.enabled: true` on the relevant executor/reviewer tasks. An explicit false disables that task's automatic upgrades/fallbacks.
 
 ### Work
 
 Call `stage-work` with `task_id` and `subtask_id`. The runtime resolves `stages.work.routes` and records the complete route chain.
 
-Fallback is allowed only for classified retryable runtime failures. Authentication, OAuth, permission, sandbox, read-only, forbidden-path, and out-of-scope failures must be surfaced rather than hidden by rerouting.
+Recommended Worker attempts move only low → medium → high after timeout or exhausted deterministic repair/testing, with the same contract and owned worktree. Reviewers downgrade only for quota, never to turn a FAIL into PASS. Authentication, OAuth, permission, sandbox, read-only, forbidden-path, out-of-scope and cancellation failures stop the chain. Attempts preserve separate logs/evidence and new model sessions; inspect the actual final model and effective complexity.
 
 Provider write guarantees:
 
@@ -109,6 +109,8 @@ Provider write guarantees:
 ### Continue
 
 Use `stage-work-continue` only for the same task and prior work job. It must reuse the exact provider, model, session, and worktree. Never use it to change provider or restart an unrelated implementation.
+
+Under the recommended policy, two consecutive explicit negative review rounds request a complexity upgrade. Before the threshold, repair using exact continuation. At the threshold use `stage-work` for the same persisted subtask; the server chooses the next tier, records the handoff and preserves the partial implementation. Never simulate an upgraded model with `stage-work-continue`. A PASS resets the negative-review streak; provider outages do not count. At high-tier exhaustion inspect the evidence and revise the Plan with the user instead of looping. Review routing is raised to the implementation's effective complexity when needed.
 
 If status reports `external_process_alive`, do not continue yet. If it reports `interrupted`, inspect preserved logs, session, PID, and worktree. Continue only when the exact session is present; otherwise fail closed and request an explicitly approved new work stage.
 

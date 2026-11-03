@@ -22,13 +22,42 @@ Required gates:
 
 Routes are configured under `stages.plan`, `stages.work`, `stages.review`, and `stages.accept`. Contracts cannot override routes.
 
-New projects have no fixed model default. `init` asks for stage-wide models and
-ordered Work fallbacks, then offers low/medium/high overrides. Accept inherits
-the exact Plan identity. Choose a Plan model that matches the actual MCP-capable
-host chat. Outside a TTY, collect user selections from `selection_required` and
-rerun with `--RoutesFile <json>`. `--ModelCatalog <json>` supplies provider lists;
-`--UseExistingRoutes` explicitly reuses routes. Never choose silently on behalf
-of the user. Existing v2 model identities are preserved by `resume`.
+New projects have no fixed model default. `init` discovers models and offers
+**use recommended / edit recommended / custom**. Recommended uses the newest
+versioned generation and provider priority for medium/high Work, and the next
+ranked candidate for low Work, with medium/medium/high reasoning and inherited
+CLI service tier. Sol/Terra are tie-breakers, not pinned future model families.
+Review uses the newest Sonnet High, newest Gemini High and previous Gemini
+generation High respectively for high/medium/low. Version names are a heuristic,
+not proof of capability or quota. Missing families/capabilities are explicit.
+Plan/Accept use the actual host identity from current thread metadata; if it is
+unavailable provide the verified `--HostModel <id>` rather than an old default.
+
+Outside a TTY, `selection_required` includes `recommendation`, its provenance and
+the three choices without writing configuration. Show a single options question;
+after approval, save that exact selection and use `--RoutesFile <json>`.
+`--UseRecommendedRoutes` is an explicit approval flag for the discovered matrix;
+use `--ModelCatalog <json>` to pin the reviewed catalog when automating it.
+`--UseExistingRoutes` explicitly reuses routes. `resume` preserves existing v2
+model identities; changing this initialization feature does not rewrite them.
+
+Recommended policies are recorded under `stages.work.escalation` with
+`enabled: true, review_failures_before_upgrade: 2`, and
+`stages.review.quota_fallback: true`. Each recommended Work tier has one Codex
+route; review arrays are ordered high → medium → low for high tasks and
+medium → low for medium tasks. Low review has a single route.
+
+Fallback also requires `fallback_policy.enabled: true` in the relevant Planner
+subtask/review. Worker timeout or failed deterministic verification upgrades
+one tier after the process exits. Partial work stays in the same registered
+worktree; each attempt keeps separate logs, patches and model sessions. Two
+consecutive explicit reviewer FAILs at a tier cause the next `stage-work` to
+upgrade; exact `stage-work-continue` cannot change models. PASS resets the
+streak. The high tier is the ceiling. Review uses at least the implementation's
+effective complexity and falls back only for recognized quota, retaining the
+original patch/contract binding and actual final model. Negative verdicts,
+auth/permission errors, mutation or cancellation never trigger a cheaper review.
+Environment reviews use the same quota chain but remain advisory-only.
 
 Codex Worker routes accept `reasoning_effort` and `service_tier`. Both may be
 `null` to inherit CLI settings. Supported reasoning depends on the selected

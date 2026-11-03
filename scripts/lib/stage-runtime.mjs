@@ -60,6 +60,7 @@ export class StageRuntime {
       phase: linkedJob.phase || null,
       provider: linkedJob.provider || stageRun.provider || null,
       model: linkedJob.model || stageRun.model || null,
+      effective_complexity:linkedJob.effective_complexity || linkedJob.complexity || null,
       session_id: linkedJob.session_id || stageRun.session_id || null,
       job_id: linkedJob.id,
       finished_at: terminal ? (linkedJob.finished_at || nowIso()) : null,

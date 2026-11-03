@@ -84,7 +84,7 @@ function parseClaudeOutput(stdout, fallbackSessionId) {
 }
 
 export async function runClaude({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0, processHooks = {} }) {
-  const reportingDirectory = await prepareProgressChannel(jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
+  const reportingDirectory = await prepareProgressChannel(config.reporting_job_dir || jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
   const sessionId = taskSession?.session_id || crypto.randomUUID();
   await processHooks.onSession?.(sessionId);
   const basePrompt = contractPrompt({
@@ -495,7 +495,7 @@ export async function readWorkerProgress({ job, jobDir }) {
 }
 
 export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths, writablePaths, forbiddenPaths, taskSession, model, signal, mode = "investigate", processHooks = {} }) {
-  const reportingDirectory = await prepareProgressChannel(jobDir, { projectDir: config.project_dir || workspace, role: /review/.test(mode) ? "reviewer" : "worker" });
+  const reportingDirectory = await prepareProgressChannel(config.reporting_job_dir || jobDir, { projectDir: config.project_dir || workspace, role: /review/.test(mode) ? "reviewer" : "worker" });
   const evidenceOnly = mode !== "disjoint_subtask";
   const taskPrompt = mode === "plan"
     ? [
@@ -659,7 +659,7 @@ export function contractPromptAgyWrite({ goal, plan, acceptance, readPaths, writ
 }
 
 export async function runAgyWrite({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0, processHooks = {} }) {
-  const reportingDirectory = await prepareProgressChannel(jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
+  const reportingDirectory = await prepareProgressChannel(config.reporting_job_dir || jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
   const sessionId = taskSession?.session_id || crypto.randomUUID();
   const basePrompt = contractPromptAgyWrite({
     goal,
@@ -848,7 +848,7 @@ export async function runCodexWorker({
   round = 0,
   processHooks = {},
 }) {
-  const reportingDirectory = await prepareProgressChannel(jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
+  const reportingDirectory = await prepareProgressChannel(config.reporting_job_dir || jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
   const prompt = codexWorkerPrompt({ goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, repairContext }) + "\n\n" + progressInstructions(reportingDirectory);
   const options = normalizeWorkerOptions(config.codex_worker);
   const reasoningEffort = options.reasoning_effort;

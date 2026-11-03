@@ -1,13 +1,13 @@
 interface:
   display_name: "Agent Orch"
-  short_description: "Review environments, commit tasks, and retire worktrees safely"
-  default_prompt: "Use $orchestrate-agents to audit inherited environments, preserve unknown changes, select model routes and Git policies, and persist the plan. Supervise short checkpoint events with wait-for-job, independently review and accept work or integrated parallel results, then finalize exact local commits and safe worktree retirement with durable receipts."
+  short_description: "Recommend routes, review work, and finalize exact Git changes"
+  default_prompt: "Use $orchestrate-agents to present catalog-based recommended routes with use, edit or custom choices, preserve existing changes and select Git policies. Persist the plan, supervise bounded Worker upgrades and quota-only reviewer fallback with concise events, independently accept changes, and finalize exact local commits with safe worktree retirement."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "agent_orch"
-      description: "Environment audits, concise events, reviewed integration, exact Git commits, and safe retirement"
+      description: "Recommended routes, bounded Worker upgrades, quota-only review fallback, concise events and exact Git finalization"
       transport: "stdio"
 
 policy:

@@ -57,6 +57,8 @@ export function compactJob(job, managed = false) {
   const attention = job.status === "failed" || runtime_state === "interrupted";
   const action_required = attention || job.phase === "ready_for_acceptance" || (job.status === "completed" && /review|verify/.test(job.type) && job.phase === "completed");
   const value = { id: job.id, status: job.status, phase: job.phase, runtime_state, action_required };
+  if (job.adaptive_escalation) value.effective_complexity=job.effective_complexity;
+  if (job.review_route_attempts?.length>1) value.actual_model=job.model;
   if (job.closeout_phase) {
     value.closeout_phase = job.closeout_phase;
     value.action_required = !['closed', 'committed', 'wip_preserved'].includes(job.closeout_phase);

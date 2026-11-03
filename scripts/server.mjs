@@ -382,7 +382,7 @@ async function resolveJobOrchestrator(jobId) {
 }
 
 const server = new Server(
-  { name: "agent-orch-mcp", version: "0.7.2" },
+  { name: "agent-orch-mcp", version: "0.8.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -621,7 +621,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         });
         try {
           const job = await orchestrator.startStageWork(args, routes, { stageRunId: stageRun.stage_run_id });
-          const linked = await stageRuntime.update(stageRun.stage_run_id, { job_id: job.id, provider: job.provider, model: job.model });
+          const linked = await stageRuntime.update(stageRun.stage_run_id, { job_id: job.id, provider: job.provider, model: job.model,route_chain:job.route_chain,effective_complexity:job.effective_complexity });
           return startedResponse(linked, job, args, orchestrator);
         } catch (error) {
           await stageRuntime.update(stageRun.stage_run_id, { status: "failed", error: error?.message || String(error), finished_at: new Date().toISOString() });

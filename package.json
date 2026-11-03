@@ -1,9 +1,9 @@
 {
   "name": "agent-orch",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
-  "description": "Agent orchestration with environment audits, selected model routes, concise progress, reviewed parallel integration, exact Git commits, and safe worktree retirement.",
+  "description": "Agent orchestration with recommended model routes, bounded Worker upgrades, quota-only reviewer fallback, concise progress, independent review and safe Git finalization.",
   "scripts": {
     "agent-orch": "node scripts/agent-orch.mjs",
     "test": "node --test tests/*.test.mjs",
