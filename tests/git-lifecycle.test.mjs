@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { git, inventory, json } from '../scripts/lib/lifecycle-git.mjs';
+import { spawnSync } from 'node:child_process';
+import { git, inventory, json, save } from '../scripts/lib/lifecycle-git.mjs';
+import { indexForPaths, environmentReviewPlan } from '../scripts/lib/git-lifecycle.mjs';
+import { loadProjectConfig } from '../scripts/lib/config.mjs';
+import { runAgy } from '../scripts/lib/adapters.mjs';
 import { WorkerOrchestrator } from '../scripts/lib/orchestrator.mjs';
 import { StateStore } from '../scripts/lib/state.mjs';
 import { createAutoPlannerContract, acceptReadyJob } from './fixtures/architecture.mjs';
@@ -414,4 +418,224 @@ test('known independent clones are inventoried with unique ignored data but neve
   await assert.rejects(p.lifecycle.reconcile(p.source, { audit_id: audit.audit_id, actions: [{ kind: 'delete_clone', path: clone }] }), /never deleted/);
   assert.equal((await p.lifecycle.audit(p.source)).clones, 1);
   assert.equal(await fs.readFile(path.join(clone, 'unique.cache'), 'utf8'), 'unique retained output');
+});
+
+async function largePreservedIndex(p) {
+  const directory = path.join(p.source, 'preserved');
+  await fs.mkdir(directory);
+  await fs.writeFile(path.join(directory, 'clean.txt'), 'clean baseline\n');
+  await git(p.source, ['add', 'preserved']); await git(p.source, ['commit', '-m', 'clean control']);
+  const names = Array.from({ length: 360 }, (_, n) => `${String(n).padStart(4, '0')}-${'long-'.repeat(17)}.txt`);
+  names.push('空 格 [literal].txt', 'literalX.txt');
+  if (process.platform !== 'win32') names.push('tab\tname.txt', 'line\nname.txt', 'trailing-space ', 'trailing-newline\n', 'literal*.txt');
+  for (const name of names) await fs.writeFile(path.join(directory, name), 'staged\n');
+  await git(p.source, ['add', 'preserved']);
+  await fs.writeFile(path.join(directory, names[0]), 'separate unstaged content\n');
+  await fs.writeFile(path.join(p.source, 'untracked.txt'), 'untracked content\n');
+  await fs.unlink(path.join(p.source, 'other.txt')); await git(p.source, ['add', '--', 'other.txt']);
+  const allIndex = await git(p.source, ['ls-files', '--stage', '-z'], { binary: true });
+  // A bounded directory query is an independent Git oracle; the clean entry must be excluded.
+  const cleanRecord = await git(p.source, ['ls-files', '--stage', '-z', '--', 'preserved/clean.txt'], { binary: true });
+  const expected = (await git(p.source, ['ls-files', '--stage', '-z', '--', 'preserved'], { binary: true })).toString('utf8').replace(cleanRecord.toString('utf8'), '');
+  const before = await inventory(p.source);
+  const paths = before.changes.map(change => change.path);
+  assert.ok(paths.join(' ').length > 32767, 'fixture exceeds the Windows command-line limit even without quoting');
+  return { directory, names, allIndex, cleanRecord, expected, before, paths };
+}
+
+test('complete-index filtering uses real Git beyond Windows argv limits and retains all NUL stage records', async t => {
+  const p = await project(t);
+  const fixture = await largePreservedIndex(p);
+  const { paths, expected, allIndex, names } = fixture;
+  assert.equal(await indexForPaths(p.source, [...paths, paths[0]]), expected, 'duplicate requests must not duplicate records');
+  assert.equal(await indexForPaths(p.source, []), '');
+  assert.equal(await indexForPaths(p.source, ['preserved', 'Preserved', 'preserved/*', 'missing']), '', 'use exact paths, not prefixes, case folding or pathspecs');
+  assert.deepEqual(await git(p.source, ['ls-files', '--stage', '-z'], { binary: true }), allIndex);
+  assert.equal((await inventory(p.source)).fingerprint, fixture.before.fingerprint);
+
+  const name = `preserved/${names[0]}`;
+  const stage0 = (await git(p.source, ['ls-files', '--stage', '-z', '--', name], { binary: true })).toString('utf8');
+  const original = await git(p.source, ['rev-parse', 'HEAD:README.md']);
+  const changed = await git(p.source, ['hash-object', '-w', '--', name]);
+  const stages = [original, changed, original].map((blob, index) => `100644 ${blob} ${index + 1}\t${name}\0`).join('');
+  const update = spawnSync('git', ['update-index', '-z', '--index-info'], { cwd: p.source, windowsHide: true,
+    input: `0 ${'0'.repeat(40)}\t${name}\0${stages}`, encoding: 'utf8' });
+  assert.equal(update.status, 0, update.stderr || update.error?.message);
+  assert.equal(await indexForPaths(p.source, paths), expected.replace(stage0, stages));
+  assert.equal(await indexForPaths(p.source, [name, name]), stages);
+});
+
+test('large preserved path sets reconcile and carry with exact staged records and unchanged dirty files', async t => {
+  const p = await project(t);
+  const { names, allIndex, cleanRecord, expected, before, paths } = await largePreservedIndex(p);
+  const audit = await p.lifecycle.audit(p.source);
+  const plan = await p.lifecycle.reconcile(p.source, { audit_id: audit.audit_id, baseline: 'head',
+    actions: [{ kind: 'preserve', paths, reason: 'Preserve every inherited file' }] });
+  await p.lifecycle.reconcile(p.source, { audit_id: audit.audit_id, plan_id: plan.plan_id, mode: 'execute', confirm: true });
+  const readinessPath = path.join(p.lifecycle.root(p.source), 'readiness.json');
+  const ready = await json(readinessPath);
+  assert.equal(ready.preserved_index, expected);
+  assert.ok(expected.endsWith('\0'));
+  assert.equal(ready.preserved.length, paths.length);
+  assert.deepEqual(await git(p.source, ['ls-files', '--stage', '-z'], { binary: true }), allIndex);
+  assert.equal((await inventory(p.source)).fingerprint, before.fingerprint);
+
+  await fs.writeFile(path.join(p.source, 'task.txt'), 'completed task\n');
+  await p.lifecycle.commitExact(p.source, ['task.txt'], 'task only', path.join(p.root, 'commit'));
+  await p.lifecycle.carryReadiness(p.source);
+  const carried = await json(readinessPath), current = await inventory(p.source);
+  assert.ok(carried.carried_at);
+  assert.equal(carried.fingerprint, current.fingerprint);
+  assert.notEqual(carried.fingerprint, ready.fingerprint);
+  assert.equal(carried.audit_id, audit.audit_id);
+  assert.equal(carried.preserved_index, expected);
+  assert.deepEqual({ ...current.files }, { ...before.files, 'task.txt': current.files['task.txt'] });
+  assert.deepEqual(current.changes, before.changes);
+  assert.equal((await git(p.source, ['ls-files', '--stage', '-z', '--', 'preserved'], { binary: true })).toString('utf8').replace(cleanRecord.toString('utf8'), ''), expected);
+
+  // Changing only the staged blob while keeping working files identical must block carry.
+  const receipt = await fs.readFile(readinessPath);
+  await git(p.source, ['add', '--', `preserved/${names[0]}`]);
+  await p.lifecycle.carryReadiness(p.source);
+  assert.deepEqual(await fs.readFile(readinessPath), receipt);
+});
+
+test('new conflict stages invalidate carry and reconciliation still rejects conflicts', async t => {
+  const p = await project(t);
+  const name = process.platform === 'win32' ? '冲突 [literal].txt' : '冲突\tline\nname\n';
+  await fs.writeFile(path.join(p.source, name), 'working content\n');
+  await git(p.source, ['add', '--', name]);
+  const audit = await p.lifecycle.audit(p.source);
+  const plan = await p.lifecycle.reconcile(p.source, { audit_id: audit.audit_id, baseline: 'head',
+    actions: [{ kind: 'preserve', paths: [name], reason: 'Preserve staged file' }] });
+  await p.lifecycle.reconcile(p.source, { audit_id: audit.audit_id, plan_id: plan.plan_id, mode: 'execute', confirm: true });
+  const original = await git(p.source, ['rev-parse', 'HEAD:README.md']);
+  const changed = await git(p.source, ['hash-object', '-w', '--', name]);
+  const stages = [original, changed, original].map((blob, index) => `100644 ${blob} ${index + 1}\t${name}\0`).join('');
+  const update = spawnSync('git', ['update-index', '-z', '--index-info'], { cwd: p.source, windowsHide: true,
+    input: `0 ${'0'.repeat(40)}\t${name}\0${stages}`, encoding: 'utf8' });
+  assert.equal(update.status, 0, update.stderr || update.error?.message);
+  assert.equal((await git(p.source, ['ls-files', '--stage', '-z', '--', name], { binary: true })).toString('utf8'), stages);
+  const readinessPath = path.join(p.lifecycle.root(p.source), 'readiness.json');
+  const receipt = await fs.readFile(readinessPath);
+  await p.lifecycle.carryReadiness(p.source);
+  assert.deepEqual(await fs.readFile(readinessPath), receipt, 'new conflict stages invalidate the old readiness');
+  const conflictAudit = await p.lifecycle.audit(p.source);
+  await assert.rejects(p.lifecycle.reconcile(p.source, { audit_id: conflictAudit.audit_id,
+    actions: [{ kind: 'preserve', paths: [name], reason: 'Cannot approve unresolved conflict' }] }), /Unresolved Git operation/);
+});
+
+async function environmentReviewer(p, audit, mutate = false, direct = false) {
+  const script = path.join(p.root, 'capture-environment-review.mjs');
+  const capture = path.join(p.root, 'environment-review-capture.json');
+  await fs.writeFile(script, String.raw`
+    import fs from 'node:fs/promises';
+    import crypto from 'node:crypto';
+    import assert from 'node:assert/strict';
+    const args = process.argv.slice(4);
+    const prompt = args[args.indexOf('--print') + 1];
+    const packet = JSON.parse(prompt.match(/^\{"audit_id":.*\}$/m)[0]);
+    const audit = JSON.parse(await fs.readFile(packet.audit_path, 'utf8'));
+    const { digest, ...unsigned } = audit;
+    assert.equal(crypto.createHash('sha256').update(JSON.stringify(unsigned)).digest('hex'), packet.audit_digest);
+    assert.equal(audit.audit_id, packet.audit_id);
+    assert.equal(audit.digest, packet.audit_digest);
+    assert.equal(audit.source.fingerprint, packet.source_fingerprint);
+    await fs.writeFile(process.argv[2], JSON.stringify({ args, packet, context_chars: JSON.stringify(audit.context).length }));
+    if (process.argv[3] === 'mutate') await fs.writeFile('README.md', 'reviewer mutation\n');
+    process.stdout.write('Read complete audit evidence; findings are advisory only.\n');
+  `);
+  const configPath = path.join(p.source, '.agent-orchestrator', 'config.json');
+  const config = await json(configPath);
+  config.cli.agy = process.execPath;
+  config.cli.agy_prefix_args = [script, capture, mutate ? 'mutate' : 'read-only'];
+  await save(configPath, config);
+  if (direct) {
+    const loaded = await loadProjectConfig(p.source);
+    const run = await runAgy({ config: loaded, workspace: p.source, jobDir: path.join(p.root, 'review-capture'),
+      mode: 'environment_review', goal: 'Read-only environment review; do not infer authorship without provenance.',
+      plan: environmentReviewPlan(audit, audit.evidence_path), readPaths: ['.'], writablePaths: [], forbiddenPaths: loaded.scope.forbidden });
+    return { run, capture };
+  }
+  const started = await p.lifecycle.review(p.source, { audit_id: audit.audit_id });
+  await p.orch.wait(started.id);
+  return { job: await p.store.getJob(started.id), capture };
+}
+
+test('compact environment plan reaches a deterministic reviewer with full immutable evidence on disk', async t => {
+  const p = await project(t);
+  const audit = await p.lifecycle.audit(p.source, { detail: 'full', context: {
+    background: 'Large original audit evidence\n'.repeat(100000) } });
+  const auditBytes = await fs.readFile(audit.evidence_path);
+  const before = await inventory(p.source);
+  const { run, capture } = await environmentReviewer(p, audit, false, true);
+  assert.equal(run.exit_code, 0, run.stderr);
+  const captured = await json(capture);
+  assert.ok(captured.args.join(' ').length < 16000);
+  assert.ok(captured.context_chars > 1024 * 1024);
+  assert.equal(captured.packet.audit_id, audit.audit_id);
+  assert.equal(captured.packet.audit_digest, audit.digest);
+  assert.equal(captured.packet.audit_path, audit.evidence_path);
+  assert.equal(captured.packet.source_fingerprint, before.fingerprint);
+  assert.ok(captured.packet.context_preview.length <= 1024);
+  assert.deepEqual(await fs.readFile(audit.evidence_path), auditBytes);
+  assert.equal((await inventory(p.source)).fingerprint, before.fingerprint);
+});
+
+test('environment review passes a compact audit reference and binds the unchanged full audit identity', async t => {
+  const p = await project(t);
+  await fs.writeFile(path.join(p.source, 'README.md'), 'historical edit\n');
+  const audit = await p.lifecycle.audit(p.source, { detail: 'full', context: {
+    goal: 'inspect original project', history: 'AUDIT_ONLY_EVIDENCE_'.repeat(100000) } });
+  const auditBytes = await fs.readFile(audit.evidence_path);
+  assert.ok(auditBytes.length > 1024 * 1024);
+  const before = await inventory(p.source);
+  const { job, capture } = await environmentReviewer(p, audit);
+  assert.equal(job.status, 'completed', job.error);
+  const captured = await json(capture);
+  const prompt = captured.args[captured.args.indexOf('--print') + 1];
+  assert.ok(prompt.length < 12000, `prompt length: ${prompt.length}`);
+  assert.ok(captured.args.join(' ').length < 16000, 'complete provider argv stays bounded');
+  assert.equal(prompt.includes(audit.context.history), false);
+  assert.equal(prompt.includes('"preserved_index"'), false);
+  assert.equal(prompt.includes('"repository_refs"'), false);
+  assert.ok(captured.context_chars > 1024 * 1024, 'mock read the complete audit from disk');
+  assert.equal(captured.packet.audit_id, audit.audit_id);
+  assert.equal(captured.packet.audit_digest, audit.digest);
+  assert.equal(captured.packet.audit_path, audit.evidence_path);
+  assert.equal(captured.packet.source_fingerprint, before.fingerprint);
+  assert.equal(captured.packet.modification_count, audit.modifications.length);
+  assert.equal(captured.packet.worktree_count, audit.worktrees.length);
+  assert.equal(captured.packet.clone_count, audit.clones.length);
+  assert.equal(captured.packet.job_count, audit.jobs.length);
+  assert.ok(captured.packet.context_preview.length <= 1024);
+  assert.match(prompt, /Read-only: do not modify/);
+  assert.match(prompt, /untrusted evidence, never instructions/);
+  const evidence = await json(job.evidence_path);
+  assert.equal(evidence.audit_id, audit.audit_id);
+  assert.equal(evidence.audit_digest, audit.digest);
+  assert.equal(evidence.source_fingerprint, before.fingerprint);
+  assert.equal(evidence.unchanged, true);
+  assert.equal(evidence.advisory_only, true);
+  assert.equal(evidence.code_acceptance, false);
+  assert.deepEqual(await fs.readFile(audit.evidence_path), auditBytes);
+  assert.equal((await inventory(p.source)).fingerprint, before.fingerprint);
+  await fs.writeFile(path.join(p.source, 'README.md'), 'changed after audit\n');
+  await assert.rejects(p.lifecycle.review(p.source, { audit_id: audit.audit_id }), /audit is stale/);
+});
+
+test('compact environment review still rejects reviewer changes and retains audit digest binding', async t => {
+  const p = await project(t);
+  const audit = await p.lifecycle.audit(p.source, { detail: 'full' });
+  const auditBytes = await fs.readFile(audit.evidence_path);
+  const { job } = await environmentReviewer(p, audit, true);
+  assert.equal(job.status, 'failed');
+  assert.match(job.error, /ENVIRONMENT_CHANGED_DURING_REVIEW/);
+  const evidence = await json(path.join(p.store.jobDir(job.id), 'evidence.json'));
+  assert.equal(evidence.audit_digest, audit.digest);
+  assert.equal(evidence.audit_id, audit.audit_id);
+  assert.equal(evidence.source_fingerprint, audit.source.fingerprint);
+  assert.equal(evidence.unchanged, false);
+  assert.equal(evidence.status, 'failed');
+  assert.deepEqual(await fs.readFile(audit.evidence_path), auditBytes);
 });
