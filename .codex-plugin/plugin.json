@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
-  "version": "0.8.0+codex.20261104.1",
-  "description": "Stage-first orchestration with catalog-based recommended routes, bounded Worker upgrades, quota-only reviewer fallback, environment audits, concise events, reviewed integration, exact Git commits and a local Auditor.",
+  "version": "0.8.1+codex.20261104.1",
+  "description": "Stage-first orchestration with runtime project identity, audited coordinator registration, shared workspace limits, recommended model routes, independent review and a local Auditor.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -17,8 +17,8 @@
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Agent Orch",
-    "shortDescription": "Recommend routes and supervise bounded worker/reviewer retries.",
-    "longDescription": "Choose catalog-based recommended routes, edit selected tiers, or customize. Plan and Accept stay in the current host; approved Codex Worker upgrades preserve partial work and evidence, and AGY reviewers fall back only for quota. Audit inherited Git changes, supervise concise events, independently review and accept changes, integrate parallel results, commit exact task changes and safely retire worktrees. Inspect plans and Git history in the bilingual local Auditor. Preserve unrelated edits and durable evidence. Hooks do not wake idle chats.",
+    "shortDescription": "Bind project identity and supervise reviewed, bounded workspaces.",
+    "longDescription": "Bind execution to the original project. Register necessary coordinator copies through audited reconciliation and share workspace limits across repositories. Recommend current model routes, preserve Worker progress during bounded upgrades, use quota-only review fallback, independently review and accept exact changes, then commit and safely retire worktrees. Preserve unrelated edits, model routes and historical evidence; inspect activity in the local Auditor. Hooks do not wake idle chats.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [

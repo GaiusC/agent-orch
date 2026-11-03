@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { bindProject } from './lib/project-identity.mjs';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -51,7 +52,7 @@ const tools = [
   },
   {
     name: "environment-reconcile",
-    description: "Prepare an exact environment action plan, then execute that reviewed plan with explicit approval and stale-state checks. Unknown clones are never automatically deleted.",
+    description: "Prepare exact environment actions, then execute the approved plan with stale-state checks. register_coordinator enrolls an audited absolute path under the original project's shared limits; unknown clones are never deleted automatically.",
     inputSchema: { type: "object", properties: { project_dir: { type: "string" }, audit_id: { type: "string" }, mode: { type: "string", enum: ["prepare", "execute"] }, actions: { type: "array", items: { type: "object" } }, baseline: { type: "string", enum: ["head", "snapshot", "block"] }, plan_id: { type: "string" }, confirm: { type: "boolean" } }, required: ["project_dir", "audit_id", "mode"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
   },
@@ -63,7 +64,7 @@ const tools = [
   },
   {
     name: "stage-plan",
-    description: "Persist the in-session Planner contract and immutable Plan execution identity. This stage does not invoke an external planner when Codex is the host.",
+    description: "Persist the in-session Planner contract and immutable host, project and coordinator identity. Copied or unregistered coordinator repositories are blocked before Plan persistence.",
     inputSchema: {
       type: "object",
       properties: {
@@ -382,7 +383,7 @@ async function resolveJobOrchestrator(jobId) {
 }
 
 const server = new Server(
-  { name: "agent-orch-mcp", version: "0.8.0" },
+  { name: "agent-orch-mcp", version: "0.8.1" },
   { capabilities: { tools: {} } },
 );
 
@@ -557,6 +558,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       return denialResponse(validation);
     }
 
+    // Enforce before stage files, contracts or provider jobs can be created.
+    let projectBinding = null;
+    if (effectiveProjectDir && !['health', 'environment-audit', 'environment-reconcile', 'status', 'result', 'wait-for-job', 'cancel', 'cleanup'].includes(name)) projectBinding = await bindProject(path.resolve(effectiveProjectDir));
+
     // For project-scoped tools, get the per-project orchestrator.
     let orchestrator;
     let stageRuntime;
@@ -564,6 +569,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const entry = await getProjectOrchestrator(effectiveProjectDir);
       orchestrator = entry.orchestrator;
       stageRuntime = entry.stageRuntime;
+      const taskId = args.task_id || (args.job_id ? (await entry.store.getJob(args.job_id))?.task_id : null);
+      if (projectBinding && taskId) await stageRuntime.assertProjectIdentity(taskId, projectBinding);
     }
 
     // For job-control tools resolved via job lookup, use that project's orchestrator.
@@ -589,6 +596,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         const [route] = resolveStageRoutes(config, "plan", config.stages?.plan?.default_complexity || "high");
         const contract = await persistPlannerContract(projectDir, requireString(args, "task_id"), args.contract, requireString(args, "planner_session_id"));
         const identity = await stageRuntime.savePlanIdentity(args.task_id, {
+          project_id: projectBinding.project_id,
+          coordinator_common: projectBinding.coordinator_common,
           provider: route.provider,
           model: route.model,
           invocation: route.invocation,

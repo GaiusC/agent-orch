@@ -1,13 +1,13 @@
 ---
 name: orchestrate-agents
-description: Recommend model routes from current catalogs with use, edit or custom initialization; configure bounded Worker upgrades and quota-only reviewer fallbacks. Audit inherited environments, supervise isolated workers with concise events, independently review and accept changes, integrate results, commit exact changes and safely retire worktrees. Use for Agent Orch initialization, implementation, repair, review and workspace reconciliation.
+description: Bind execution to the original project and share workspace limits across audited coordinator copies. Recommend current model routes, configure bounded Worker upgrades and quota-only reviewer fallbacks, supervise concise events, independently review and accept changes, integrate results, commit exact changes and safely retire worktrees. Use for Agent Orch initialization, implementation, repair, review and workspace reconciliation.
 ---
 
 # Orchestrate Agents
 
 Use Agent Orch as a Codex-standard, stage-first plugin. The CLI manages project lifecycle; all planning persistence, provider work, formal review, acceptance, and job control occur through MCP.
 
-When Codex is the host, keep planning and acceptance in the current Codex task. Do not invoke Codex CLI as an external planner/accepter. Codex Worker is a distinct work-stage provider and may edit only inside its isolated worktree.
+When Codex is the host, keep planning and acceptance in the current Codex task. Do not invoke Codex CLI as an external planner/accepter. Worker isolation is allocated by Agent Orch inside the existing project; it is not an instruction for the host to create another coordinator repository.
 
 Read [role-boundaries-and-workflow.md](references/role-boundaries-and-workflow.md) when ownership or acceptance responsibility is unclear.
 
@@ -28,9 +28,18 @@ Before using the stage workflow, require a Codex host model that exposes local M
 4. Review `.agent-orchestrator/config.json`; require `version: 2`, `trusted: true`, `mcp.enabled: true`, and an MCP-capable Codex Plan route.
 5. Confirm continuity documents and `verification.commands`.
 6. Treat `.agent-orchestrator/runtime-env.json` as the durable provider environment snapshot. If AGY requests OAuth, resume from the shell whose proxy/runtime environment makes `agy --print` work.
-7. Inspect the initialization/resume environment audit before starting new work. When legacy changes, clones, or worktrees need interpretation, read [git-lifecycle.md](references/git-lifecycle.md). Provide the reviewer a compact background packet with facts, evidence, permissions, and unknowns; do not forward entire transcripts or invent authorship. Use `stage-review` with `review_kind: environment` and `audit_id` only when interpretation is needed. Its advisory findings never substitute for code acceptance.
-8. Prepare concrete `environment-reconcile` actions, then ask once for unresolved decisions and execute the approved plan. `confirm: true` must reflect actual authorization. Never clone, stash, reset, or delete unknown content merely to obtain a clean status. Dirty-source work requires an explicitly approved HEAD/snapshot baseline; unknown changes may remain preserved if the task does not depend on them.
+7. Audit the user's original project before allocating or creating any workspace, including when restarting a Plan or abandoning an old job. Include known coordinator copies in `clone_paths`, even if created by file copy plus `git init`. An audit of a fresh empty/clean copy does not cover its source. When legacy changes, clones, or worktrees need interpretation, read [git-lifecycle.md](references/git-lifecycle.md). Provide the reviewer a compact background packet with facts, evidence, permissions, and unknowns; do not forward entire transcripts or invent authorship. Use `stage-review` with `review_kind: environment` and `audit_id` only when interpretation is needed. Its advisory findings never substitute for code acceptance.
+8. Prepare concrete `environment-reconcile` actions, then ask once for unresolved decisions and execute the approved plan. `confirm: true` must reflect actual authorization. Never clone, copy files into a new Git repository, stash, reset, or delete unknown content merely to obtain a clean status. A new Plan/job does not authorize a new coordinator repository; use the existing project and let `stage-work` allocate bounded worktrees. Dirty-source work requires an explicitly approved HEAD/snapshot baseline; unknown changes may remain preserved if the task does not depend on them. Provenance, permission or path-length failures require diagnosis, not an automatic fresh repository; a genuinely necessary relocation must name the source, destination, reuse alternatives and retention/cleanup disposition for review.
 9. Select `git_lifecycle.commit_policy` once: `ask`, `auto`, or `manual`. Terminal initialization offers this choice; the main chat can supply `--GitPolicyFile`. Auto means local commits of accepted, verified, precisely scoped task changes only; it never grants push, publication, or history-rewrite permission. Missing policy defaults to ask.
+
+Runtime identity errors require inspection of the original project. Do not
+delete identity sidecars, change the caller's thread identity, or start a fresh
+repository to retry. A necessary separate coordinator must appear in the
+original `environment-audit.clone_paths`, then in an approved
+`environment-reconcile` action `register_coordinator` with its absolute `path`
+and `reason`. Select an approved original baseline; source changes require a
+fresh audit and registration renewal. Counts include independent coordinator
+checkouts and linked worktrees, under the original policy and shared lock.
 
 ## Use the stage contract
 

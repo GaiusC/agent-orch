@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { bindProject } from './lib/project-identity.mjs';
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -216,6 +217,7 @@ function materializeProjectConfig(existing = {}, { trusted = true, hostProvider 
 async function initProject() {
   const projectDir = projectDirArg();
   const hasGit = await git(projectDir, ["rev-parse", "--is-inside-work-tree"], { allowFailure: true });
+  if (hasGit === 'true') await bindProject(projectDir, { create: false });
   const environmentBefore = hasGit === "true" ? await inventory(projectDir).catch(error => ({ inspection_error: error.message })) : { is_git: false };
   const hostProvider = args.HostProvider || args.hostProvider || args.Host || args.host || null;
   const orchestratorRoot = projectOrchestratorRoot(projectDir);
@@ -260,6 +262,7 @@ async function initProject() {
     } finally { readline.close(); }
   }
   if (!["ask", "auto", "manual"].includes(next.git_lifecycle.commit_policy)) throw new Error("Invalid Git commit policy");
+  if (hasGit === 'true') await bindProject(projectDir);
   await fs.mkdir(orchestratorRoot, { recursive: true });
   await fs.mkdir(projectStateRoot(projectDir), { recursive: true });
   await fs.mkdir(projectRunsRoot(projectDir), { recursive: true });
@@ -342,6 +345,7 @@ async function health() {
 
 async function resumeProject() {
   const projectDir = projectDirArg();
+  if (await git(projectDir, ['rev-parse', '--is-inside-work-tree'], { allowFailure: true }) === 'true') await bindProject(projectDir);
   const configPath = path.join(projectOrchestratorRoot(projectDir), "config.json");
   if (!(await pathExists(configPath))) throw new Error("Project is not initialized. Run init and select stage models first.");
   const existing = await pathExists(configPath) ? await readJson(configPath) : {};

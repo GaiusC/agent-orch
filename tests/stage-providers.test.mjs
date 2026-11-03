@@ -142,6 +142,32 @@ test("Codex Worker stage uses writable non-interactive execution and exact conti
   assert.ok(continuedJob.process_args.includes('model_reasoning_effort="xhigh"'));
   assert.ok(continuedJob.process_args.includes('service_tier="fast"'));
   await orchestrator.wait(continued.id);
+
+  // Older releases did not persist the original owner on continued jobs.
+  // Reproduce a second continuation whose workspace still belongs to the first.
+  const { owner_job_id: firstOwner, ...legacyFirst } = startedJob.workspace;
+  const { owner_job_id: continuedOwner, ...legacyContinued } = continuedJob.workspace;
+  assert.equal(firstOwner, started.id);
+  assert.equal(continuedOwner, started.id);
+  await store.updateJob(started.id, { workspace: legacyFirst });
+  await store.updateJob(continued.id, { workspace: legacyContinued });
+  const worktreesBefore = git(projectDir, "worktree", "list", "--porcelain");
+  const resumed = await orchestrator.startStageWork({
+    project_dir: projectDir,
+    task_id: "feature",
+    job_id: continued.id,
+    feedback: "Continue the exact legacy session without allocating another workspace.",
+  }, [], { continuation: true });
+  const resumedFinished = await waitFor(orchestrator, resumed.id);
+  assert.equal(resumedFinished.status, "completed", resumedFinished.error);
+  const resumedJob = await store.getJob(resumed.id);
+  assert.equal(resumedJob.workspace.path, firstSession.workspace_path);
+  assert.equal(resumedJob.workspace.owner_job_id, started.id);
+  assert.equal(resumedFinished.session_id, firstSession.session_id);
+  assert.equal(git(projectDir, "worktree", "list", "--porcelain"), worktreesBefore);
+  assert.deepEqual((await store.getJob(continued.id)).workspace, legacyContinued,
+    "recover ownership in the new job without rewriting legacy evidence");
+  assert.deepEqual((await store.getJob(started.id)).workspace, legacyFirst);
 });
 
 test("formal AGY review requires current-turn PASS output and preserves patch digest", async (t) => {

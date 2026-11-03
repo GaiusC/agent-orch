@@ -7,6 +7,7 @@ import { runVerification } from './verify.mjs';
 import { assertProject } from './config.mjs';
 import { releaseWorkspace, directoryBytes } from './workspace-pool.mjs';
 import { recordGitOperation } from './git-events.mjs';
+import { bindProject, registerCoordinator } from './project-identity.mjs';
 
 const terminal = job => ['completed', 'failed', 'cancelled'].includes(job.status);
 const alive = job => !terminal(job) || (job.process_pid && !job.process_exited_at && processExists(job.process_pid));
@@ -33,6 +34,7 @@ export class GitLifecycle {
     await this.store.recordEvent(type, { project_dir: project, ...extra }, { message: type });
   }
   async audit(project, { context = {}, clone_paths = [], detail = 'summary', measure = false } = {}) {
+    const projectIdentity = await bindProject(project, { checkFresh: false }).then(({ family, member, ...compact }) => compact).catch(error => ({ status: 'blocked', error: error.message }));
     const source = await inventory(project);
     const knownClones = await json(path.join(this.root(project), 'known-clones.json'), []);
     clone_paths = [...new Set([...knownClones, ...clone_paths])];
@@ -58,7 +60,7 @@ export class GitLifecycle {
       });
     }
     const audit = { version: 1, audit_id: `audit-${crypto.randomUUID()}`, project_dir: source.root, created_at: now(),
-      source, worktrees, clones, context,
+      source, worktrees, clones, context, project_identity: projectIdentity,
       repository_refs: await git(project, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/remotes', 'refs/stash', 'refs/agent-orch']),
       remote_tracking_only: true,
       modifications: source.changes.map(change => ({ ...change, provenance: 'preexisting_or_external', task_relation: 'unknown', completion: 'unknown', authorization: 'preserve' })),
@@ -71,7 +73,7 @@ export class GitLifecycle {
     return detail === 'full' ? { ...audit, evidence_path: evidence } : {
       audit_id: audit.audit_id, fingerprint: source.fingerprint, modified_paths: source.changes.length,
       worktrees: worktrees.length, clones: clones.length, unknown_groups: source.changes.length ? 1 : 0,
-      action_required: Boolean(source.changes.length || clones.length || worktrees.length > 1), evidence_path: evidence,
+      action_required: Boolean(source.changes.length || clones.length || worktrees.length > 1 || projectIdentity.status === 'blocked'), project_identity: projectIdentity, evidence_path: evidence,
     };
   }
   async worktrees(project) {
@@ -148,6 +150,7 @@ export class GitLifecycle {
     return this.orchestrator.publicJob(job);
   }
   async reconcile(project, args) {
+    await bindProject(project, { checkFresh: false });
     return repositoryLock(project, async () => {
       const audit = await this.loadAudit(project, args.audit_id);
       const state = await assertNoOperation(project);
@@ -159,7 +162,15 @@ export class GitLifecycle {
         if (!Array.isArray(args.actions) || !args.actions.length) throw new Error('A concrete action list is required');
         const covered = new Set();
         for (const action of args.actions) {
-          if (!['preserve', 'commit', 'wip', 'cleanup'].includes(action.kind)) throw new Error('Unsupported reconciliation action; unknown clones are never deleted automatically');
+          if (!['preserve', 'commit', 'wip', 'cleanup', 'register_coordinator'].includes(action.kind)) throw new Error('Unsupported reconciliation action; unknown clones are never deleted automatically');
+          if (action.kind === 'register_coordinator') {
+            if (!path.isAbsolute(action.path || '') || !action.reason) throw new Error('Coordinator registration requires an absolute path and reason');
+            let target;
+            for (const candidate of audit.clones) if (await canonicalPath(candidate.path) === await canonicalPath(action.path)) target = candidate;
+            if (!target?.fingerprint || target.shared_repository) throw new Error('Coordinator must be an independent repository explicitly included in the original audit clone_paths');
+            action.target_fingerprint = target.fingerprint;
+            continue;
+          }
           if (action.kind === 'cleanup') { if (!action.job_id || !action.reason) throw new Error('Cleanup must name a registered job and reason'); continue; }
           if (!Array.isArray(action.paths) || !action.paths.length || !action.reason) throw new Error('Action requires exact paths and a reason');
           for (const file of action.paths) {
@@ -184,6 +195,7 @@ export class GitLifecycle {
       if (args.confirm !== true) throw new Error('Explicit approval of the prepared reconciliation plan is required');
       for (let n = plan.position || 0; n < plan.actions.length; n++) {
         const action = plan.actions[n];
+        if (action.kind === 'register_coordinator') action.receipt = await registerCoordinator(project, action.path, { audit_id: audit.audit_id, source_fingerprint: (await inventory(project)).fingerprint, target_fingerprint: action.target_fingerprint, reason: action.reason });
         if (action.kind === 'commit') action.receipt = await this.commitExact(project, action.paths, action.message, path.join(directory, 'plans', plan.plan_id, String(n)));
         if (action.kind === 'wip') {
           // Save a durable local checkpoint without moving the user's branch or index.

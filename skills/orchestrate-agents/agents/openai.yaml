@@ -1,13 +1,13 @@
 interface:
   display_name: "Agent Orch"
-  short_description: "Recommend routes, review work, and finalize exact Git changes"
-  default_prompt: "Use $orchestrate-agents to present catalog-based recommended routes with use, edit or custom choices, preserve existing changes and select Git policies. Persist the plan, supervise bounded Worker upgrades and quota-only reviewer fallback with concise events, independently accept changes, and finalize exact local commits with safe worktree retirement."
+  short_description: "Bind project identity, share limits and finalize reviewed work"
+  default_prompt: "Use $orchestrate-agents to audit and bind the original project, recommend model routes, supervise bounded workers and independent review, and finalize exact Git commits while preserving unrelated work."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "agent_orch"
-      description: "Recommended routes, bounded Worker upgrades, quota-only review fallback, concise events and exact Git finalization"
+      description: "Runtime project identity, shared workspace limits, recommended routes, bounded Worker upgrades, quota-only review fallback and exact Git finalization"
       transport: "stdio"
 
 policy:

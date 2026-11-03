@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { projectOrchestratorRoot, projectPlansRoot } from "./config.mjs";
 import { newId, nowIso, pathExists, readJson, writeJsonAtomic } from "./utils.mjs";
+import { canonicalPath } from './lifecycle-git.mjs';
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
@@ -76,8 +77,9 @@ export class StageRuntime {
     const file = this.planIdentityFile(taskId);
     if (await pathExists(file)) {
       const existing = await readJson(file);
-      const stableFields = ["provider", "model", "invocation", "session_id", "contract_id", "contract_digest"];
+      const stableFields = ["provider", "model", "invocation", "session_id", "contract_id", "contract_digest", "project_id", "coordinator_common"];
       for (const field of stableFields) {
+        if (['project_id', 'coordinator_common'].includes(field) && existing[field] === undefined) continue; // retain legacy identity bytes
         if ((existing[field] || null) !== (identity[field] || null)) {
           throw new Error(`Plan execution identity is immutable for task_id=${taskId}; ${field} changed`);
         }
@@ -98,5 +100,11 @@ export class StageRuntime {
     const file = this.planIdentityFile(taskId);
     if (!(await pathExists(file))) throw new Error(`Missing Plan execution identity for task_id=${taskId}`);
     return { ...(await readJson(file)), file };
+  }
+
+  async assertProjectIdentity(taskId, binding) {
+    if (!(await pathExists(this.planIdentityFile(taskId)))) return;
+    const saved = await this.loadPlanIdentity(taskId);
+    if (saved.project_id && (saved.project_id !== binding.project_id || !saved.coordinator_common || await canonicalPath(saved.coordinator_common) !== await canonicalPath(binding.coordinator_common))) throw new Error('PLAN_PROJECT_IDENTITY_MISMATCH: create a new Plan in the audited coordinator; do not copy execution identity');
   }
 }

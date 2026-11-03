@@ -166,12 +166,38 @@ export class WorkerOrchestrator {
     if (!session) return null;
     const previous = session.last_job_id ? await this.store.getJob(session.last_job_id) : null;
     const workspace = previous?.workspace;
-    const valid = workspace?.path && session.workspace_path && await pathExists(workspace.path)
+    let valid = workspace?.path && session.workspace_path && await pathExists(workspace.path)
       && await canonicalPath(workspace.path) === await canonicalPath(session.workspace_path)
-      && await canonicalPath(previous.project_dir) === await canonicalPath(job.project_dir)
-      && (workspace.mode === 'in_place' || await canonicalPath(workspace.path) === await canonicalPath(path.join(this.store.jobDir(workspace.owner_job_id || previous.id), 'worktree')));
+      && await canonicalPath(previous.project_dir) === await canonicalPath(job.project_dir);
+    let owner = workspace?.owner_job_id;
+    if (valid && workspace.mode !== 'in_place') {
+      const workspaceKey = await canonicalPath(workspace.path);
+      // Legacy continuations kept the first job's worktree but omitted its owner.
+      // Follow only recorded ancestry; never search for or adopt arbitrary dirs.
+      if (!owner) {
+        const seen = new Set();
+        let ancestor = previous;
+        while (ancestor && !seen.has(ancestor.id)) {
+          seen.add(ancestor.id);
+          if (await canonicalPath(ancestor.project_dir) !== await canonicalPath(previous.project_dir)
+            || ancestor.task_id !== previous.task_id
+            || (ancestor.subtask_id || null) !== (previous.subtask_id || null)
+            || !ancestor.workspace?.path
+            || await canonicalPath(ancestor.workspace.path) !== workspaceKey) break;
+          if (workspaceKey === await canonicalPath(path.join(this.store.jobDir(ancestor.id), 'worktree'))) {
+            owner = ancestor.id;
+            break;
+          }
+          const parentId = ancestor.continued_from_job_id || ancestor.escalated_from_job_id;
+          if (typeof parentId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(parentId)) break;
+          ancestor = await this.store.getJob(parentId);
+        }
+      }
+      valid = Boolean(owner) && workspaceKey === await canonicalPath(path.join(this.store.jobDir(owner), 'worktree'));
+    }
     if (!valid && job.type === 'stage_work_continue') throw new Error('stage_work_continue_missing_workspace_provenance: preserve the exact original session and workspace');
-    return valid ? workspace : null;
+    // Only new jobs receive the recovered owner; historical receipts stay intact.
+    return valid ? (owner ? { ...workspace, owner_job_id: owner } : workspace) : null;
   }
 
   async health(projectDir) {

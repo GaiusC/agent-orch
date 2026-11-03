@@ -1,4 +1,4 @@
-# Git lifecycle (0.7)
+# Git lifecycle
 
 Normal work ends in a commit and a closeout receipt. Dirty inherited work is
 audited before execution, not copied into an automatic clone. A clean status is
@@ -42,6 +42,67 @@ artifacts should use configured external locations; no writable hardlink sharing
 is introduced.
 
 ## Audit and provenance
+
+Keep one existing project as the coordinator across new Plans and jobs. Audit
+that original project first and include known historical coordinator copies in
+`clone_paths`. Copying tracked files followed by `git init` creates another
+independent repository just as a clone does for lifecycle purposes; its clean
+status and separate worktree quota do not reconcile the original environment.
+Do not create a clean coordinator first and audit only that copy afterward.
+
+`stage-work` owns Worker worktree allocation. A new Plan, a failed job, a dirty
+source, a provenance error or a long path does not itself authorize a separate
+coordinator. Diagnose continuation errors with the original job/session and
+recorded workspace ancestry. Missing legacy `owner_job_id` can be recovered only
+from same-project, same-task continuation ancestry that resolves to the original
+job's worktree; historical evidence is not rewritten. If recovery cannot prove
+identity, preserve the workspace and report the blocker. A necessary relocation
+needs a concrete source/destination, reason, reuse assessment and disposition of
+existing directories; inspect it before treating a new repository as approved.
+
+Runtime identity is stored in `.agent-orchestrator/project-identity.json` and the
+Git common directory's `agent-orch/project-identity.json`, separately from model
+routes. Copied identities, enclosing Git repositories, and the exact Codex
+caller's session-header project identify the original source. CLI init/resume,
+MCP stage mutations and Worker allocation validate the binding. A clean new copy
+and its own audit cannot authorize execution. Read-only job inspection, cancel
+and cleanup remain available for recovery; new execution requires registration.
+New native Plans persist the project id and coordinator Git common directory;
+copying their execution identity into another coordinator is refused even after
+that coordinator is registered. Legacy Plan bytes remain unchanged.
+
+To retain a necessary independent coordinator, audit the **original** project
+with the copy's absolute path in `clone_paths`. Prepare and approve:
+
+```json
+{
+  "kind": "register_coordinator",
+  "path": "C:/projects/example-short",
+  "reason": "Reviewed relocation required by path-length constraints"
+}
+```
+
+Use the existing `environment-reconcile` prepare/execute protocol and an approved
+`head` or `snapshot` baseline. The source and target audit fingerprints are
+checked. A `block` baseline cannot execute through the copy. If the original
+source changes, re-audit and renew registration. Existing unrelated modifications
+still require explicit preserve/commit/WIP dispositions. Registration neither
+copies files nor alters routes, old jobs, source history or remote state.
+
+Registered coordinator checkouts and all their linked worktrees share the
+canonical repository's lifecycle lock, pool registry and limits. The original
+directory is excluded; each independent copy itself consumes a total-workspace
+slot. A copy's higher local limits cannot raise the original policy. Active
+legacy allocations in enrolled copies are included. Missing or replaced enrolled
+repositories stop allocation for inspection instead of silently freeing slots.
+
+This gate controls Agent Orch execution and allocation, not arbitrary host shell
+filesystem operations. Without inherited identity, nesting or caller context,
+an unrelated standalone repository cannot be inferred to be a copy. Do not erase
+that provenance or omit known copies from the audit. Retaining evidence does not
+require keeping every checkout:
+normally finalize with cleanup enabled; retain a worktree only for a stated
+active dependency, then close it after that dependency ends.
 
 Call `environment-audit` with project_dir, a compact context packet, optional
 explicit clone_paths, and optionally measure=true for directory-byte measurement.

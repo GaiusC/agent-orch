@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { deepMerge, pathExists, readJson } from "./utils.mjs";
 import { ccExecutorModel, normalizeTier, reviewerModel } from "./model-registry.mjs";
+import { bindProject } from './project-identity.mjs';
 
 export const DEFAULT_CODEX_MCP_MODEL = "gpt-5.6-terra";
 const INCOMPATIBLE_CODEX_MCP_MODELS = new Map([
@@ -327,6 +328,7 @@ export async function assertProject(projectDir, { requireTrusted = true } = {}) 
   if (requireTrusted && !config.trusted) {
     throw new Error(`Project is not trusted. Create .agent-orchestrator/config.json with \"trusted\": true after reviewing it.`);
   }
+  if (requireTrusted) await bindProject(root);
   return config;
 }
 

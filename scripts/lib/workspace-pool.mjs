@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, identity, inventory, json, save, repositoryLock, scopedTree, removeIndex, canonicalPath } from './lifecycle-git.mjs';
 import { recordGitOperation } from './git-events.mjs';
+import { bindProject, canonicalPolicy, sharedWorkspacePaths, familyRepositories, cleanupProjectBinding } from './project-identity.mjs';
 
 export async function directoryBytes(directory, stopAfter = Infinity) {
   let bytes = 0;
@@ -22,17 +23,29 @@ export async function directoryBytes(directory, stopAfter = Infinity) {
 export async function reserveWorkspace({ projectDir, jobDir, config, signal, kind = 'worker', baseCommit = null, onWait }) {
   const worktree = path.join(jobDir, 'worktree');
   const owner = path.basename(jobDir);
-  const policy = config.git_lifecycle || {};
+  const binding = await bindProject(projectDir);
   const deadline = Date.now() + 1000 * (config.execution.workspace_wait_timeout_seconds ?? 1800);
   let notified = false;
   while (true) {
     if (signal?.aborted) throw new Error('Workspace allocation cancelled');
-    const allocation = await repositoryLock(projectDir, async () => {
+    const allocation = await repositoryLock(binding.canonical_root, async () => {
+      await bindProject(projectDir);
+      const policy = await canonicalPolicy(binding, config.git_lifecycle || {});
       const repo = await identity(projectDir);
-      const registryFile = path.join(repo.common, 'agent-orch', 'workspaces.json');
+      const registryFile = path.join(binding.canonical_common, 'agent-orch', 'workspaces.json');
       const registry = await json(registryFile, {});
-      const registeredPaths = (await git(projectDir, ['worktree', 'list', '--porcelain', '-z'])).split('\0').filter(line => line.startsWith('worktree ')).map(line => line.slice(9));
+      const registeredPaths = [binding.canonical_root, ...await sharedWorkspacePaths(binding)];
       const registeredKeys = await Promise.all(registeredPaths.map(canonicalPath));
+      // Include pre-binding allocations from an approved coordinator's old pool.
+      for (const member of await familyRepositories(binding)) {
+        if (await canonicalPath(member.common) === await canonicalPath(binding.canonical_common)) continue;
+        const inherited = await json(path.join(member.common, 'agent-orch', 'workspaces.json'), {});
+        for (const [id, entry] of Object.entries(inherited)) {
+          if (!registeredKeys.includes(await canonicalPath(entry.path))) continue;
+          if (registry[id] && await canonicalPath(registry[id].path) !== await canonicalPath(entry.path)) throw new Error('Worktree owner collision across coordinator repositories');
+          registry[id] ||= entry;
+        }
+      }
       const worktreeKey = await canonicalPath(worktree);
       if (registry[owner] && !registeredKeys.includes(worktreeKey)) delete registry[owner];
       if (registry[owner]) {
@@ -87,9 +100,14 @@ export async function reserveWorkspace({ projectDir, jobDir, config, signal, kin
 
 // Caller holds the repository lifecycle lock.
 export async function releaseWorkspace(project, owner) {
-  const repo = await identity(project);
-  const registryFile = path.join(repo.common, 'agent-orch', 'workspaces.json');
-  const registry = await json(registryFile, {});
-  delete registry[owner];
-  await save(registryFile, registry);
+  // Cleanup of retained historical work remains possible after source drift.
+  const binding = await cleanupProjectBinding(project);
+  const registryFile = path.join(binding.canonical_common, 'agent-orch', 'workspaces.json');
+  const release = async () => {
+    const registry = await json(registryFile, {});
+    delete registry[owner];
+    await save(registryFile, registry);
+  };
+  if (await canonicalPath((await identity(project)).common) === await canonicalPath(binding.canonical_common)) return release();
+  return repositoryLock(binding.canonical_root, release);
 }

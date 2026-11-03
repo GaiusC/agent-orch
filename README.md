@@ -2,6 +2,13 @@
 
 Agent Orch is a Codex plugin that provides a stage-first MCP workflow for planning, implementation, independent review, acceptance, and durable continuation across CC, AGY, and Codex Worker.
 
+Version 0.8.1 binds runtime execution to the original Git project, recovers legacy
+Worker workspace ancestry, and requires audited registration of additional
+coordinator repositories. Registered coordinators and their linked worktrees
+share the original project's workspace limits. Copying files and running
+`git init` cannot substitute for reconciling the original environment. Identity
+sidecars preserve current model routes and historical job records.
+
 Version 0.8.0 adds catalog-based **use recommended / edit recommended / custom**
 initialization, automatic current-host identity detection, bounded Worker
 complexity upgrades and quota-only reviewer fallback. Existing project routes
