@@ -1,6 +1,6 @@
 ---
 name: orchestrate-agents
-description: Bind execution to the original project and share workspace limits across audited coordinator copies. Recommend current model routes, configure bounded Worker upgrades and quota-only reviewer fallbacks, supervise concise events, independently review and accept changes, integrate results, commit exact changes and safely retire worktrees. Use for Agent Orch initialization, implementation, repair, review and workspace reconciliation.
+description: Bind execution to the original project and share workspace limits across audited coordinator copies. Reconcile large preservation sets with bounded Windows arguments and review complete on-disk audits through compact references. Recommend current routes, supervise bounded Worker upgrades and quota-only reviewer fallbacks, independently accept changes, integrate results, commit exact changes and safely retire worktrees. Use for Agent Orch initialization, implementation, repair, review and workspace reconciliation.
 ---
 
 # Orchestrate Agents

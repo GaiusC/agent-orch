@@ -12,7 +12,7 @@ if (!mcp) {
   process.stdout.write(JSON.stringify(result) + "\n");
 } else {
   // This server has no planning, worker-launch, acceptance or arbitrary-file tools.
-  const server = new Server({ name: "agent-orch-progress", version: "0.8.1" }, { capabilities: { tools: {} } });
+  const server = new Server({ name: "agent-orch-progress", version: "0.8.2" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
     name: "report_progress", description: "Report one short task checkpoint. Does not change job status or constitute verification evidence.",
     inputSchema: { type: "object", properties: { checkpoint: { type: "string", enum: ["inspection_done", "implementation_done", "testing", "reviewing", "finding", "blocked"] }, message: { type: "string", minLength: 1, maxLength: 240 } }, required: ["checkpoint", "message"], additionalProperties: false },

@@ -1,6 +1,6 @@
 {
   "name": "agent-orch",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "private": true,
   "type": "module",
   "description": "Agent orchestration with runtime project identity, shared workspace limits, recommended routes, independent review and safe Git finalization.",

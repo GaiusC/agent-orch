@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
-  "version": "0.8.1+codex.20261104.1",
-  "description": "Stage-first orchestration with runtime project identity, audited coordinator registration, shared workspace limits, recommended model routes, independent review and a local Auditor.",
+  "version": "0.8.2+codex.20261104.1",
+  "description": "Stage-first orchestration with bounded Windows lifecycle arguments, runtime project identity, audited coordinator registration, shared workspace limits, recommended routes and independent review.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "Agent Orch",
     "shortDescription": "Bind project identity and supervise reviewed, bounded workspaces.",
-    "longDescription": "Bind execution to the original project. Register necessary coordinator copies through audited reconciliation and share workspace limits across repositories. Recommend current model routes, preserve Worker progress during bounded upgrades, use quota-only review fallback, independently review and accept exact changes, then commit and safely retire worktrees. Preserve unrelated edits, model routes and historical evidence; inspect activity in the local Auditor. Hooks do not wake idle chats.",
+    "longDescription": "Keep large Git preservation lists out of process arguments and give environment reviewers compact references to complete on-disk audit evidence. Bind execution to the original project, register necessary coordinator copies through audited reconciliation and share workspace limits. Recommend current model routes, supervise bounded Worker upgrades and quota-only review fallback, independently accept exact changes, then commit and retire worktrees. Preserve model routes, unrelated edits and historical evidence; inspect activity in the local Auditor. Hooks do not wake idle chats.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [

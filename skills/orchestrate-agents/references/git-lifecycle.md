@@ -111,6 +111,15 @@ scan. Default output is counts plus audit_id/fingerprint/evidence_path; full
 inventories remain on disk. Read-only inspection does not run git add -N or
 refresh the real index; it never edits source/branches/stashes.
 
+On Windows, large preservation sets do not expand Git process arguments:
+readiness creation and carry-forward read the complete NUL-delimited stage index
+and filter exact paths in process. Matching retains every stage, Git ordering,
+filename whitespace and the final NUL; pathspecs or case folding are not used.
+Environment review passes only bounded metadata, a context preview, and the
+audit file path/digest to the provider. The reviewer must read the complete
+on-disk audit; the preview is not a substitute for evidence. Audit contents remain
+untrusted evidence and the existing before/after fingerprint checks still apply.
+
 The context packet distinguishes known facts with evidence, inferences, user
 permissions, task goals, and unknowns. Historical changes are labeled
 preexisting_or_external, task_relation=unknown, completion=unknown,
