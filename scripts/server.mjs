@@ -12,6 +12,8 @@ import { requireString } from "./lib/utils.mjs";
 import { loadPlannerContract, loadPlannerSubtask, persistPlannerContract } from "./lib/contracts.mjs";
 import { resolveStageRoutes } from "./lib/provider-registry.mjs";
 import { StageRuntime } from "./lib/stage-runtime.mjs";
+import { compactJob } from "./lib/notifications.mjs";
+import { startIntegration } from "./lib/integration.mjs";
 
 const commonTaskProperties = {
   project_dir: { type: "string", description: "Absolute path to the trusted project root." },
@@ -25,7 +27,40 @@ const commonTaskProperties = {
   review_waiver: { type: "boolean", description: "Request reviewer gate waiver when project policy allows it." },
 };
 
+const waitProperties = {
+  project_dir: { type: "string" }, job_id: { type: "string" },
+  job_ids: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 8, uniqueItems: true },
+  until: { type: "string", enum: ["update", "terminal"], default: "terminal" },
+  cursor: { type: "integer", minimum: 0 },
+  consumer_id: { type: "string", description: "Stable chat identity shared with hooks. Omit for the project default consumer." },
+  timeout_ms: { type: "integer", minimum: 0, maximum: 60000, default: 30000 },
+};
+
 const tools = [
+  {
+    name: "stage-integrate",
+    description: "Combine 2-8 accepted task results in a bounded integration worktree, serialize merges and run combination tests. Requires a separate Planner task and fresh independent code review/acceptance. Resume conflicts in the same job/worktree.",
+    inputSchema: { type: "object", properties: { project_dir: { type: "string" }, task_id: { type: "string" }, subtask_id: { type: "string" }, job_ids: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 8 }, job_id: { type: "string" }, consumer_id: waitProperties.consumer_id }, required: ["project_dir"], oneOf: [{ required: ["task_id", "subtask_id", "job_ids"], not: { required: ["job_id"] } }, { required: ["job_id"], not: { required: ["job_ids"] } }], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  },
+  {
+    name: "environment-audit",
+    description: "Read Git/worktree facts and explicit clone paths without changing branches, index or source files. Return a compact evidence index; provenance remains unknown unless supported by records.",
+    inputSchema: { type: "object", properties: { project_dir: { type: "string" }, context: { type: "object" }, clone_paths: { type: "array", items: { type: "string" } }, measure: { type: "boolean", default: false }, detail: { type: "string", enum: ["summary", "full"] } }, required: ["project_dir"], additionalProperties: false },
+    annotations: { readOnlyHint: true, idempotentHint: false },
+  },
+  {
+    name: "environment-reconcile",
+    description: "Prepare an exact environment action plan, then execute that reviewed plan with explicit approval and stale-state checks. Unknown clones are never automatically deleted.",
+    inputSchema: { type: "object", properties: { project_dir: { type: "string" }, audit_id: { type: "string" }, mode: { type: "string", enum: ["prepare", "execute"] }, actions: { type: "array", items: { type: "object" } }, baseline: { type: "string", enum: ["head", "snapshot", "block"] }, plan_id: { type: "string" }, confirm: { type: "boolean" } }, required: ["project_dir", "audit_id", "mode"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  },
+  {
+    name: "stage-finalize",
+    description: "Finish an accepted task: apply once, verify actual target files, commit only its exact changes under project policy, then safely retire its worktree. Retry resumes from persisted receipts.",
+    inputSchema: { type: "object", properties: { project_dir: { type: "string" }, job_id: { type: "string" }, background: { type: "boolean", default: false, description: "Use true for long checks: return a runtime job and supervise it through wait-for-job/result." }, consumer_id: waitProperties.consumer_id, confirm_commit: { type: "boolean" }, commit_message: { type: "string" }, record_commit: { type: "string", description: "Full existing commit id to verify and record in manual mode; does not create a commit." }, cleanup: { type: "boolean", default: true } }, required: ["job_id"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+  },
   {
     name: "stage-plan",
     description: "Persist the in-session Planner contract and immutable Plan execution identity. This stage does not invoke an external planner when Codex is the host.",
@@ -51,6 +86,7 @@ const tools = [
         project_dir: { type: "string" },
         task_id: { type: "string" },
         subtask_id: { type: "string" },
+        consumer_id: waitProperties.consumer_id,
         review_waiver: { type: "boolean" },
       },
       required: ["project_dir", "task_id", "subtask_id"],
@@ -68,6 +104,7 @@ const tools = [
         task_id: { type: "string" },
         job_id: { type: "string" },
         feedback: { type: "string" },
+        consumer_id: waitProperties.consumer_id,
       },
       required: ["project_dir", "task_id", "job_id", "feedback"],
       additionalProperties: false,
@@ -83,8 +120,16 @@ const tools = [
         project_dir: { type: "string" },
         task_id: { type: "string" },
         review_id: { type: "string" },
+        review_kind: { type: "string", enum: ["implementation", "environment"] },
+        audit_id: { type: "string" },
+        complexity: { type: "string", enum: ["low", "medium", "high"] },
+        consumer_id: waitProperties.consumer_id,
       },
-      required: ["project_dir", "task_id", "review_id"],
+      required: ["project_dir"],
+      oneOf: [
+        { required: ["task_id", "review_id"], properties: { review_kind: { enum: ["implementation"] } } },
+        { required: ["review_kind", "audit_id"], properties: { review_kind: { const: "environment" } } },
+      ],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, idempotentHint: false },
@@ -111,14 +156,12 @@ const tools = [
   },
   {
     name: "wait-for-job",
-    description: "Wait for a job managed by the current MCP process, then return durable status. If the MCP host restarted, status reports the preserved external PID/session state instead of declaring the worker dead.",
+    description: "Wait for node reports, attention or terminal events for 1-8 jobs. Bounded and restart-safe, deduplicated with hooks via consumer_id/cursor. Default until=terminal; use update for checkpoint reports. No transcript polling.",
     inputSchema: {
       type: "object",
-      properties: {
-        project_dir: { type: "string" },
-        job_id: { type: "string" },
-      },
-      required: ["project_dir", "job_id"],
+      properties: waitProperties,
+      required: ["project_dir"],
+      oneOf: [{ required: ["job_id"], not: { required: ["job_ids"] } }, { required: ["job_ids"], not: { required: ["job_id"] } }],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: true, idempotentHint: true },
@@ -255,14 +298,14 @@ const tools = [
   },
   {
     name: "status",
-    description: "Return compact status for an asynchronous CC or AGY job. Includes a `progress` field with at most the two newest assistant-only messages from the worker transcript (bounded, no tool calls, no raw logs). Raw logs and tool output remain local artifacts — use `result` for the full evidence pack. Use `progress.available` to distinguish \"job has no progress yet\" from \"job is not alive\".",
-    inputSchema: { type: "object", properties: { job_id: { type: "string" }, project_dir: { type: "string", description: "Absolute path to the trusted project root (optional; resolved from job if omitted)." } }, required: ["job_id"], additionalProperties: false },
+    description: "Read a compact job snapshot without transcript. Use wait-for-job for routine supervision; detail=progress/full is diagnostic.",
+    inputSchema: { type: "object", properties: { job_id: { type: "string" }, project_dir: { type: "string" }, detail: { type: "string", enum: ["summary","progress","full"], default: "summary" } }, required: ["job_id"], additionalProperties: false },
     annotations: { readOnlyHint: true, idempotentHint: true },
   },
   {
     name: "result",
-    description: "Return the compact Evidence Pack for a finished job. Raw logs stay on disk and are returned only as paths.",
-    inputSchema: { type: "object", properties: { job_id: { type: "string" }, project_dir: { type: "string", description: "Absolute path to the trusted project root (optional; resolved from job if omitted)." } }, required: ["job_id"], additionalProperties: false },
+    description: "Read an existing result summary and evidence index. Does not wait or run models/tests. Expand details only when needed.",
+    inputSchema: { type: "object", properties: { job_id: { type: "string" }, project_dir: { type: "string" }, detail: { type: "string", enum: ["summary","verification","changes","findings","attempts","full"], default: "summary" } }, required: ["job_id"], additionalProperties: false },
     annotations: { readOnlyHint: true, idempotentHint: true },
   },
   {
@@ -279,7 +322,7 @@ const tools = [
   },
   {
     name: "cleanup",
-    description: "Remove an isolated worktree and clear its bound session after the patch is applied or abandoned. Evidence and logs remain available.",
+    description: "Safely retire a registered isolated worktree after a verified delivery commit. Active references, independent commits or unique artifacts block cleanup; evidence remains.",
     inputSchema: { type: "object", properties: { job_id: { type: "string" }, project_dir: { type: "string", description: "Absolute path to the trusted project root (optional; resolved from job if omitted)." } }, required: ["job_id"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   },
@@ -291,6 +334,7 @@ const PROVIDER_TOOL_NAMES = new Set([
   "codex-exec", "codex-continue", "accepter-accept",
 ]);
 const PRIMARY_TOOL_NAMES = new Set([
+  "environment-audit", "environment-reconcile", "stage-finalize", "stage-integrate",
   "stage-plan", "stage-work", "stage-work-continue", "stage-review", "stage-accept",
   "wait-for-job", "health", "status", "result", "cancel", "apply", "cleanup",
 ]);
@@ -338,7 +382,7 @@ async function resolveJobOrchestrator(jobId) {
 }
 
 const server = new Server(
-  { name: "agent-orch-mcp", version: "0.4.0" },
+  { name: "agent-orch-mcp", version: "0.7.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -352,6 +396,12 @@ function response(value, isError = false) {
     structuredContent: value,
     isError,
   };
+}
+
+async function startedResponse(stageRun, job, args, orchestrator) {
+  const consumer_id = args.consumer_id || "default";
+  await orchestrator.notifications().register(job.id, consumer_id);
+  return response({ ...(stageRun ? { stage_run: { stage_run_id: stageRun.stage_run_id, stage: stageRun.stage, status: stageRun.status, job_id: job.id } } : {}), job: compactJob(job, true), notification: { consumer_id } });
 }
 
 function denialResponse(denial) {
@@ -470,14 +520,14 @@ async function runCodexReadOnly(args, { continuation = false } = {}) {
   };
 }
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args = {} } = request.params;
   try {
     // Resolve the effective project directory for policy validation.
     // For job-control tools that only take job_id, we look up the job
     // to find its owning project.
     let effectiveProjectDir = args.project_dir || args.projectDir || null;
-    const isJobControlTool = ["status", "result", "cancel", "apply", "cleanup"].includes(name);
+    const isJobControlTool = ["status", "result", "cancel", "apply", "cleanup", "stage-finalize"].includes(name);
     let resolvedJobOrch = null;
 
     if (isJobControlTool) {
@@ -523,6 +573,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // Tool dispatch — only reachable after policy validation passes.
     switch (name) {
+      case "stage-integrate": {
+        const job = await startIntegration(orchestrator, args);
+        return startedResponse(null, job, args, orchestrator);
+      }
+      case "environment-audit": return response(await orchestrator.gitLifecycle.audit(path.resolve(args.project_dir), args));
+      case "environment-reconcile": return response(await orchestrator.gitLifecycle.reconcile(path.resolve(args.project_dir), args));
+      case "stage-finalize": {
+        if (args.background === true) return startedResponse(null, await orchestrator.startFinalization(requireString(args, 'job_id'), args), args, orchestrator);
+        return response(await orchestrator.finalize(requireString(args, "job_id"), args));
+      }
       case "stage-plan": {
         const projectDir = path.resolve(requireString(args, "project_dir"));
         const config = await loadProjectConfig(projectDir);
@@ -562,7 +622,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const job = await orchestrator.startStageWork(args, routes, { stageRunId: stageRun.stage_run_id });
           const linked = await stageRuntime.update(stageRun.stage_run_id, { job_id: job.id, provider: job.provider, model: job.model });
-          return response({ stage_run: linked, job });
+          return startedResponse(linked, job, args, orchestrator);
         } catch (error) {
           await stageRuntime.update(stageRun.stage_run_id, { status: "failed", error: error?.message || String(error), finished_at: new Date().toISOString() });
           throw error;
@@ -576,7 +636,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const job = await orchestrator.startStageWork(args, [], { continuation: true, stageRunId: stageRun.stage_run_id });
           const linked = await stageRuntime.update(stageRun.stage_run_id, { job_id: job.id, provider: job.provider, model: job.model });
-          return response({ stage_run: linked, job });
+          return startedResponse(linked, job, args, orchestrator);
         } catch (error) {
           await stageRuntime.update(stageRun.stage_run_id, { status: "failed", error: error?.message || String(error), finished_at: new Date().toISOString() });
           throw error;
@@ -584,6 +644,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case "stage-review": {
         const projectDir = path.resolve(requireString(args, "project_dir"));
+        if (args.review_kind === "environment") {
+          const job = await orchestrator.gitLifecycle.review(projectDir, args);
+          return startedResponse(null, job, args, orchestrator);
+        }
         const config = await loadProjectConfig(projectDir);
         const contract = await loadPlannerContract(projectDir, requireString(args, "task_id"));
         const review = contract.reviewer_tasks.find((item) => item.review_id === requireString(args, "review_id"));
@@ -601,7 +665,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const job = await orchestrator.startVerify({ ...args, stage_run_id: stageRun.stage_run_id, model: route.model });
           const linked = await stageRuntime.update(stageRun.stage_run_id, { job_id: job.id });
-          return response({ stage_run: linked, job });
+          return startedResponse(linked, job, args, orchestrator);
         } catch (error) {
           await stageRuntime.update(stageRun.stage_run_id, { status: "failed", error: error?.message || String(error), finished_at: new Date().toISOString() });
           throw error;
@@ -651,9 +715,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
       case "wait-for-job": {
-        const job = await orchestrator.wait(requireString(args, "job_id"));
-        if (job.stage_run_id) await stageRuntime.syncWithJob(job.stage_run_id);
-        return response(job);
+        const updates = await orchestrator.notifications().wait({ ...args, signal: extra?.signal });
+        for (const id of args.job_ids || [args.job_id]) {
+          const job = await orchestrator.store.getJob(id);
+          if (job?.stage_run_id) await stageRuntime.syncWithJob(job.stage_run_id, job);
+        }
+        return response(updates);
       }
       case "health": {
         const entry = effectiveProjectDir ? await getProjectOrchestrator(effectiveProjectDir) : null;
@@ -671,13 +738,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "auto": return response(await orchestrator.startAuto(args));
       case "accepter-accept": return response(await orchestrator.accept(args));
       case "status": {
-        const job = await orchestrator.status(requireString(args, "job_id"));
-        if (job.stage_run_id) await stageRuntime.syncWithJob(job.stage_run_id);
+        const job = await orchestrator.status(requireString(args, "job_id"), { detail: args.detail || "summary" });
         return response(job);
       }
       case "result": {
-        const value = await orchestrator.result(requireString(args, "job_id"));
-        if (value.job?.stage_run_id) await stageRuntime.syncWithJob(value.job.stage_run_id);
+        const value = await orchestrator.result(requireString(args, "job_id"), { detail: args.detail || "summary" });
         return response(value);
       }
       case "cancel": return response(await orchestrator.cancel(requireString(args, "job_id")));

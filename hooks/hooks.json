@@ -1,0 +1,32 @@
+{
+  "description": "Deliver short Agent Orch checkpoints and terminal events; no output when unchanged.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "agent_orch.*(stage[_-](work|work[_-]continue|review|integrate|finalize)|wait[_-]for[_-]job)$|^(stage-(work|work-continue|review|integrate|finalize)|wait-for-job)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"import(require('node:url').pathToFileURL(require('node:path').join(process.env.PLUGIN_ROOT || process.env.CLAUDE_PLUGIN_ROOT, 'scripts/notify-hook.mjs')).href).then(m => m.runNotificationHook())\"",
+            "async": true,
+            "timeout": 55,
+            "additionalContextLimit": 2000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"import(require('node:url').pathToFileURL(require('node:path').join(process.env.PLUGIN_ROOT || process.env.CLAUDE_PLUGIN_ROOT, 'scripts/notify-hook.mjs')).href).then(m => m.runNotificationHook())\"",
+            "async": true,
+            "timeout": 55,
+            "additionalContextLimit": 2000
+          }
+        ]
+      }
+    ]
+  }
+}

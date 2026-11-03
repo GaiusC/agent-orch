@@ -7,6 +7,11 @@ import { DEFAULT_CODEX_MCP_MODEL, DEFAULT_CONFIG, loadProjectConfig, migrateProj
 import { commandExists, runProcess } from "./lib/process.mjs";
 import { deepMerge, pathExists, readJson, writeJsonAtomic } from "./lib/utils.mjs";
 import { captureRuntimeEnvironment } from "./lib/runtime-env.mjs";
+import { createInterface } from "node:readline/promises";
+import { applyModelSelection, discoverModelCatalog, promptModelSelection, selectionRequest, validateCatalogSelection } from "./lib/model-selection.mjs";
+import { git, inventory } from "./lib/lifecycle-git.mjs";
+import { WorkerOrchestrator } from "./lib/orchestrator.mjs";
+import { DEFAULT_GIT_POLICY } from "./lib/git-lifecycle.mjs";
 
 const command = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
@@ -17,6 +22,7 @@ const LEGACY_MCP_SERVER_ID = "agent-orch";
 // Tool names that have been removed from the CLI and are only available
 // via MCP.  Calling one of these produces an explicit MCP-only error.
 const MCP_ONLY_COMMANDS = new Set([
+  "environment-audit", "environment-reconcile", "stage-finalize", "stage-integrate",
   "stage-plan",
   "stage-work",
   "stage-work-continue",
@@ -44,6 +50,7 @@ Usage:
 
 Project commands:
   init               Initialize .agent-orchestrator in a project.
+  models             List discovered model candidates and their provenance.
   health             Check configured CC/AGY CLI availability.
   resume             Rebuild and print current project state.
 
@@ -61,6 +68,10 @@ Common options:
   -ProjectDir <path>            Project directory. Defaults to current directory.
   -HostProvider <name>          Host for init/resume, e.g. codex or cc_desktop.
   -PreferredPort <port>         Dashboard starting port, default 15788.
+  --RoutesFile <json>           Explicit stage models; required outside a TTY.
+  --GitPolicyFile <json>        User-selected local commit and worktree policy.
+  --ModelCatalog <json>         Provider model lists supplied by the caller.
+  --UseExistingRoutes          Explicitly reuse existing routes during init.
 
 Examples:
   agent-orch init -ProjectDir . -HostProvider codex
@@ -75,10 +86,10 @@ Stage, worker, reviewer, and job-control operations (stage-plan, stage-work,
 stage-work-continue, stage-review, stage-accept, wait-for-job, status, result,
 apply, cleanup) are only available through MCP tools. Provider-specific wrappers
 are hidden by default.
-The \`status\` tool returns a compact snapshot including bounded assistant-only
-progress (at most two newest messages, no tool calls or raw logs). Raw
-transcripts and tool output remain local artifacts — use \`result\` for full
-evidence.
+Use \`wait-for-job\` for checkpoint/terminal notifications (until=update or
+terminal, batches up to 8, bounded timeout and shared consumer cursor). Status
+defaults to a small snapshot without transcript; result defaults to a summary.
+Request explicit detail only for diagnostics or evidence inspection.
 Use 'agent-orch mcp install' to set up the MCP server.
 `;
 
@@ -190,7 +201,7 @@ function materializeProjectConfig(existing = {}, { trusted = true, hostProvider 
   if (!next.models.cc) next.models.cc = {};
   const ccDefaults = { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" };
   for (const level of ["low", "medium", "high"]) {
-    if (!next.models.cc[level]) next.models.cc[level] = ccDefaults[level];
+    if (!next.model_selection && !next.models.cc[level]) next.models.cc[level] = ccDefaults[level];
   }
   if (!next.execution) next.execution = {};
   if (next.execution.agy_write_timeout_seconds === undefined) next.execution.agy_write_timeout_seconds = 1800;
@@ -201,14 +212,46 @@ function materializeProjectConfig(existing = {}, { trusted = true, hostProvider 
 
 async function initProject() {
   const projectDir = projectDirArg();
+  const hasGit = await git(projectDir, ["rev-parse", "--is-inside-work-tree"], { allowFailure: true });
+  const environmentBefore = hasGit === "true" ? await inventory(projectDir).catch(error => ({ inspection_error: error.message })) : { is_git: false };
   const hostProvider = args.HostProvider || args.hostProvider || args.Host || args.host || null;
   const orchestratorRoot = projectOrchestratorRoot(projectDir);
+  const configPath = path.join(orchestratorRoot, "config.json");
+  const existing = await pathExists(configPath) ? await readJson(configPath) : {};
+  const catalogFile = args.ModelCatalog || args.modelCatalog;
+  const routesFile = args.RoutesFile || args.routesFile;
+  let selection;
+  if (routesFile) selection = await readJson(path.resolve(String(routesFile)));
+  else if (args.UseExistingRoutes || args.useExistingRoutes) selection = { stages: existing.stages };
+  else {
+    const catalog = await discoverModelCatalog({ catalogFile, projectDir, cli: existing.cli });
+    if (!process.stdin.isTTY || !process.stderr.isTTY) {
+      output({ ...selectionRequest(catalog), environment: { is_git: hasGit === "true", modified_paths: environmentBefore.changes?.length ?? null, inspection_error: environmentBefore.inspection_error || null }, git_policy_choices: ["ask", "auto", "manual"], git_policy_default: "ask" });
+      process.exitCode = 2;
+      return;
+    }
+    const readline = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      selection = await promptModelSelection({ catalog, ask: question => readline.question(question), write: text => process.stderr.write(text) });
+      validateCatalogSelection(selection.stages, catalog);
+    } finally { readline.close(); }
+  }
+  const selected = applyModelSelection(existing, selection);
+  if (catalogFile) validateCatalogSelection(selected.stages, await discoverModelCatalog({ catalogFile }));
+  const next = materializeProjectConfig(selected, { trusted: true, hostProvider: hostProvider ? String(hostProvider) : null });
+  const gitPolicyFile = args.GitPolicyFile || args.gitPolicyFile;
+  if (gitPolicyFile) next.git_lifecycle = { ...DEFAULT_GIT_POLICY, ...await readJson(path.resolve(String(gitPolicyFile))) };
+  else if (!existing.git_lifecycle && process.stdin.isTTY && process.stderr.isTTY) {
+    const readline = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      const answer = (await readline.question("Local Git commits: 1=ask at milestones (default), 2=auto after acceptance, 3=manual: ")).trim();
+      next.git_lifecycle = { ...DEFAULT_GIT_POLICY, commit_policy: answer === "2" ? "auto" : answer === "3" ? "manual" : "ask" };
+    } finally { readline.close(); }
+  }
+  if (!["ask", "auto", "manual"].includes(next.git_lifecycle.commit_policy)) throw new Error("Invalid Git commit policy");
   await fs.mkdir(orchestratorRoot, { recursive: true });
   await fs.mkdir(projectStateRoot(projectDir), { recursive: true });
   await fs.mkdir(projectRunsRoot(projectDir), { recursive: true });
-  const configPath = path.join(orchestratorRoot, "config.json");
-  const existing = await pathExists(configPath) ? await readJson(configPath) : {};
-  const next = materializeProjectConfig(existing, { trusted: true, hostProvider: hostProvider ? String(hostProvider) : null });
   await writeJsonAtomic(configPath, next);
   const templateRoot = path.resolve(scriptDir, "..", "templates");
   const seededDocs = [];
@@ -236,12 +279,19 @@ async function initProject() {
   const store = await projectStore(projectDir);
   const runtimeEnvironment = await captureRuntimeEnvironment(projectDir);
   await store.resume({ projectDir, hostProvider: next.host.provider || "unknown" });
+  const environmentAudit = hasGit === "true" && !environmentBefore.inspection_error
+    ? await new WorkerOrchestrator(store).gitLifecycle.audit(projectDir)
+    : { action_required: true, reason: environmentBefore.inspection_error || "Initialize Git and establish an initial commit before isolated work." };
   output({
     ok: true,
     project_dir: projectDir,
     config_path: configPath,
     mcp_enabled: next.mcp?.enabled === true,
     host_provider: next.host.provider,
+    model_selection: next.model_selection,
+    git_lifecycle: next.git_lifecycle,
+    environment: environmentAudit,
+    stages: next.stages,
     continuity_docs: {
       project: path.join(orchestratorRoot, "PROJECT.md"),
       todo: path.join(orchestratorRoot, "TODO.md"),
@@ -282,6 +332,7 @@ async function health() {
 async function resumeProject() {
   const projectDir = projectDirArg();
   const configPath = path.join(projectOrchestratorRoot(projectDir), "config.json");
+  if (!(await pathExists(configPath))) throw new Error("Project is not initialized. Run init and select stage models first.");
   const existing = await pathExists(configPath) ? await readJson(configPath) : {};
   const hostProvider = args.HostProvider || args.hostProvider || args.Host || args.host || existing.host?.provider || "unknown";
   await fs.mkdir(projectOrchestratorRoot(projectDir), { recursive: true });
@@ -292,8 +343,12 @@ async function resumeProject() {
   const runtimeEnvironment = await captureRuntimeEnvironment(projectDir);
   const store = await projectStore(projectDir);
   const state = await store.resume({ projectDir, hostProvider: String(hostProvider) });
+  const environmentAudit = await git(projectDir, ["rev-parse", "HEAD"], { allowFailure: true })
+    ? await new WorkerOrchestrator(store).gitLifecycle.audit(projectDir)
+    : { action_required: true, reason: "Git baseline is not available" };
   output({
     ...state,
+    environment: environmentAudit,
     mcp_enabled: next.mcp?.enabled === true,
     host_provider: next.host.provider,
     runtime_environment: {
@@ -508,6 +563,12 @@ async function main() {
     case "-h":
       return printHelp();
     case "init": return initProject();
+    case "models": {
+      const projectDir = projectDirArg();
+      const configPath = path.join(projectOrchestratorRoot(projectDir), "config.json");
+      const existing = await pathExists(configPath) ? await readJson(configPath) : {};
+      return output(await discoverModelCatalog({ catalogFile: args.ModelCatalog || args.modelCatalog, projectDir, cli: existing.cli }));
+    }
     case "health": return health();
     case "resume": return resumeProject();
     case "dashboard": return openDashboard();

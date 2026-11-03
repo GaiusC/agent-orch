@@ -15,6 +15,7 @@ const fakeCc = path.join(here, "fixtures", "fake-cc.mjs");
 const fakeAgy = path.join(here, "fixtures", "fake-agy.mjs");
 
 function run(args, cwd = pluginRoot) {
+  if (args[0] === "init") args = [...args, "--RoutesFile", path.join(here, "fixtures", "init-routes.json")];
   return JSON.parse(execFileSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 30000 }));
 }
 

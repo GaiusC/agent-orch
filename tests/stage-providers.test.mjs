@@ -82,7 +82,7 @@ async function waitFor(orchestrator, jobId) {
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     const job = await orchestrator.status(jobId);
-    if (["completed", "failed", "cancelled"].includes(job.status)) return job;
+    if (["completed", "failed", "cancelled"].includes(job.status)) return orchestrator.wait(jobId);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for ${jobId}`);
@@ -98,7 +98,7 @@ test("Codex Worker stage uses writable non-interactive execution and exact conti
   });
   await store.init();
   const orchestrator = new WorkerOrchestrator(store);
-  const route = [{ provider: "codex_worker", model: null, invocation: "cli" }];
+  const route = [{ provider: "codex_worker", model: "chosen-worker", invocation: "cli", reasoning_effort: "xhigh", service_tier: "fast" }];
 
   const started = await orchestrator.startStageWork({
     project_dir: projectDir,
@@ -111,6 +111,16 @@ test("Codex Worker stage uses writable non-interactive execution and exact conti
   assert.equal(finished.session_id, "11111111-1111-4111-8111-111111111111");
   const firstSession = await store.getSession(projectDir, "codex_worker", "feature");
   assert.ok(firstSession.workspace_path);
+  assert.equal(firstSession.reasoning_effort, "xhigh");
+  assert.equal(firstSession.service_tier, "fast");
+  const startedJob = await store.getJob(started.id);
+  assert.ok(startedJob.process_args.includes('model_reasoning_effort="xhigh"'));
+  assert.ok(startedJob.process_args.includes('service_tier="fast"'));
+  await orchestrator.wait(started.id);
+  const configFile = path.join(projectDir, ".agent-orchestrator", "config.json");
+  const changedConfig = JSON.parse(await fs.readFile(configFile, "utf8"));
+  changedConfig.codex_worker = { reasoning_effort: "low", service_tier: "other-speed" };
+  await fs.writeFile(configFile, JSON.stringify(changedConfig));
 
   const continued = await orchestrator.startStageWork({
     project_dir: projectDir,
@@ -124,6 +134,14 @@ test("Codex Worker stage uses writable non-interactive execution and exact conti
   assert.equal(continuedFinished.session_id, firstSession.session_id);
   const continuedSession = await store.getSession(projectDir, "codex_worker", "feature");
   assert.equal(continuedSession.workspace_path, firstSession.workspace_path);
+  assert.equal(continuedSession.reasoning_effort, "xhigh");
+  assert.equal(continuedSession.service_tier, "fast");
+  const continuedJob = await store.getJob(continued.id);
+  assert.equal(continuedJob.route_chain[0].reasoning_effort, "xhigh");
+  assert.equal(continuedJob.attempts[0].service_tier, "fast");
+  assert.ok(continuedJob.process_args.includes('model_reasoning_effort="xhigh"'));
+  assert.ok(continuedJob.process_args.includes('service_tier="fast"'));
+  await orchestrator.wait(continued.id);
 });
 
 test("formal AGY review requires current-turn PASS output and preserves patch digest", async (t) => {

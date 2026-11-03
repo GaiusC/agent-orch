@@ -51,6 +51,8 @@ async function createProject(root) {
     },
     verification: { commands: ["node verify.cjs"] },
     review_gate: { require_agy_verify_for_implementation: false, allow_waiver: true },
+    // These legacy routing tests intentionally retain several independent outputs.
+    git_lifecycle: { max_worker_worktrees: 8, max_worktrees: 8 },
   };
   await fs.writeFile(path.join(project, ".agent-orchestrator", "config.json"), JSON.stringify(config, null, 2));
   await fs.writeFile(path.join(project, "verify.cjs"), "const fs=require('fs'); process.exit(fs.existsSync('feature.txt') && fs.readFileSync('feature.txt','utf8') === 'good' ? 0 : 1);\n");
@@ -129,7 +131,7 @@ test("CC implements, repairs in the same session, verifies, applies, and cleans"
   await acceptReadyJob(orchestrator, { projectDir: project, taskId: "feature", jobId: started.id });
   await orchestrator.apply(started.id);
   assert.equal(await fs.readFile(path.join(project, "feature.txt"), "utf8"), "good");
-  await orchestrator.cleanup(started.id);
+  await orchestrator.finalize(started.id, { confirm_commit: true });
   assert.equal(await store.getSession(project, "cc", "feature"), null);
 });
 
@@ -244,7 +246,7 @@ test("AGY write implements, repairs, verifies, applies, and cleans (isolated wor
   await orchestrator.apply(started.id);
   assert.equal(await fs.readFile(path.join(project, "feature.txt"), "utf8"), "good");
 
-  await orchestrator.cleanup(started.id);
+  await orchestrator.finalize(started.id, { confirm_commit: true });
   assert.equal(await store.getSession(project, "agy_write", "feature-agy"), null);
 });
 

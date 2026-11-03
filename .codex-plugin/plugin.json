@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
-  "version": "0.4.0+codex.20260723105744",
-  "description": "Stage-first Codex orchestration with durable CC, AGY, and Codex Worker execution, independent review, acceptance, and continuation.",
+  "version": "0.7.0+codex.20261103.1",
+  "description": "Stage-first orchestration with environment audits, user-selected model routes, concise worker events, reviewed parallel integration, recoverable Git commits, and safe worktree retirement.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -14,10 +14,11 @@
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Agent Orch",
-    "shortDescription": "Stage-first orchestration with CC, AGY, and Codex Worker.",
-    "longDescription": "A stage-first MCP workflow that keeps Codex responsible for planning and formal acceptance while CC, AGY, or Codex Worker implements in isolated worktrees, AGY provides independent review, and durable PID/session state supports continuation across MCP restarts.",
+    "shortDescription": "Audit environments, commit tasks, and retire worktrees.",
+    "longDescription": "Select stage models and Worker reasoning/service tier. Audit inherited Git changes without guessing ownership, approve concrete reconciliation, and supervise isolated CC, AGY, or Codex workers with concise events. Independently review and accept implementations, integrate parallel results with fresh review, then verify, commit exact task changes and safely retire worktrees. Preserve unrelated edits and durable recovery evidence. Hooks do not wake idle chats.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [
@@ -25,9 +26,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Use agent-orch stage-plan, stage-work, stage-review, and stage-accept for this change.",
-      "Use agent-orch to continue the exact provider session and worktree for this task.",
-      "Use agent-orch to verify provider availability and durable worker state."
+      "Initialize model routes and Git policies, audit existing changes and worktrees, and present concrete reconciliation choices.",
+      "Implement and independently review this task, then finalize its exact local commit and safely retire its worktree while preserving unrelated edits.",
+      "Integrate accepted parallel task results, independently review and accept the combined patch, then commit and clean up."
     ]
   }
 }

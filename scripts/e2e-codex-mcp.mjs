@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const model = process.env.AGENT_ORCH_CODEX_MCP_MODEL || "gpt-5.4-mini";
+const model = process.env.AGENT_ORCH_CODEX_MCP_MODEL;
+if (!model) throw new Error("Set AGENT_ORCH_CODEX_MCP_MODEL to a currently available model before running this E2E probe.");
 const codex = process.env.AGENT_ORCH_CODEX_BIN || "codex";
 const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-codex-mcp-e2e-"));
 
@@ -22,6 +23,9 @@ function run(command, args, options = {}) {
 }
 
 try {
+  // This probe only persists a Plan; the explicit work/review routes are never invoked.
+  const routesFile = path.join(projectDir, "probe-routes.json");
+  await fs.writeFile(routesFile, JSON.stringify({ plan: { provider: "codex", model }, work: [{ provider: "codex_worker", model }], review: { provider: "agy", model: "probe-not-invoked" } }));
   const initialized = run(process.execPath, [
     path.join(pluginRoot, "scripts", "agent-orch.mjs"),
     "init",
@@ -29,6 +33,7 @@ try {
     projectDir,
     "-HostProvider",
     "codex",
+    "--RoutesFile", routesFile,
   ]);
   if (initialized.status !== 0) {
     throw new Error(`project init failed: ${initialized.stderr || initialized.stdout}`);

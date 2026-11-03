@@ -81,6 +81,15 @@ export const DEFAULT_CONFIG = {
     max_log_bytes: 4 * 1024 * 1024,
     max_result_chars: 8000,
   },
+  git_lifecycle: {
+    commit_policy: "ask",
+    target_branch: null,
+    max_worker_worktrees: 2,
+    max_worktrees: 3,
+    max_workspace_bytes: null,
+    allow_snapshot: false,
+    allow_in_place: false,
+  },
   models: {
     codex: { planner: DEFAULT_CODEX_MCP_MODEL, accepter: DEFAULT_CODEX_MCP_MODEL, reasoning_effort: "high" },
     cc: { low: "deepseek-v4-flash", medium: "deepseek-v4-flash", high: "deepseek-v4-pro" },
@@ -187,7 +196,7 @@ export async function loadProjectConfig(projectDir) {
   if (!config.models) config.models = {};
   if (!config.models.cc) config.models.cc = {};
   for (const level of ["low", "medium", "high"]) {
-    if (!config.models.cc[level]) config.models.cc[level] = CC_MODEL_DEFAULTS[level];
+    if (!config.model_selection && !config.models.cc[level]) config.models.cc[level] = CC_MODEL_DEFAULTS[level];
   }
   config.project_dir = root;
   config.source = source ?? null;
@@ -257,7 +266,9 @@ function migrateCodexMcpModels(config) {
 export function migrateProjectConfig(projectConfig = {}) {
   if (!projectConfig || typeof projectConfig !== "object" || Array.isArray(projectConfig)) return {};
   if (Number(projectConfig.version || 1) >= 2 && projectConfig.stages) {
-    return migrateCodexMcpModels(structuredClone(projectConfig));
+    // Explicit project choices are not an obsolete-model alias list. Re-init is
+    // the user's opportunity to choose new models; resume must preserve choices.
+    return structuredClone(projectConfig);
   }
 
   const migrated = structuredClone(projectConfig);

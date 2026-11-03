@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { runProcess } from "./process.mjs";
 import { matchesPathPattern, pathExists } from "./utils.mjs";
+import { inventory, identity, git as lifecycleGit, repositoryLock, internal } from "./lifecycle-git.mjs";
+import { reserveWorkspace, releaseWorkspace } from "./workspace-pool.mjs";
 
 function relevantStatus(rawStatus) {
   return rawStatus
@@ -45,24 +47,18 @@ export async function inspectGit(projectDir, logDir) {
   };
 }
 
-export async function prepareWorkspace({ projectDir, jobDir, config, requestedMode }) {
+export async function prepareWorkspace({ projectDir, jobDir, config, requestedMode, signal, onWait }) {
   const git = await inspectGit(projectDir, jobDir);
   const mode = requestedMode || config.execution.workspace_mode || "isolated";
   if (mode === "in_place") {
+    if (config.git_lifecycle?.allow_in_place !== true) throw new Error("In-place work requires explicit git_lifecycle.allow_in_place policy opt-in.");
     if (!config.execution.allow_dirty_in_place && git.is_git && !git.clean) {
       throw new Error("In-place execution is disabled for a dirty working tree.");
     }
-    return { mode: "in_place", path: path.resolve(projectDir), original_project_dir: path.resolve(projectDir), git };
+    return { mode: "in_place", path: path.resolve(projectDir), original_project_dir: path.resolve(projectDir), git, source_inventory: await inventory(projectDir), base_commit: git.head };
   }
   if (!git.is_git) throw new Error("Isolated implementation requires a Git repository. Use in_place only after explicitly allowing it in project config.");
-  if (!git.clean) throw new Error("Isolated implementation requires a clean Git working tree. Commit or stash current changes first.");
-
-  const worktree = path.join(jobDir, "worktree");
-  if (!(await pathExists(worktree))) {
-    const add = await runGit(git.root, ["worktree", "add", "--detach", worktree, git.head], jobDir, "git-worktree-add", { timeoutSeconds: 180 });
-    if (add.exit_code !== 0) throw new Error(`Failed to create worktree: ${add.stderr || add.stdout}`);
-  }
-  return { mode: "isolated", path: worktree, original_project_dir: git.root, git };
+  return reserveWorkspace({ projectDir, jobDir, config, signal, onWait });
 }
 
 export async function captureChanges({ workspace, jobDir, forbidden = [], writable = [] }) {
@@ -104,7 +100,14 @@ export async function applyPatch({ originalProjectDir, patchPath, logDir }) {
 
 export async function cleanupWorkspace({ originalProjectDir, workspacePath, mode, logDir }) {
   if (mode !== "isolated" || !workspacePath || !(await pathExists(workspacePath))) return { removed: false };
-  const remove = await runGit(originalProjectDir, ["worktree", "remove", "--force", workspacePath], logDir, "git-worktree-remove", { timeoutSeconds: 180 });
-  if (remove.exit_code !== 0) throw new Error(`Failed to remove worktree: ${remove.stderr || remove.stdout}`);
-  return { removed: true, path: workspacePath };
+  return repositoryLock(originalProjectDir, async () => {
+    const target = await identity(workspacePath), source = await identity(originalProjectDir);
+    if (target.common !== source.common || target.root === source.root || path.resolve(workspacePath) !== path.resolve(logDir, 'worktree')) throw new Error('Unregistered cleanup path');
+    const state = await inventory(workspacePath);
+    const extras = (await lifecycleGit(workspacePath, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'])).split('\0').filter(file => file && !internal(file.replace(/\/$/, '')));
+    if (state.changes.length || extras.length || Object.values(state.operations).some(Boolean)) return { removed: false, preserved: true, reason: 'unfinished_work_requires_reviewed_retirement' };
+    await lifecycleGit(originalProjectDir, ['worktree', 'remove', workspacePath]);
+    await releaseWorkspace(originalProjectDir, path.basename(logDir));
+    return { removed: true, path: workspacePath };
+  });
 }

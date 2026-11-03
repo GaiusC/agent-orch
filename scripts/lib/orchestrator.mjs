@@ -10,6 +10,10 @@ import { asStringArray, newId, nowIso, pathExists, requireString, truncate, writ
 import { assertCanStartImplementation, assertCanStartVerify, getContractId, getContractVersion, getContractDigest, getContractRequiredTests, loadPlannerContract, loadPlannerSubtask, normalizeContract, resolveJobPlan } from "./contracts.mjs";
 import { agyExecutorFallback, investigatorFallback, investigatorPrimary, reviewerModel } from "./model-registry.mjs";
 import { invalidateAcceptance, assertAcceptanceArtifactValid, saveAcceptance, validateAcceptanceForCurrentPatch } from "./acceptance.mjs";
+import { normalizeWorkerOptions } from "./model-selection.mjs";
+import { compactJob, JobNotifications, resultSummary, prepareProgressChannel, reportProgress } from "./notifications.mjs";
+import { GitLifecycle } from "./git-lifecycle.mjs";
+import { repositoryLock, inventory, digest as lifecycleDigest, canonicalPath, git as lifecycleGit, gitFileState, json as lifecycleJson } from "./lifecycle-git.mjs";
 
 // -- Formal review evidence builder --
 
@@ -127,6 +131,28 @@ export class WorkerOrchestrator {
     this.stageRuntime = stageRuntime;
     this.controllers = new Map();
     this.promises = new Map();
+    this.gitLifecycle = new GitLifecycle(this);
+  }
+
+  async allocateWorkspace(job, config, signal) {
+    const jobDir = this.store.jobDir(job.id);
+    return prepareWorkspace({ projectDir: job.project_dir, jobDir, config, signal, onWait: async () => {
+      await this.store.updateJob(job.id, { phase: "waiting_for_workspace" });
+      const channel = await prepareProgressChannel(jobDir, { projectDir: job.project_dir, role: "worker" });
+      await reportProgress(channel, { checkpoint: "blocked", message: "Workspace capacity or storage budget exhausted. Waiting for an approved slot release; no clone was created." });
+    } });
+  }
+
+  async sessionWorkspace(session, job) {
+    if (!session) return null;
+    const previous = session.last_job_id ? await this.store.getJob(session.last_job_id) : null;
+    const workspace = previous?.workspace;
+    const valid = workspace?.path && session.workspace_path && await pathExists(workspace.path)
+      && await canonicalPath(workspace.path) === await canonicalPath(session.workspace_path)
+      && await canonicalPath(previous.project_dir) === await canonicalPath(job.project_dir)
+      && (workspace.mode === 'in_place' || await canonicalPath(workspace.path) === await canonicalPath(path.join(this.store.jobDir(workspace.owner_job_id || previous.id), 'worktree')));
+    if (!valid && job.type === 'stage_work_continue') throw new Error('stage_work_continue_missing_workspace_provenance: preserve the exact original session and workspace');
+    return valid ? workspace : null;
   }
 
   async health(projectDir) {
@@ -146,6 +172,10 @@ export class WorkerOrchestrator {
   }
 
   async startCc(args, continuation = false) {
+    return repositoryLock(path.resolve(requireString(args, "project_dir")), () => this.startCcUnlocked(args, continuation));
+  }
+
+  async startCcUnlocked(args, continuation = false) {
     const projectDir = path.resolve(requireString(args, "project_dir"));
     const taskId = requireString(args, "task_id");
     const goal = requireString(args, "goal");
@@ -344,6 +374,10 @@ export class WorkerOrchestrator {
   }
 
   async startStageWork(args, routes, { continuation = false, stageRunId = null } = {}) {
+    return repositoryLock(path.resolve(requireString(args, "project_dir")), () => this.startStageWorkUnlocked(args, routes, { continuation, stageRunId }));
+  }
+
+  async startStageWorkUnlocked(args, routes, { continuation = false, stageRunId = null } = {}) {
     const projectDir = path.resolve(requireString(args, "project_dir"));
     const taskId = requireString(args, "task_id");
     const config = await assertProject(projectDir);
@@ -373,6 +407,8 @@ export class WorkerOrchestrator {
         provider: prior.provider,
         model: prior.model || prior.model_override || session.model || null,
         invocation: prior.route_invocation || "cli",
+        reasoning_effort: prior.reasoning_effort ?? null,
+        service_tier: prior.service_tier ?? null,
       }];
     } else {
       ({ contract: plannerContract, subtask } = await loadPlannerSubtask(projectDir, taskId, requireString(args, "subtask_id")));
@@ -395,6 +431,7 @@ export class WorkerOrchestrator {
       provider: route.provider,
       model: route.model || null,
       invocation: route.invocation || "cli",
+      ...(route.provider === "codex_worker" ? normalizeWorkerOptions({ ...config.codex_worker, ...Object.fromEntries(Object.entries(route).filter(([, value]) => value !== undefined)) }) : {}),
     }));
     if (!routeChain.length) throw new Error("stage_work_missing_route");
     const reviewGate = computeReviewGate(config, continuation ? "stage_work_continue" : "stage_work", args);
@@ -442,7 +479,10 @@ export class WorkerOrchestrator {
   launch(job, runner) {
     const controller = new AbortController();
     this.controllers.set(job.id, controller);
-    const promise = runner(controller.signal)
+    const promise = (async () => {
+      await this.store.updateJob(job.id, { supervisor_pid: process.pid });
+      return runner(controller.signal);
+    })()
       .catch(async (error) => {
         const current = await this.store.getJob(job.id);
         if (current?.status !== "cancelled") {
@@ -469,7 +509,11 @@ export class WorkerOrchestrator {
           process_args: args,
           process_cwd: cwd,
           process_started_at: nowIso(),
+          process_exited_at: null,
         });
+      },
+      onExit: async ({ pid, code }) => {
+        await this.store.updateJob(job.id, { process_exited_at: nowIso(), process_exit_code: code, last_process_pid: pid || null });
       },
       onSession: async (sessionId) => {
         if (!sessionId) return;
@@ -478,6 +522,7 @@ export class WorkerOrchestrator {
           workspace_path: workspace,
           workspace_mode: workspaceMode,
           model: model || null,
+          ...(provider === "codex_worker" ? normalizeWorkerOptions(job) : {}),
           last_job_id: job.id,
           process_pid: (await this.store.getJob(job.id))?.process_pid || null,
         });
@@ -497,12 +542,13 @@ export class WorkerOrchestrator {
         route_invocation: route.invocation,
         route_index: index,
         route_attempts: attempts,
+        ...(route.provider === "codex_worker" ? normalizeWorkerOptions(route) : {}),
       });
       try {
-        const routedJob = { ...job, provider: route.provider, model_override: route.model || null };
+        const routedJob = { ...job, provider: route.provider, model_override: route.model || null, ...(route.provider === "codex_worker" ? normalizeWorkerOptions(route) : {}) };
         if (route.provider === "cc") await this.executeCcImpl(routedJob, config, signal, this.store.jobDir(job.id));
         else if (route.provider === "agy_write") await this.executeAgyWriteImpl(routedJob, config, signal, this.store.jobDir(job.id));
-        else if (route.provider === "codex_worker") await this.executeCodexWorkerImpl(routedJob, config, signal, this.store.jobDir(job.id));
+        else if (route.provider === "codex_worker") await this.executeCodexWorkerImpl(routedJob, { ...config, codex_worker: normalizeWorkerOptions(route) }, signal, this.store.jobDir(job.id));
         else throw new Error(`Unsupported work provider: ${route.provider}`);
         attempts.push({ ...route, status: "completed", finished_at: nowIso() });
         await this.store.updateJob(job.id, { route_attempts: attempts });
@@ -560,6 +606,7 @@ export class WorkerOrchestrator {
         throw new Error("review_target_unavailable: implementation worktree is missing");
       }
       reviewWorkspace = implementationJob.workspace.path;
+      await this.store.updateJob(job.id, { review_workspace: reviewWorkspace, implementation_job_id: implementationJob.id });
       reviewPlan = [
         job.plan,
         `Implementation job: ${implementationJob.id}`,
@@ -696,18 +743,11 @@ export class WorkerOrchestrator {
       await this.store.clearSession(job.project_dir, "agy_write", job.task_id);
       taskSession = null;
     }
-    let workspaceInfo;
-    if (taskSession?.workspace_path && await pathExists(taskSession.workspace_path)) {
-      workspaceInfo = {
-        mode: taskSession.workspace_mode,
-        path: taskSession.workspace_path,
-        original_project_dir: job.project_dir,
-        git: await inspectGit(job.project_dir, jobDir),
-      };
-    } else {
+    let workspaceInfo = await this.sessionWorkspace(taskSession, job);
+    if (!workspaceInfo) {
       if (taskSession) await this.store.clearSession(job.project_dir, "agy_write", job.task_id);
       taskSession = null;
-      workspaceInfo = await prepareWorkspace({ projectDir: job.project_dir, jobDir, config, requestedMode: undefined });
+      workspaceInfo = await this.allocateWorkspace(job, config, signal);
     }
     await this.store.updateJob(job.id, { phase: "executing", workspace: workspaceInfo, model: model || null });
 
@@ -1033,18 +1073,11 @@ export class WorkerOrchestrator {
     await this.store.updateJob(job.id, { status: "running", phase: "preparing", started_at: nowIso() });
     let taskSession = await this.store.getSession(job.project_dir, "cc", job.task_id);
     const model = chooseModel(config, "cc", job.complexity, job.model_override);
-    let workspaceInfo;
-    if (taskSession?.workspace_path && await pathExists(taskSession.workspace_path)) {
-      workspaceInfo = {
-        mode: taskSession.workspace_mode,
-        path: taskSession.workspace_path,
-        original_project_dir: job.project_dir,
-        git: await inspectGit(job.project_dir, jobDir),
-      };
-    } else {
+    let workspaceInfo = await this.sessionWorkspace(taskSession, job);
+    if (!workspaceInfo) {
       if (taskSession) await this.store.clearSession(job.project_dir, "cc", job.task_id);
       taskSession = null;
-      workspaceInfo = await prepareWorkspace({ projectDir: job.project_dir, jobDir, config, requestedMode: undefined });
+      workspaceInfo = await this.allocateWorkspace(job, config, signal);
     }
     await this.store.updateJob(job.id, { phase: "executing", workspace: workspaceInfo });
     if (taskSession && (taskSession.model || null) !== (model || null)) {
@@ -1158,18 +1191,11 @@ export class WorkerOrchestrator {
       await this.store.clearSession(job.project_dir, "codex_worker", job.task_id);
       taskSession = null;
     }
-    let workspaceInfo;
-    if (taskSession?.workspace_path && await pathExists(taskSession.workspace_path)) {
-      workspaceInfo = {
-        mode: taskSession.workspace_mode,
-        path: taskSession.workspace_path,
-        original_project_dir: job.project_dir,
-        git: await inspectGit(job.project_dir, jobDir),
-      };
-    } else {
+    let workspaceInfo = await this.sessionWorkspace(taskSession, job);
+    if (!workspaceInfo) {
       if (taskSession) await this.store.clearSession(job.project_dir, "codex_worker", job.task_id);
       taskSession = null;
-      workspaceInfo = await prepareWorkspace({ projectDir: job.project_dir, jobDir, config, requestedMode: undefined });
+      workspaceInfo = await this.allocateWorkspace(job, config, signal);
     }
     await this.store.updateJob(job.id, { phase: "executing", workspace: workspaceInfo, model: model || null });
 
@@ -1195,7 +1221,7 @@ export class WorkerOrchestrator {
         repairContext,
         signal,
         round,
-        processHooks: this.processHooks(job, { provider: "agy_write", workspace: workspaceInfo.path, workspaceMode: workspaceInfo.mode, model }),
+        processHooks: this.processHooks(job, { provider: "codex_worker", workspace: workspaceInfo.path, workspaceMode: workspaceInfo.mode, model }),
       });
       if (!run.session_id) {
         throw new Error("Codex Worker completed without a thread id; refusing an untracked continuation.");
@@ -1205,6 +1231,7 @@ export class WorkerOrchestrator {
         workspace_path: workspaceInfo.path,
         workspace_mode: workspaceInfo.mode,
         model: model || null,
+        ...normalizeWorkerOptions(config.codex_worker),
         last_job_id: job.id,
       });
       attempts.push({
@@ -1217,6 +1244,8 @@ export class WorkerOrchestrator {
         model: model || null,
         result_summary: truncate(run.parsed.result, 3000),
         sandbox_fallback: run.sandbox_fallback || null,
+        reasoning_effort: run.reasoning_effort,
+        service_tier: run.service_tier,
       });
       await this.store.updateJob(job.id, { phase: "verifying", attempts, session_id: run.session_id, model: model || null });
       if (run.cancelled || signal.aborted) throw new Error("Codex Worker task cancelled");
@@ -1280,18 +1309,11 @@ export class WorkerOrchestrator {
       await this.store.clearSession(job.project_dir, "agy_write", job.task_id);
       taskSession = null;
     }
-    let workspaceInfo;
-    if (taskSession?.workspace_path && await pathExists(taskSession.workspace_path)) {
-      workspaceInfo = {
-        mode: taskSession.workspace_mode,
-        path: taskSession.workspace_path,
-        original_project_dir: job.project_dir,
-        git: await inspectGit(job.project_dir, jobDir),
-      };
-    } else {
+    let workspaceInfo = await this.sessionWorkspace(taskSession, job);
+    if (!workspaceInfo) {
       if (taskSession) await this.store.clearSession(job.project_dir, "agy_write", job.task_id);
       taskSession = null;
-      workspaceInfo = await prepareWorkspace({ projectDir: job.project_dir, jobDir, config, requestedMode: undefined });
+      workspaceInfo = await this.allocateWorkspace(job, config, signal);
     }
     await this.store.updateJob(job.id, { phase: "executing", workspace: workspaceInfo, model: model || null });
 
@@ -1387,9 +1409,11 @@ export class WorkerOrchestrator {
     });
   }
 
-  async status(jobId) {
+  async status(jobId, { detail = "full" } = {}) {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
+    if (detail === "summary") return compactJob(job, this.promises.has(job.id));
+    if (!["progress", "full"].includes(detail)) throw new Error("Unknown status detail");
     const jobDir = this.store.jobDir(jobId);
     const progress = await readWorkerProgress({ job, jobDir });
     const livePid = job.process_pid ? processExists(job.process_pid) : false;
@@ -1400,6 +1424,7 @@ export class WorkerOrchestrator {
           ? "managed_in_process"
           : "interrupted"
       : "terminal";
+    if (detail === "progress") return { ...compactJob(job, this.promises.has(job.id)), progress };
     return {
       ...this.publicJob(job),
       progress,
@@ -1431,10 +1456,16 @@ export class WorkerOrchestrator {
   }
 
   async startVerify(args) {
+    return repositoryLock(path.resolve(requireString(args, "project_dir")), () => this.startVerifyUnlocked(args));
+  }
+
+  async startVerifyUnlocked(args) {
     const projectDir = path.resolve(requireString(args, "project_dir"));
     const contract = await loadPlannerContract(projectDir, requireString(args, "task_id"));
     const review = contract.reviewer_tasks.find((item) => item.review_id === args.review_id);
     if (!review) throw new Error(`Invalid reviewer review_id=${args.review_id}`);
+    const jobs = await this.store.listJobs();
+    if (jobs.some(job => job.project_dir === projectDir && job.task_id === args.task_id && ['agy_review', 'agy_verify'].includes(job.type) && ['queued', 'running'].includes(job.status))) throw new Error('A reviewer is already active for this task');
     const complexity = review.complexity === "mid" ? "medium" : review.complexity;
     return this.startAgy({
       project_dir: projectDir,
@@ -1487,12 +1518,19 @@ export class WorkerOrchestrator {
     });
   }
 
-  async result(jobId) {
+  async result(jobId, { detail = "full" } = {}) {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
     let evidence = null;
     if (job.evidence_path && await pathExists(job.evidence_path)) evidence = JSON.parse(await fs.readFile(job.evidence_path, "utf8"));
-    return { job: this.publicJob(job), evidence };
+    if (detail === "summary") return resultSummary(job, evidence);
+    if (detail === "full") return { job: this.publicJob(job), evidence };
+    if (!["verification", "changes", "findings", "attempts"].includes(detail)) throw new Error("Unknown result detail");
+    return { job: compactJob(job, this.promises.has(job.id)), detail, evidence: detail === "findings" ? (evidence?.review_evidence || { result: evidence?.result ?? null }) : evidence?.[detail] ?? null };
+  }
+
+  notifications() {
+    return new JobNotifications(this.store, { managed: id => this.promises.has(id) });
   }
 
   async cancel(jobId) {
@@ -1500,7 +1538,7 @@ export class WorkerOrchestrator {
     if (!job) throw new Error(`Unknown job: ${jobId}`);
     const controller = this.controllers.get(jobId);
     if (controller) controller.abort();
-    else if (job.process_pid && processExists(job.process_pid)) await terminateProcessTree(job.process_pid);
+    else if (job.process_pid && !job.process_exited_at && processExists(job.process_pid)) await terminateProcessTree(job.process_pid);
     await this.store.updateJob(jobId, { status: "cancelled", phase: "cancelled", finished_at: nowIso() });
     return { job_id: jobId, cancelled: true };
   }
@@ -1508,6 +1546,13 @@ export class WorkerOrchestrator {
   async apply(jobId) {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
+    return repositoryLock(job.project_dir, () => this.applyUnlocked(jobId));
+  }
+
+  async applyUnlocked(jobId) {
+    const job = await this.store.getJob(jobId);
+    if (!job) throw new Error(`Unknown job: ${jobId}`);
+    if (job.applied_at) return { applied: false, already_applied: true, project_dir: job.project_dir };
 
     // Gate 1: Job must be completed and ready for acceptance
     if (job.status !== "completed" || job.phase !== "ready_for_acceptance") throw new Error("Only a completed job ready for acceptance can be applied.");
@@ -1540,6 +1585,31 @@ export class WorkerOrchestrator {
 
     // Gate 5: Evidence and patch integrity checks
     const evidence = JSON.parse(await fs.readFile(job.evidence_path, "utf8"));
+    if (lifecycleDigest(await fs.readFile(job.patch_path)) !== evidence.changes?.patch_digest) throw new Error("Patch file changed after acceptance.");
+    const applicationFile = path.join(this.store.jobDir(jobId), 'apply-intent.json');
+    const application = await lifecycleJson(applicationFile);
+    let recoveredApplication = false;
+    if (application && application.patch_digest === evidence.changes.patch_digest && application.contract_digest === getContractDigest(contract)) {
+      const current = await inventory(job.project_dir);
+      const taskPaths = new Set(evidence.changes.changed_files);
+      const otherFiles = files => Object.fromEntries(Object.entries(files).filter(([name, value]) => !taskPaths.has(name) && value).sort());
+      recoveredApplication = current.head === application.source_head && current.branch === application.source_branch
+        && JSON.stringify(otherFiles(current.files)) === JSON.stringify(otherFiles(application.before_files))
+        && await lifecycleGit(job.project_dir, ['ls-files', '--stage', '-z']) === application.index_entries;
+      for (const file of taskPaths) {
+        if (JSON.stringify(await gitFileState(job.project_dir, file)) !== JSON.stringify(application.expected_files[file])) recoveredApplication = false;
+      }
+    }
+    if (!recoveredApplication && job.workspace.source_inventory && job.workspace.mode !== "in_place") {
+      const current = await inventory(job.project_dir);
+      const baseline = job.workspace.source_inventory;
+      if (current.branch !== baseline.branch) throw new Error("SOURCE_BRANCH_CHANGED: inspect the new target branch before applying.");
+      if (current.head !== baseline.head) throw new Error("SOURCE_CHANGED: integrate parallel results before applying to a new HEAD.");
+      for (const file of evidence.changes.changed_files) {
+        if (JSON.stringify(current.files[file] || null) !== JSON.stringify(baseline.files[file] || null)) throw new Error(`SOURCE_CHANGED: ${file} changed after task start.`);
+        if (job.workspace.base_commit === baseline.head && baseline.changes.some(change => change.path === file || change.from === file)) throw new Error(`Preexisting task-path changes require an explicit snapshot baseline: ${file}`);
+      }
+    }
 
     // Gate 5a: Patch digest must match acceptance artifact
     if (evidence.changes?.patch_digest && evidence.changes.patch_digest !== job.acceptance_patch_digest) {
@@ -1575,8 +1645,25 @@ export class WorkerOrchestrator {
       currentPatchDigest,
     });
 
+    if (recoveredApplication) {
+      await this.store.updateJob(jobId, { applied_at: nowIso(), phase: 'applied', application_recovered: true });
+      return { applied: false, already_applied: true, recovered: true, project_dir: job.project_dir };
+    }
+
     // Gate 7: Workspace mode check
-    if (job.workspace.mode === "in_place") return { applied: false, already_in_place: true, project_dir: job.project_dir };
+    if (job.workspace.mode === "in_place") {
+      await this.store.updateJob(jobId, { applied_at: nowIso(), phase: "applied" });
+      return { applied: false, already_in_place: true, project_dir: job.project_dir };
+    }
+
+    if (lifecycleDigest(await lifecycleGit(job.workspace.path, ['diff', '--binary', '--no-ext-diff'], { binary: true })) !== evidence.changes.patch_digest) throw new Error('ACCEPTED_WORKTREE_CHANGED: review the deliverable before application');
+    const beforeApplication = await inventory(job.project_dir);
+    const expectedFiles = Object.create(null);
+    for (const file of evidence.changes.changed_files) expectedFiles[file] = await gitFileState(job.workspace.path, file);
+    await writeJsonAtomic(applicationFile, { patch_digest: evidence.changes.patch_digest, contract_digest: getContractDigest(contract),
+      source_head: beforeApplication.head, source_branch: beforeApplication.branch, before_files: beforeApplication.files,
+      index_entries: await lifecycleGit(job.project_dir, ['ls-files', '--stage', '-z']), expected_files: expectedFiles, created_at: nowIso() });
+    if ((await inventory(job.project_dir)).fingerprint !== beforeApplication.fingerprint) throw new Error('SOURCE_CHANGED while preparing application');
 
     // Gate 8: Git apply check (done inside applyPatch)
     const result = await applyPatch({ originalProjectDir: job.workspace.original_project_dir, patchPath: job.patch_path, logDir: this.store.jobDir(jobId) });
@@ -1587,24 +1674,41 @@ export class WorkerOrchestrator {
   async cleanup(jobId) {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
-    if (["queued", "running"].includes(job.status)) throw new Error("Cancel or wait for the job before cleanup.");
-    const result = await cleanupWorkspace({
-      originalProjectDir: job.workspace?.original_project_dir || job.project_dir,
-      workspacePath: job.workspace?.path,
-      mode: job.workspace?.mode,
-      logDir: this.store.jobDir(jobId),
+    return repositoryLock(job.project_dir, () => this.gitLifecycle.cleanup(jobId));
+  }
+
+  async finalize(jobId, args = {}) {
+    return this.gitLifecycle.finalize(jobId, args);
+  }
+
+  async startFinalization(jobId, args = {}) {
+    const target = await this.store.getJob(jobId);
+    if (!target) throw new Error('Unknown finalization target');
+    const job = await repositoryLock(target.project_dir, async () => {
+      const jobs = await this.store.listJobs();
+      const active = jobs.find(item => item.type === 'task_finalize' && item.target_job_id === jobId && ['queued', 'running'].includes(item.status));
+      if (active) return active;
+      const policy = await this.gitLifecycle.policy(target.project_dir);
+      if (!target.commit_id && !args.record_commit && (policy.commit_policy === 'manual' || (policy.commit_policy !== 'auto' && args.confirm_commit !== true))) throw new Error('Local commit needs approval under the project commit policy');
+      const created = await this.store.createJob({ id: newId('finalize'), type: 'task_finalize', provider: 'runtime', project_dir: target.project_dir,
+        task_id: target.task_id, target_job_id: jobId, status: 'queued', phase: 'finalizing' });
+      this.launch(created, async signal => {
+        await this.store.updateJob(created.id, { status: 'running', phase: 'finalizing' });
+        const finalization = await this.finalize(jobId, { ...args, signal });
+        const evidencePath = path.join(this.store.jobDir(created.id), 'evidence.json');
+        await writeJsonAtomic(evidencePath, { status: 'completed', finalization });
+        await this.store.updateJob(created.id, { status: 'completed', phase: 'completed', closeout_phase: finalization.status,
+          commit_id: finalization.commit_id, evidence_path: evidencePath, finished_at: nowIso() });
+      });
+      return created;
     });
-    // Clear session for the job's provider
-    if (job.provider && job.task_id) {
-      const sessionProvider = job.provider === "agy_write" ? "agy_write" : job.provider;
-      await this.store.clearSession(job.project_dir, sessionProvider, job.task_id);
-    }
-    await this.store.updateJob(jobId, { cleaned_at: nowIso(), phase: job.applied_at ? "applied_and_cleaned" : "cleaned" });
-    return result;
+    return this.publicJob(job);
   }
 
   publicJob(job) {
     return {
+      target_job_id: job.target_job_id || null,
+      integration_job_ids: job.integration_job_ids || null,
       id: job.id,
       type: job.type,
       provider: job.provider,
@@ -1627,6 +1731,9 @@ export class WorkerOrchestrator {
       writable_paths: job.writable_paths || [],
       forbidden_paths: job.forbidden_paths || [],
       acceptance_commands: job.acceptance_commands || [],
+      closeout_phase: job.closeout_phase || null,
+      commit_id: job.commit_id || null,
+      continuation_available: job.continuation_available ?? null,
       requires_agy_review: job.requires_agy_review || false,
       review_waiver: job.review_waiver || false,
       agy_verify_job_id: job.agy_verify_job_id || null,

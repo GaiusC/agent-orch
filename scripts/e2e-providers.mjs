@@ -19,15 +19,14 @@ function git(cwd, ...args) {
 
 async function waitFor(orchestrator, jobId, timeoutMs = 1_800_000) {
   const deadline = Date.now() + timeoutMs;
-  let lastPhase = null;
   while (Date.now() < deadline) {
-    const job = await orchestrator.status(jobId);
-    if (job.phase !== lastPhase) {
-      process.stdout.write(`${JSON.stringify({ event: "job.phase", job_id: jobId, provider: job.provider, status: job.status, phase: job.phase, runtime_state: job.runtime_state })}\n`);
-      lastPhase = job.phase;
+    const job = await orchestrator.store.getJob(jobId);
+    const updates = await orchestrator.notifications().wait({ project_dir: job.project_dir, job_id: jobId, consumer_id: "real-e2e", until: "update", timeout_ms: Math.min(30000, Math.max(0, deadline - Date.now())) });
+    for (const event of updates.events) process.stdout.write(`${JSON.stringify({ event: "job.update", ...event })}\n`);
+    if (["completed", "failed", "cancelled"].includes((await orchestrator.store.getJob(jobId)).status)) {
+      await orchestrator.promises.get(jobId);
+      return orchestrator.store.getJob(jobId);
     }
-    if (["completed", "failed", "cancelled"].includes(job.status)) return job;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   throw new Error(`Timed out waiting for ${jobId}`);
 }
@@ -39,7 +38,7 @@ async function createProject(provider) {
   await fs.writeFile(path.join(projectDir, "README.md"), `Agent Orch real E2E fixture for ${provider}.\n`);
   await fs.writeFile(
     path.join(projectDir, "AGENTS.md"),
-    "Only modify provider.txt. Do not modify tests, configuration, documentation, Git metadata, or external systems.\n",
+    "Only modify provider.txt. Do not modify tests, configuration, documentation, Git metadata, or external systems. Progress reporting through the runtime-provided helper/MCP channel is explicitly allowed.\n",
   );
   await fs.writeFile(
     path.join(projectDir, "verify.cjs"),
@@ -52,10 +51,11 @@ async function createProject(provider) {
   git(projectDir, "commit", "-m", "fixture");
 
   const route = provider === "cc"
-    ? { provider, model: process.env.AGENT_ORCH_E2E_CC_MODEL || "deepseek-v4-flash", invocation: "cli" }
+    ? { provider, model: process.env.AGENT_ORCH_E2E_CC_MODEL, invocation: "cli" }
     : provider === "agy_write"
-      ? { provider, model: process.env.AGENT_ORCH_E2E_AGY_MODEL || "Claude Sonnet 4.6 (Thinking)", invocation: "cli" }
-      : { provider, model: process.env.AGENT_ORCH_E2E_CODEX_MODEL || null, invocation: "cli" };
+      ? { provider, model: process.env.AGENT_ORCH_E2E_AGY_MODEL, invocation: "cli" }
+      : { provider, model: process.env.AGENT_ORCH_E2E_CODEX_MODEL, invocation: "cli", reasoning_effort: "high", service_tier: null };
+  if (!route.model || (runReview && !process.env.AGENT_ORCH_E2E_REVIEW_MODEL)) throw new Error("Set the provider model and AGENT_ORCH_E2E_REVIEW_MODEL explicitly before real tests");
 
   await fs.mkdir(path.join(projectDir, ".agent-orchestrator"), { recursive: true });
   await fs.writeFile(
@@ -79,10 +79,10 @@ async function createProject(provider) {
         workspace_mode: "isolated",
         allow_dirty_in_place: false,
         max_cc_repair_rounds: 0,
-        cc_timeout_seconds: 1200,
-        agy_timeout_seconds: 1200,
-        agy_write_timeout_seconds: 1200,
-        codex_worker_timeout_seconds: 1200,
+        cc_timeout_seconds: 300,
+        agy_timeout_seconds: 300,
+        agy_write_timeout_seconds: 300,
+        codex_worker_timeout_seconds: 300,
         max_log_bytes: 4194304,
         max_result_chars: 8000,
       },
@@ -94,9 +94,9 @@ async function createProject(provider) {
         review: {
           default_complexity: "low",
           routes: {
-            low: [{ provider: "agy", model: "Gemini 3.5 Flash (Low)", invocation: "cli" }],
-            medium: [{ provider: "agy", model: "Gemini 3.5 Flash (High)", invocation: "cli" }],
-            high: [{ provider: "agy", model: "Gemini 3.1 Pro (High)", invocation: "cli" }],
+            low: [{ provider: "agy", model: process.env.AGENT_ORCH_E2E_REVIEW_MODEL, invocation: "cli" }],
+            medium: [{ provider: "agy", model: process.env.AGENT_ORCH_E2E_REVIEW_MODEL, invocation: "cli" }],
+            high: [{ provider: "agy", model: process.env.AGENT_ORCH_E2E_REVIEW_MODEL, invocation: "cli" }],
           },
         },
       },
@@ -118,7 +118,7 @@ async function runProvider(provider) {
     type: "verify",
     complexity: "low",
     target_subtask_ids: ["impl"],
-    required_checks: ["Inspect the worktree diff, confirm only provider.txt changed, and confirm node verify.cjs passes."],
+    required_checks: ["Inspect the worktree diff, confirm only provider.txt changed, and confirm node verify.cjs passes. Submit at least one short reviewing checkpoint through the runtime progress helper before the final verdict."],
     fallback_policy: { enabled: false },
   }] : [];
   await persistPlannerContract(projectDir, taskId, {
@@ -128,7 +128,7 @@ async function runProvider(provider) {
     executor_subtasks: [{
       subtask_id: "impl",
       role: "executor",
-      objective: `Create provider.txt with exactly two lines: provider=${provider} and initial=true. Do not change any other file.`,
+      objective: `Create provider.txt with exactly two lines: provider=${provider} and initial=true. Do not change any other file. Submit at least one short inspection_done or implementation_done report through the provided report_progress tool/helper before your final answer.`,
       complexity: "low",
       writable_paths: ["provider.txt"],
       forbidden_paths: [".git/", ".env", ".env.*"],
@@ -177,7 +177,7 @@ async function runProvider(provider) {
       project_dir: projectDir,
       task_id: taskId,
       review_id: "independent-review",
-      model: "Gemini 3.5 Flash (Low)",
+      model: process.env.AGENT_ORCH_E2E_REVIEW_MODEL,
     });
     review = await waitFor(orchestrator, reviewJob.id);
     if (review.status !== "completed") throw new Error(`Reviewer gate failed for ${provider}: ${review.error || review.phase}`);
@@ -193,6 +193,16 @@ async function runProvider(provider) {
     workspace_path: continuedSession.workspace_path,
     review_job_id: review?.id || null,
   };
+  result.progress_reports = {};
+  for (const id of [started.id, continued.id, review?.id].filter(Boolean)) {
+    const text = await fs.readFile(path.join(store.jobDir(id), "reporting", "progress.jsonl"), "utf8").catch(() => "");
+    result.progress_reports[id] = text.split("\n").filter(Boolean).length;
+    if (!result.progress_reports[id]) throw new Error(`Real job ${id} did not submit any checkpoint reports`);
+  }
+  const summary = await orchestrator.result(continued.id, { detail: "summary" });
+  result.result_summary_bytes = Buffer.byteLength(JSON.stringify(summary));
+  result.status_calls = 0;
+  await fs.writeFile(path.join(root, "notification-e2e-result.json"), JSON.stringify(result, null, 2));
   process.stdout.write(`${JSON.stringify({ event: "provider.complete", ...result })}\n`);
   if (!keep) process.stdout.write(`${JSON.stringify({ event: "artifact.retained", root, note: "Temporary E2E artifacts are retained for evidence inspection." })}\n`);
   return result;

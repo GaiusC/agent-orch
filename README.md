@@ -2,6 +2,12 @@
 
 Agent Orch is a Codex plugin that provides a stage-first MCP workflow for planning, implementation, independent review, acceptance, and durable continuation across CC, AGY, and Codex Worker.
 
+Version 0.7 adds environment takeover audits, explicit Git commit policies,
+recoverable task finalization, bounded worktree allocation, and independently
+reviewed integration of parallel results. Existing uncommitted changes are
+preserved; dirty state is never a reason to automatically clone the repository.
+See [Git lifecycle](skills/orchestrate-agents/references/git-lifecycle.md).
+
 The plugin follows the Codex plugin layout:
 
 ```text
@@ -28,7 +34,9 @@ Agent Orch requires the active Codex host model to expose local MCP tools. With 
 | `gpt-5.4-mini` | PASS |
 | `gpt-5.6-sol` | PASS — verified with a Sol-hosted task that made real `health` and `stage-plan` MCP calls |
 
-`gpt-5.6-terra` is the default Planner/Accepter model. Generated `gpt-5.6-sol` project routes are migrated to `gpt-5.6-terra`; unrelated custom model names are preserved.
+These are historical compatibility observations, not a current model catalog.
+Initialization requires user-selected models; v2 routes are not rewritten based
+on old alias assumptions.
 
 ## Primary MCP contract
 
@@ -36,14 +44,18 @@ The default MCP surface is provider-neutral:
 
 | Tool | Purpose |
 | --- | --- |
+| `environment-audit` | Collect read-only Git/worktree facts and explicit known clone paths; return a compact evidence index |
+| `environment-reconcile` | Prepare exact actions, then execute an approved plan after checking for state changes |
+| `stage-integrate` | Combine accepted results in a bounded integration worktree; require fresh review and acceptance |
+| `stage-finalize` | Apply once, verify the actual target, commit exact task changes, and safely retire worktrees |
 | `stage-plan` | Persist the Planner contract and immutable Plan execution identity |
 | `stage-work` | Execute one Planner subtask using configured provider routes |
 | `stage-work-continue` | Continue the exact provider session and worktree |
-| `stage-review` | Produce formal reviewer evidence bound to the current patch |
+| `stage-review` | Formal patch-bound code review, or separate advisory environment review |
 | `stage-accept` | Run the formal acceptance kernel with the Plan identity |
-| `wait-for-job` | Wait for a locally managed asynchronous job |
-| `status`, `result` | Inspect durable job state and evidence |
-| `apply`, `cleanup`, `cancel` | Apply accepted work, remove worktrees, or stop jobs |
+| `wait-for-job` | Bounded wait for checkpoint, attention or terminal events; 1-8 jobs with a shared consumer cursor |
+| `status`, `result` | Small current snapshot / result summary by default; expand details explicitly |
+| `apply`, `cleanup`, `cancel` | Compatibility apply/safe cleanup controls, or stop jobs; apply alone does not finalize |
 | `health` | Check CC, AGY, Codex Worker, trust, and project configuration |
 
 Provider-specific wrappers are hidden by default. Diagnostic exposure requires both:
@@ -66,6 +78,63 @@ Initialize and resume through the CLI:
 powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 init -ProjectDir <project> -HostProvider codex
 powershell -ExecutionPolicy Bypass -File <plugin-root>\scripts\agent-orch.ps1 resume -ProjectDir <project> -HostProvider codex
 ```
+
+`init` no longer assigns a fixed model name to a new project. In an interactive
+terminal, it lists discovered candidates and asks for Plan, ordered Work
+provider/model fallbacks, and Review. Accept inherits Plan's exact identity.
+Choose stage-wide models first, then optionally override low/medium/high tiers.
+The Plan model must match the actual host chat; selecting it does not switch the
+host model. Existing v2 model choices are preserved by `resume`.
+
+Outside a terminal, `init` returns `selection_required: true` (exit code 2), with
+candidates and provenance, before writing project files. The host should ask the
+user using that list, save the selections as JSON, and run:
+
+```powershell
+node scripts/agent-orch.mjs init -ProjectDir <project> -HostProvider codex --RoutesFile <routes.json>
+node scripts/agent-orch.mjs models --ModelCatalog <catalog.json>
+```
+
+Minimal routes JSON (replace each placeholder with the user's selection):
+
+```json
+{
+  "plan": { "provider": "codex", "model": "<current host model>" },
+  "work": [
+    { "provider": "codex_worker", "model": "<selected worker>", "reasoning_effort": "high", "service_tier": "fast" }
+  ],
+  "review": { "provider": "agy", "model": "<selected reviewer>" }
+}
+```
+
+For per-tier choices, use `{"stages":{"plan":{"routes":{"low":[...],"medium":[...],"high":[...]}},"work":{...},"review":{...},"accept":{"inherit_from":"plan"}}}`.
+Every tier of a supplied stage must be present. Only explicitly selected Work
+routes are enabled. Repeating `init` asks again; `--UseExistingRoutes` explicitly
+reuses the existing routes. `resume` cannot initialize a project implicitly.
+
+The candidate sources are the Codex local model cache (with its timestamp), CC's
+configured models, and `agy models`. Cache/configuration entries do not prove live
+availability. Discovery/auth failures are shown as warnings and never select a
+fallback model. Exact custom ids are accepted. To supply a fresh provider catalog
+or work offline, pass `--ModelCatalog <catalog.json>` with arrays under `codex`,
+`cc`, and `agy`. Entries can be model-id strings or objects:
+
+```json
+{
+  "codex": [{ "id": "<model id>", "reasoning_efforts": ["low", "high"], "service_tiers": ["priority"] }],
+  "cc": ["<configured model id>"],
+  "agy": ["<exact model display name>"]
+}
+```
+
+Codex Worker `reasoning_effort` and `service_tier` are independent route options.
+`null` means inherit the CLI setting, not force Standard speed. `fast` requests
+Codex Fast mode; other tier identifiers may be entered if advertised by the
+model/account. Listed reasoning capabilities are checked when available. Provider
+validation remains authoritative. Values are passed to initial execution,
+continuations, repairs, and Windows sandbox recovery; continuation preserves the
+original route's options even if project configuration changes. For inherited
+options, changes to the underlying CLI settings can still affect later turns.
 
 `resume` performs two durable operations:
 
@@ -95,23 +164,23 @@ If AGY prints an OAuth URL or an interactive sign-in request, Agent Orch termina
     "plan": {
       "routes": {
         "high": [
-          { "provider": "codex", "model": "gpt-5.6-terra", "invocation": "in_session" }
+          { "provider": "codex", "model": "<selected host model>", "invocation": "in_session" }
         ]
       }
     },
     "work": {
       "routes": {
         "medium": [
-          { "provider": "cc", "model": "deepseek-v4-flash" },
-          { "provider": "agy_write", "model": "Claude Sonnet 4.6 (Thinking)" },
-          { "provider": "codex_worker", "model": null }
+          { "provider": "cc", "model": "<selected CC model>" },
+          { "provider": "agy_write", "model": "<selected AGY worker>" },
+          { "provider": "codex_worker", "model": "<selected Codex worker>" }
         ]
       }
     },
     "review": {
       "routes": {
         "medium": [
-          { "provider": "agy", "model": "Gemini 3.5 Flash (High)" }
+          { "provider": "agy", "model": "<selected reviewer>" }
         ]
       }
     },
@@ -191,6 +260,43 @@ Standard release loop:
 7. Select an MCP-capable host model and verify that `health` and `stage-*` tools are callable while provider wrappers remain hidden.
 
 Source and installed cache versions must match before release verification.
+Source version 0.6.0 adds node reports, bounded event waiting and optional async
+Hook delivery. Stage-start, status and result defaults are compact. Existing
+clients needing full status/evidence must request `detail: "full"`; wait-for-job
+retains single job_id input but now returns `{cursor, events}`. There is no
+separate wait-for-change tool.
+Source version 0.5.0 introduces explicit initialization selection (non-interactive
+callers must supply routes), preserves v2 model identities, and adds independent
+Codex Worker reasoning/service-tier options. Legacy v1 migration remains a
+compatibility path; its historical registry is not used to select new-project models.
+
+## Supervision and short reports
+
+Workers/reviewers submit short checkpoints through the runtime-bound
+`report_progress` MCP server (Codex/CC) or the supplied helper CLI (AGY and others).
+Reports are advisory, deduplicated, length-limited, and stored outside the patch.
+The runtime alone records completion after verification/evidence persistence.
+
+The main chat calls `wait-for-job` with `until: "update"`, a stable `consumer_id`,
+the latest `cursor`, and `timeout_ms` (default 30000, max 60000). Use `job_id` or
+`job_ids` for up to 8 jobs. Default `until: "terminal"` ignores ordinary reports
+but returns attention early. Empty timeouts are not failures. The waiter works
+from disk after an MCP restart and does not read agent transcripts.
+
+```json
+{"project_dir":"<project>","job_ids":["<job-id>"],"consumer_id":"<chat-id>","until":"update","timeout_ms":30000}
+```
+
+Bundled async hooks deliver short events at active-turn safe points; they do not
+wake idle chats. Review/trust the hook in Codex before use. Set project
+`notifications.hook_enabled` to false to disable it. Hook and explicit waiting
+share the same consumer ledger. Distinct chats need distinct consumer ids.
+
+`status` defaults to a small snapshot; `detail: "progress"` or `"full"` is for
+diagnostics. `result` defaults to a summary plus evidence index; request
+`verification`, `changes`, `findings`, `attempts`, or `full` for inspection.
+Neither a node report nor a result summary replaces formal review/acceptance.
+See [protocol details](skills/orchestrate-agents/references/status-design-options.md).
 
 ## Tests
 
@@ -201,7 +307,7 @@ npm run test:e2e-codex-mcp
 
 The suite covers config migration, Windows paths, MCP cwd behavior, `mcp.enabled=false`, runtime environment capture, OAuth fail-fast, permission flags, StageRun lifecycle, immutable Plan identity, exact continuation, and provider routing.
 
-`test:e2e-codex-mcp` performs a real Codex-hosted MCP call and defaults to `gpt-5.4-mini`; set `AGENT_ORCH_CODEX_MCP_MODEL` to probe another model. Release verification additionally performs real E2E work-stage invocations for CC, AGY, and Codex Worker and an independent reviewer gate.
+`test:e2e-codex-mcp` performs a real Codex-hosted MCP call; set `AGENT_ORCH_CODEX_MCP_MODEL` explicitly to a currently available model. Release verification additionally performs real E2E work-stage invocations for CC, AGY, and Codex Worker and an independent reviewer gate.
 
 ## Dashboard
 

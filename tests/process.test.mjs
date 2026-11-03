@@ -21,6 +21,20 @@ test("process runner captures output", async (t) => {
   assert.equal(result.stderr, "warn");
 });
 
+test("process runner awaits async hooks in event order before returning", async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-hooks-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const events = [];
+  await runProcess({
+    command: process.execPath, args: ["-e", "process.stdout.write('session')"], cwd: root, logDir: root,
+    onSpawn: async () => { await new Promise(resolve => setTimeout(resolve, 80)); events.push("spawn"); },
+    onStdoutChunk: async () => { await new Promise(resolve => setTimeout(resolve, 80)); events.push("session"); },
+    onExit: async () => { await new Promise(resolve => setTimeout(resolve, 20)); events.push("exit"); },
+  });
+  assert.deepEqual(events, ["spawn", "session", "exit"]);
+  assert.equal(await fs.readFile(path.join(root, "process.stdout.log"), "utf8"), "session");
+});
+
 test("process runner times out and terminates", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-timeout-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

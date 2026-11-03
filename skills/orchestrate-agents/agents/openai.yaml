@@ -1,13 +1,13 @@
 interface:
   display_name: "Agent Orch"
-  short_description: "Stage-first orchestration with CC, AGY, and Codex Worker"
-  default_prompt: "Use $orchestrate-agents with an MCP-capable Codex host model to persist a plan with stage-plan, delegate one contract with stage-work, obtain review evidence, and accept through the formal stage-accept gate."
+  short_description: "Review environments, commit tasks, and retire worktrees safely"
+  default_prompt: "Use $orchestrate-agents to audit inherited environments, preserve unknown changes, select model routes and Git policies, and persist the plan. Supervise short checkpoint events with wait-for-job, independently review and accept work or integrated parallel results, then finalize exact local commits and safe worktree retirement with durable receipts."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "agent_orch"
-      description: "Stage-first CC, AGY, and Codex Worker orchestration server"
+      description: "Environment audits, concise events, reviewed integration, exact Git commits, and safe retirement"
       transport: "stdio"
 
 policy:

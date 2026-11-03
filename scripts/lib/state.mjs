@@ -3,6 +3,7 @@ import path from "node:path";
 import { dataRoot } from "./config.mjs";
 import { processExists } from "./process.mjs";
 import { newId, nowIso, projectKey, readJson, truncate, writeJsonAtomic } from "./utils.mjs";
+import { withFileLock } from "./notifications.mjs";
 
 const IN_SESSION_ROLES_BY_HOST = {
   codex: ["planner", "accepter", "coordinator"],
@@ -22,7 +23,9 @@ export class StateStore {
   async init() {
     await fs.mkdir(this.jobsRoot, { recursive: true });
     await fs.mkdir(this.orchestratorRoot, { recursive: true });
-    if (!(await fs.stat(this.sessionsFile).catch(() => null))) await writeJsonAtomic(this.sessionsFile, { version: 1, sessions: {} });
+    await withFileLock(this.sessionsFile + '.lock', async () => {
+      if (!(await fs.stat(this.sessionsFile).catch(() => null))) await writeJsonAtomic(this.sessionsFile, { version: 1, sessions: {} });
+    });
   }
 
   jobDir(jobId) {
@@ -190,6 +193,7 @@ export class StateStore {
   }
 
   async setSession(projectDir, provider, taskId, session) {
+    const value = await withFileLock(this.sessionsFile + '.lock', async () => {
     const registry = await this.sessions();
     registry.sessions[this.sessionKey(projectDir, provider, taskId)] = {
       ...session,
@@ -199,15 +203,24 @@ export class StateStore {
       updated_at: nowIso(),
     };
     await writeJsonAtomic(this.sessionsFile, registry);
-    await this.recordEvent("session.bound", registry.sessions[this.sessionKey(projectDir, provider, taskId)], { provider });
     return registry.sessions[this.sessionKey(projectDir, provider, taskId)];
+    });
+    await this.recordEvent("session.bound", value, { provider });
+    return value;
   }
 
-  async clearSession(projectDir, provider, taskId) {
+  async clearSession(projectDir, provider, taskId, expected = {}) {
+    const cleared = await withFileLock(this.sessionsFile + '.lock', async () => {
     const registry = await this.sessions();
+    const current = registry.sessions[this.sessionKey(projectDir, provider, taskId)];
+    if (expected.session_id && current?.session_id !== expected.session_id) return false;
+    if (expected.last_job_id && current?.last_job_id !== expected.last_job_id) return false;
     delete registry.sessions[this.sessionKey(projectDir, provider, taskId)];
     await writeJsonAtomic(this.sessionsFile, registry);
-    await this.recordEvent("session.cleared", { project_dir: path.resolve(projectDir), provider, task_id: taskId }, { provider });
+    return true;
+    });
+    if (cleared) await this.recordEvent("session.cleared", { project_dir: path.resolve(projectDir), provider, task_id: taskId }, { provider });
+    return cleared;
   }
 }
 
@@ -301,6 +314,7 @@ function buildCurrentState({ projectDir, jobs, events, sessions }) {
     active_jobs: activeJobs.map(publicJobSnapshot),
     stale_jobs: staleJobs.map(publicJobSnapshot),
     ready_for_acceptance: ready.map(publicJobSnapshot),
+    pending_closeouts: filteredJobs.filter(job => job.applied_at && !job.cleaned_at).map(publicJobSnapshot),
     failed_jobs: failed.map(publicJobSnapshot),
     superseded_failed_jobs: supersededFailed.map(publicJobSnapshot),
     recent_jobs: filteredJobs.slice(0, 20).map(publicJobSnapshot),
@@ -353,6 +367,11 @@ function buildPlanSummary(jobs) {
 
 function publicJobSnapshot(job) {
   return {
+    target_job_id: job.target_job_id || null,
+    integration_job_ids: job.integration_job_ids || null,
+    closeout_phase: job.closeout_phase || null,
+    commit_id: job.commit_id || null,
+    continuation_available: job.continuation_available ?? null,
     id: job.id,
     type: job.type,
     provider: job.provider,
@@ -391,6 +410,7 @@ function publicJobSnapshot(job) {
 }
 
 function recommendNextAction(state, hostProvider) {
+  if (state.pending_closeouts?.length) return "Run stage-finalize for applied tasks to verify, commit under project policy, and safely retire their worktrees. Preserve unrelated edits.";
   if (state.stale_jobs?.length) {
     const staleIds = state.stale_jobs.map((j) => j.id).join(", ");
     return `Stale running jobs detected: ${staleIds}. Investigate these jobs and cancel or restart them with focused repair feedback.`;

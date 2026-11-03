@@ -14,6 +14,7 @@ const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, "
 const cli = path.join(path.resolve(here, ".."), "scripts", "agent-orch.mjs");
 
 function runCli(args, cwd) {
+  if (args[0] === "init") args = [...args, "--RoutesFile", path.join(here, "fixtures", "init-routes.json")];
   return JSON.parse(execFileSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", timeout: 30000 }));
 }
 
@@ -239,8 +240,8 @@ test("CLI init enables the MCP stage surface for a Codex host", async (t) => {
   const config = JSON.parse(await fs.readFile(path.join(project, ".agent-orchestrator", "config.json"), "utf8"));
   assert.equal(config.mcp.enabled, true);
   assert.equal(config.host.provider, "codex");
-  assert.equal(config.models.codex.planner, "gpt-5.6-terra");
-  assert.equal(config.models.codex.accepter, "gpt-5.6-terra");
+  assert.equal(config.models.codex.planner, "fixture-host-model");
+  assert.equal(config.models.codex.accepter, "fixture-host-model");
 });
 
 test("CLI init with cc_desktop enables mcp", async (t) => {

@@ -18,6 +18,17 @@ test("sessions are isolated by project, provider, and task", async (t) => {
   assert.equal((await store.getSession("C:/project-b", "cc", "task")).session_id, "three");
 });
 
+test("parallel stores retain every independent session and conditional clear cannot erase a newer binding", async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-orch-session-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const first = new StateStore(root), second = new StateStore(root);
+  await Promise.all([first.init(), second.init()]);
+  await Promise.all(Array.from({ length: 12 }, (_, n) => (n % 2 ? first : second).setSession('C:/parallel', 'cc', `task-${n}`, { session_id: `session-${n}`, last_job_id: `job-${n}` })));
+  for (let n = 0; n < 12; n++) assert.equal((await first.getSession('C:/parallel', 'cc', `task-${n}`)).session_id, `session-${n}`);
+  assert.equal(await first.clearSession('C:/parallel', 'cc', 'task-0', { session_id: 'old-session' }), false);
+  assert.equal((await second.getSession('C:/parallel', 'cc', 'task-0')).session_id, 'session-0');
+});
+
 test("events rebuild current state and codex resume uses in-session roles", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-state-events-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

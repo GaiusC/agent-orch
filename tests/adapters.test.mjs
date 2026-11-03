@@ -145,6 +145,16 @@ test("Codex Worker supports explicit medium reasoning for Terra and Sol routes",
   }
 });
 
+test("Codex Worker carries reasoning and service tier through start, resume and sandbox fallback", () => {
+  for (const options of [{}, { resume: true, sessionId: "same-thread" }, { resume: true, sessionId: "same-thread", bypassSandbox: true }]) {
+    const args = buildCodexWorkerArgs({ prompt: "implement", workspace: "C:/fixture", model: "chosen-model", reasoningEffort: "xhigh", serviceTier: "fast", ...options });
+    assert.ok(args.includes('model_reasoning_effort="xhigh"'));
+    assert.ok(args.includes('service_tier="fast"'));
+  }
+  const inherited = buildCodexWorkerArgs({ prompt: "implement", workspace: "C:/fixture" });
+  assert.ok(!inherited.some(arg => /model_reasoning_effort=|service_tier=/.test(arg)));
+});
+
 test("Codex Worker Windows sandbox failures are classified for same-session bypass", () => {
   assert.equal(classifyCodexWindowsSandboxFailure("codex-windows-sandbox-setup.exe: Access denied (os error 5)"), true);
   assert.equal(classifyCodexWindowsSandboxFailure("normal task failure"), false);

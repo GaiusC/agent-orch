@@ -11,6 +11,7 @@ const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, "
 const pluginRoot = path.resolve(here, "..");
 const serverPath = path.join(pluginRoot, "scripts", "mcp-stdio-bridge.mjs");
 const fakeCc = path.join(here, "fixtures", "fake-cc.mjs");
+const fakeAgy = path.join(here, "fixtures", "fake-agy.mjs");
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -40,6 +41,8 @@ async function createProject({ mcpEnabled = true, trusted = true } = {}) {
         claude: process.execPath,
         claude_prefix_args: [fakeCc],
         claude_permission_mode: "bypassPermissions",
+        agy: process.execPath,
+        agy_prefix_args: [fakeAgy],
       },
       execution: { cc_timeout_seconds: 20, max_cc_repair_rounds: 2 },
       review_gate: { require_reviewer_for_implementation: false, allow_waiver: true },
@@ -76,7 +79,7 @@ test("MCP exposes stage-first tools and hides provider wrappers by default", asy
   try {
     const listed = await client.listTools();
     const names = listed.tools.map((tool) => tool.name);
-    for (const name of ["stage-plan", "stage-work", "stage-work-continue", "stage-review", "stage-accept", "wait-for-job", "status", "result", "apply", "cleanup", "health"]) {
+    for (const name of ["environment-audit", "environment-reconcile", "stage-finalize", "stage-integrate", "stage-plan", "stage-work", "stage-work-continue", "stage-review", "stage-accept", "wait-for-job", "status", "result", "apply", "cleanup", "health"]) {
       assert.ok(names.includes(name), `${name} should be exposed`);
     }
     for (const name of ["cc-exec", "agy-exec", "auto", "planner-plan", "codex-exec", "accepter-accept"]) {
@@ -206,8 +209,17 @@ test("stage-work launches configured provider and reaches terminal StageRun", as
       arguments: { project_dir: projectDir, job_id: jobId },
     });
     assert.equal(finished.isError, false, finished.content[0].text);
-    assert.equal(body(finished).status, "completed");
-    assert.equal(body(finished).provider, "cc");
+    assert.equal(body(finished).events[0].status, "completed");
+    assert.equal(body(finished).events[0].type, "terminal");
+    const snapshot = body(await client.callTool({ name: "status", arguments: { project_dir: projectDir, job_id: jobId } }));
+    assert.equal(snapshot.status, "completed");
+    assert.equal(Object.hasOwn(snapshot, "progress"), false);
+    assert.equal(Object.hasOwn(snapshot, "project_dir"), false);
+    const summary = body(await client.callTool({ name: "result", arguments: { project_dir: projectDir, job_id: jobId } }));
+    assert.equal(summary.evidence.verification.passed, true);
+    assert.equal(Object.hasOwn(summary.evidence, "attempts"), false);
+    const full = body(await client.callTool({ name: "result", arguments: { project_dir: projectDir, job_id: jobId, detail: "full" } }));
+    assert.ok(Array.isArray(full.evidence.attempts));
     const stageFile = path.join(projectDir, ".agent-orchestrator", "stages", `${body(started).stage_run.stage_run_id}.json`);
     const stageRun = JSON.parse(await fs.readFile(stageFile, "utf8"));
     assert.equal(stageRun.status, "completed");
@@ -230,9 +242,43 @@ test("stage-work launches configured provider and reaches terminal StageRun", as
     });
     assert.equal(applied.isError, false, applied.content[0].text);
     assert.equal(await fs.readFile(path.join(projectDir, "feature.txt"), "utf8"), "good");
+    const finalized = await client.callTool({ name: "stage-finalize", arguments: { project_dir: projectDir, job_id: jobId, confirm_commit: true, background: true } });
+    assert.equal(finalized.isError, false, finalized.content[0].text);
+    const finalizationId = body(finalized).job.id;
+    const finalWait = await client.callTool({ name: 'wait-for-job', arguments: { project_dir: projectDir, job_id: finalizationId } });
+    assert.equal(body(finalWait).events[0].status, 'completed', finalWait.content[0].text);
+    const finalSummary = body(await client.callTool({ name: 'result', arguments: { project_dir: projectDir, job_id: finalizationId } }));
+    assert.equal(finalSummary.finalization.status, "closed");
+    assert.equal(git(projectDir, "diff", "--name-only", "HEAD"), "");
   } finally {
     await client.close();
   }
+});
+
+test("MCP environment audit/reconciliation and separate advisory reviewer preserve historical files", async t => {
+  const projectDir = await createProject();
+  t.after(() => fs.rm(projectDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(projectDir, 'README.md'), 'legacy edit\n');
+  const client = await connect();
+  try {
+    const auditCall = await client.callTool({ name: 'environment-audit', arguments: { project_dir: projectDir, context: { unknowns: ['README provenance'] } } });
+    assert.equal(auditCall.isError, false, auditCall.content[0].text);
+    const audit = body(auditCall); assert.equal(audit.modified_paths, 1);
+    const prepared = await client.callTool({ name: 'environment-reconcile', arguments: { project_dir: projectDir, audit_id: audit.audit_id, mode: 'prepare', baseline: 'head', actions: [{ kind: 'preserve', paths: ['README.md'], reason: 'unknown legacy edit' }] } });
+    assert.equal(prepared.isError, false, prepared.content[0].text);
+    const denied = await client.callTool({ name: 'environment-reconcile', arguments: { project_dir: projectDir, audit_id: audit.audit_id, mode: 'execute', plan_id: body(prepared).plan_id } });
+    assert.equal(denied.isError, true);
+    const executed = await client.callTool({ name: 'environment-reconcile', arguments: { project_dir: projectDir, audit_id: audit.audit_id, mode: 'execute', plan_id: body(prepared).plan_id, confirm: true } });
+    assert.equal(executed.isError, false, executed.content[0].text);
+    const started = await client.callTool({ name: 'stage-review', arguments: { project_dir: projectDir, review_kind: 'environment', audit_id: audit.audit_id } });
+    assert.equal(started.isError, false, started.content[0].text);
+    const id = body(started).job.id;
+    const waited = await client.callTool({ name: 'wait-for-job', arguments: { project_dir: projectDir, job_id: id } });
+    assert.equal(body(waited).events[0].status, 'completed', waited.content[0].text);
+    const evidence = body(await client.callTool({ name: 'result', arguments: { project_dir: projectDir, job_id: id, detail: 'full' } })).evidence;
+    assert.equal(evidence.advisory_only, true); assert.equal(evidence.code_acceptance, false);
+    assert.equal(await fs.readFile(path.join(projectDir, 'README.md'), 'utf8'), 'legacy edit\n');
+  } finally { await client.close(); }
 });
 
 test("unknown tool is rejected", async () => {

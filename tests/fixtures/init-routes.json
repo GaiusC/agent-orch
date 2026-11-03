@@ -1,0 +1,5 @@
+{
+  "plan": { "provider": "codex", "model": "fixture-host-model" },
+  "work": [{ "provider": "cc", "model": "fixture-worker-model" }],
+  "review": { "provider": "agy", "model": "fixture-reviewer-model" }
+}

@@ -26,7 +26,7 @@ test("v1 migration preserves custom models and creates stage routes", () => {
   assert.equal(migrated.stages.work.routes.low[1].model, "custom-cc-low");
 });
 
-test("generated Sol planner routes migrate to an MCP-capable Codex model", () => {
+test("v2 migration preserves explicit model identities instead of rewriting aliases", () => {
   const migrated = migrateProjectConfig({
     version: 2,
     models: {
@@ -45,11 +45,10 @@ test("generated Sol planner routes migrate to an MCP-capable Codex model", () =>
       },
     },
   });
-  assert.equal(migrated.models.codex.planner, "gpt-5.6-terra");
-  assert.equal(migrated.models.codex.accepter, "gpt-5.6-terra");
-  assert.equal(migrated.stages.plan.routes.high[0].model, "gpt-5.6-terra");
-  assert.deepEqual(migrated.migration.codex_mcp_model_from, ["gpt-5.6-sol"]);
-  assert.equal(migrated.migration.codex_mcp_model_to, "gpt-5.6-terra");
+  assert.equal(migrated.models.codex.planner, "gpt-5.6-sol");
+  assert.equal(migrated.models.codex.accepter, "gpt-5.6-sol");
+  assert.equal(migrated.stages.plan.routes.high[0].model, "gpt-5.6-sol");
+  assert.equal(migrated.migration, undefined);
 });
 
 test("resolveStageRoutes rejects unsupported provider-stage combinations", () => {

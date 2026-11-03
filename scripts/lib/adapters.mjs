@@ -2,9 +2,26 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { normalizeWorkerOptions } from "./model-selection.mjs";
+import { prepareProgressChannel } from "./notifications.mjs";
+import { fileURLToPath } from "node:url";
 import { runProcess } from "./process.mjs";
 import { pathExists, truncate } from "./utils.mjs";
 import { effectiveProviderEnvironment } from "./runtime-env.mjs";
+
+const progressHelper = fileURLToPath(new URL("../report-progress.mjs", import.meta.url));
+function progressMcp(directory) {
+  return { mcpServers: { agent_orch_progress: { command: process.execPath, args: [progressHelper, "--mcp", directory] } } };
+}
+function progressInstructions(directory) {
+  return [
+    "Report 2-4 meaningful checkpoints, one or two short sentences each (at most 240 characters). Do not report every tool call or repeat plans.",
+    "Use agent_orch_progress.report_progress(checkpoint, message) when available. Checkpoints: inspection_done, implementation_done, testing, reviewing, finding, blocked.",
+    `Otherwise invoke the reporting helper with argv: ${JSON.stringify([process.execPath, progressHelper, directory, "<checkpoint>", "<short message>"])}. Pass the message as an argument, never executable code.`,
+    `The runtime explicitly permits writes ONLY through this helper inside ${directory}; it is instrumentation outside the implementation patch, including for read-only reviewers.`,
+    "A progress report is advisory. The runtime alone records completion after verification and evidence persistence. Reporting blocked requests attention; it does not authorize scope changes or pause the process automatically.",
+  ].join("\n");
+}
 
 async function readClaudeSettingsEnv() {
   const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
@@ -39,12 +56,13 @@ function contractPrompt({ role, goal, plan, acceptance, readPaths, writablePaths
   ].filter(Boolean).join("\n\n");
 }
 
-export function buildClaudeArgs({ prompt, sessionId, resume, model, permissionMode = "auto", maxBudgetUsd }) {
+export function buildClaudeArgs({ prompt, sessionId, resume, model, permissionMode = "auto", maxBudgetUsd, reportingDirectory }) {
   const args = ["-p", prompt, "--output-format", "json", "--permission-mode", permissionMode];
   if (resume) args.push("--resume", sessionId);
   else args.push("--session-id", sessionId);
   if (model) args.push("--model", model);
   if (maxBudgetUsd) args.push("--max-budget-usd", String(maxBudgetUsd));
+  if (reportingDirectory) args.push("--mcp-config", JSON.stringify(progressMcp(reportingDirectory)), "--add-dir", reportingDirectory);
   return args;
 }
 
@@ -66,6 +84,7 @@ function parseClaudeOutput(stdout, fallbackSessionId) {
 }
 
 export async function runClaude({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0, processHooks = {} }) {
+  const reportingDirectory = await prepareProgressChannel(jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
   const sessionId = taskSession?.session_id || crypto.randomUUID();
   await processHooks.onSession?.(sessionId);
   const basePrompt = contractPrompt({
@@ -76,7 +95,7 @@ export async function runClaude({ config, workspace, jobDir, goal, plan, accepta
     readPaths,
     writablePaths,
     forbiddenPaths,
-  });
+  }) + "\n\n" + progressInstructions(reportingDirectory);
   const prompt = repairContext
     ? `${basePrompt}\n\nThis is a continuation. Fix only the following verified failures without redesigning the approved plan:\n${repairContext}`
     : basePrompt;
@@ -87,6 +106,7 @@ export async function runClaude({ config, workspace, jobDir, goal, plan, accepta
     model,
     permissionMode: config.cli.claude_permission_mode || "auto",
     maxBudgetUsd: config.execution.cc_max_budget_usd,
+    reportingDirectory,
   });
   args.unshift(...(config.cli.claude_prefix_args || []));
   const claudeSettingsEnv = await readClaudeSettingsEnv();
@@ -98,7 +118,7 @@ export async function runClaude({ config, workspace, jobDir, goal, plan, accepta
     logDir: jobDir,
     logPrefix: `cc-round-${round}`,
     maxLogBytes: config.execution.max_log_bytes,
-    env: { ...claudeSettingsEnv, ...(config.cli.claude_env || {}) },
+    env: { ...claudeSettingsEnv, ...(config.cli.claude_env || {}), AGENT_ORCH_REPORT_DIR: reportingDirectory, AGENT_ORCH_REPORT_HELPER: progressHelper },
     signal,
     ...processHooks,
   });
@@ -475,8 +495,9 @@ export async function readWorkerProgress({ job, jobDir }) {
 }
 
 export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths, writablePaths, forbiddenPaths, taskSession, model, signal, mode = "investigate", processHooks = {} }) {
+  const reportingDirectory = await prepareProgressChannel(jobDir, { projectDir: config.project_dir || workspace, role: /review/.test(mode) ? "reviewer" : "worker" });
   const evidenceOnly = mode !== "disjoint_subtask";
-  const prompt = mode === "plan"
+  const taskPrompt = mode === "plan"
     ? [
         "You are a planner producing a contract-oriented plan for the host orchestrator.",
         `Planning goal: ${goal}`,
@@ -508,6 +529,7 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths,
         "Complete the task, run relevant checks, and provide a concise final answer. Do not stop at a plan.",
       ].filter(Boolean).join("\n\n");
   const cachedBefore = await cachedAgyConversation(workspace);
+  const prompt = taskPrompt + "\n\n" + progressInstructions(reportingDirectory);
   const cliLogPath = path.join(jobDir, `agy-${mode}.cli.log`);
   const projectId = agyProjectId(config);
   const sandbox = config.cli.agy_sandbox === true;
@@ -522,6 +544,7 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths,
     permissionMode: evidenceOnly ? "dangerously-skip-permissions" : (config.cli.agy_write_permission_mode || "dangerously-skip-permissions"),
   });
   args.unshift(...(config.cli.agy_prefix_args || []));
+  args.push("--add-dir", reportingDirectory);
   args.push("--log-file", cliLogPath);
   const providerEnv = await effectiveProviderEnvironment(config.project_dir || workspace, config.cli.agy_env || {});
   const launch = {
@@ -540,7 +563,7 @@ export async function runAgy({ config, workspace, jobDir, goal, plan, readPaths,
     logDir: jobDir,
     logPrefix: `agy-${mode}`,
     maxLogBytes: config.execution.max_log_bytes,
-    env: providerEnv,
+    env: { ...providerEnv, AGENT_ORCH_REPORT_DIR: reportingDirectory, AGENT_ORCH_REPORT_HELPER: progressHelper },
     signal,
     abortOnOutput: config.agy?.fail_fast_on_auth_window === false ? undefined : agyAuthAbort,
     ...processHooks,
@@ -636,6 +659,7 @@ export function contractPromptAgyWrite({ goal, plan, acceptance, readPaths, writ
 }
 
 export async function runAgyWrite({ config, workspace, jobDir, goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, taskSession, model, repairContext, signal, round = 0, processHooks = {} }) {
+  const reportingDirectory = await prepareProgressChannel(jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
   const sessionId = taskSession?.session_id || crypto.randomUUID();
   const basePrompt = contractPromptAgyWrite({
     goal,
@@ -644,7 +668,7 @@ export async function runAgyWrite({ config, workspace, jobDir, goal, plan, accep
     readPaths,
     writablePaths,
     forbiddenPaths,
-  });
+  }) + "\n\n" + progressInstructions(reportingDirectory);
   const prompt = repairContext
     ? `${basePrompt}\n\nThis is a continuation. Fix only the following verified failures without redesigning the approved plan:\n${repairContext}`
     : basePrompt;
@@ -665,6 +689,7 @@ export async function runAgyWrite({ config, workspace, jobDir, goal, plan, accep
   });
   args.unshift(...(config.cli.agy_prefix_args || []));
   args.push("--log-file", cliLogPath);
+  args.push("--add-dir", reportingDirectory);
   const providerEnv = await effectiveProviderEnvironment(config.project_dir || workspace, config.cli.agy_env || {});
 
   const launch = {
@@ -684,7 +709,7 @@ export async function runAgyWrite({ config, workspace, jobDir, goal, plan, accep
     logDir: jobDir,
     logPrefix: `agy-write-round-${round}`,
     maxLogBytes: config.execution.max_log_bytes,
-    env: providerEnv,
+    env: { ...providerEnv, AGENT_ORCH_REPORT_DIR: reportingDirectory, AGENT_ORCH_REPORT_HELPER: progressHelper },
     signal,
     abortOnOutput: config.agy?.fail_fast_on_auth_window === false ? undefined : agyAuthAbort,
     ...processHooks,
@@ -746,15 +771,23 @@ function codexWorkerPrompt({ goal, plan, acceptance, readPaths, writablePaths, f
   ].filter(Boolean).join("\n\n");
 }
 
-export function buildCodexWorkerArgs({ prompt, sessionId, resume = false, model, workspace, bypassSandbox = false, reasoningEffort = null }) {
+export function buildCodexWorkerArgs({ prompt, sessionId, resume = false, model, workspace, bypassSandbox = false, reasoningEffort = null, serviceTier = null, reportingDirectory }) {
+  normalizeWorkerOptions({ reasoning_effort: reasoningEffort, service_tier: serviceTier });
+  const reportingArgs = reportingDirectory ? [
+    "-c", `mcp_servers.agent_orch_progress.command=${JSON.stringify(process.execPath)}`,
+    "-c", `mcp_servers.agent_orch_progress.args=${JSON.stringify([progressHelper, "--mcp", reportingDirectory])}`,
+    "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify([reportingDirectory])}`,
+  ] : [];
   if (resume) {
     const args = [
       "exec", "resume",
       "--json",
+      ...reportingArgs,
     ];
     if (bypassSandbox) args.push("--dangerously-bypass-approvals-and-sandbox");
     else args.push("-c", 'approval_policy="never"', "-c", 'sandbox_mode="workspace-write"');
-    if (reasoningEffort) args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
+    if (reasoningEffort) args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`);
+    if (serviceTier) args.push("-c", `service_tier=${JSON.stringify(serviceTier)}`);
     args.push("--skip-git-repo-check");
     if (model) args.push("--model", model);
     args.push(sessionId, prompt);
@@ -763,10 +796,12 @@ export function buildCodexWorkerArgs({ prompt, sessionId, resume = false, model,
   const args = [
     "exec",
     "--json",
+    ...reportingArgs,
   ];
   if (bypassSandbox) args.push("--dangerously-bypass-approvals-and-sandbox");
   else args.push("--sandbox", "workspace-write", "-c", 'approval_policy="never"');
-  if (reasoningEffort) args.push("-c", `model_reasoning_effort="${reasoningEffort}"`);
+  if (reasoningEffort) args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`);
+  if (serviceTier) args.push("-c", `service_tier=${JSON.stringify(serviceTier)}`);
   args.push("--skip-git-repo-check", "-C", workspace);
   if (model) args.push("--model", model);
   args.push(prompt);
@@ -813,8 +848,11 @@ export async function runCodexWorker({
   round = 0,
   processHooks = {},
 }) {
-  const prompt = codexWorkerPrompt({ goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, repairContext });
-  const reasoningEffort = ["gpt-5.6-terra", "gpt-5.6-sol"].includes(model) ? "medium" : null;
+  const reportingDirectory = await prepareProgressChannel(jobDir, { projectDir: config.project_dir || workspace, role: "worker" });
+  const prompt = codexWorkerPrompt({ goal, plan, acceptance, readPaths, writablePaths, forbiddenPaths, repairContext }) + "\n\n" + progressInstructions(reportingDirectory);
+  const options = normalizeWorkerOptions(config.codex_worker);
+  const reasoningEffort = options.reasoning_effort;
+  const serviceTier = options.service_tier;
   const initialArgs = buildCodexWorkerArgs({
     prompt,
     sessionId: taskSession?.session_id || null,
@@ -822,6 +860,8 @@ export async function runCodexWorker({
     model,
     workspace,
     reasoningEffort,
+    serviceTier,
+    reportingDirectory,
   });
   const execute = async (args, logPrefix) => {
     args.unshift(...(config.cli.codex_prefix_args || []));
@@ -834,7 +874,7 @@ export async function runCodexWorker({
       logDir: jobDir,
       logPrefix,
       maxLogBytes: config.execution.max_log_bytes,
-      env: config.cli.codex_env || {},
+      env: { ...(config.cli.codex_env || {}), AGENT_ORCH_REPORT_DIR: reportingDirectory, AGENT_ORCH_REPORT_HELPER: progressHelper },
       signal,
       ...processHooks,
       onStdoutChunk: async (chunk) => {
@@ -874,6 +914,8 @@ export async function runCodexWorker({
       model,
       workspace,
       reasoningEffort,
+      serviceTier,
+      reportingDirectory,
       bypassSandbox: true,
     });
     processResult = await execute(fallbackArgs, `codex-worker-round-${round}-sandbox-fallback`);
@@ -892,5 +934,7 @@ export async function runCodexWorker({
     session_id: parsed.session_id,
     model: model || null,
     sandbox_fallback: sandboxFallback,
+    reasoning_effort: reasoningEffort,
+    service_tier: serviceTier,
   };
 }

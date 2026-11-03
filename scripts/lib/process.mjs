@@ -42,6 +42,7 @@ export async function runProcess({
   shell = false,
   signal,
   onSpawn,
+  onExit,
   onStdoutChunk,
   onStderrChunk,
   abortOnOutput,
@@ -58,6 +59,13 @@ export async function runProcess({
   let timedOut = false;
   let cancelled = false;
   let abortedByOutput = null;
+  // Persist spawn/session callbacks in event order and finish them before the
+  // caller records terminal state. Otherwise a late callback can overwrite the
+  // completed session, including its Worker reasoning/service-tier options.
+  let pendingHooks = Promise.resolve();
+  const enqueueHook = (hook, value) => {
+    pendingHooks = pendingHooks.then(() => hook?.(value)).catch(() => {});
+  };
 
   const result = await new Promise((resolve, reject) => {
     child = spawn(command, args, {
@@ -68,7 +76,7 @@ export async function runProcess({
       shell,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    Promise.resolve(onSpawn?.({ pid: child.pid, command, args, cwd })).catch(() => {});
+    enqueueHook(onSpawn, { pid: child.pid, command, args, cwd });
     const timer = setTimeout(async () => {
       timedOut = true;
       await killTree(child);
@@ -87,10 +95,10 @@ export async function runProcess({
     const handleChunk = (streamName, chunk) => {
       if (streamName === "stdout") {
         appendLimited(stdoutStream, chunk, stdoutState, maxLogBytes);
-        Promise.resolve(onStdoutChunk?.(chunk)).catch(() => {});
+        enqueueHook(onStdoutChunk, chunk);
       } else {
         appendLimited(stderrStream, chunk, stderrState, maxLogBytes);
-        Promise.resolve(onStderrChunk?.(chunk)).catch(() => {});
+        enqueueHook(onStderrChunk, chunk);
       }
       if (!abortedByOutput && abortOnOutput) {
         const reason = abortOnOutput({
@@ -109,13 +117,17 @@ export async function runProcess({
       clearTimeout(timer);
       reject(error);
     });
-    child.once("exit", (code, exitSignal) => {
+    child.once("close", (code, exitSignal) => {
       clearTimeout(timer);
+      enqueueHook(onExit, { pid: child.pid, code, signal: exitSignal });
       resolve({ code, signal: exitSignal });
     });
-  }).finally(() => {
-    stdoutStream.end();
-    stderrStream.end();
+  }).finally(async () => {
+    await pendingHooks;
+    await Promise.all([
+      new Promise(resolve => stdoutStream.end(resolve)),
+      new Promise(resolve => stderrStream.end(resolve)),
+    ]);
   });
 
   return {

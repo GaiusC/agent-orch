@@ -62,10 +62,14 @@ export function normalizeStageRoute(route, stage) {
     provider,
     model: normalized.model || null,
     invocation: normalized.invocation || providerDefinition(provider).invocation,
+    ...(provider === "codex_worker" ? Object.fromEntries(
+      ["reasoning_effort", "service_tier"].filter(key => Object.hasOwn(normalized, key)).map(key => [key, normalized[key]]),
+    ) : {}),
   };
 }
 
 export function resolveStageRoutes(config, stage, complexity = "medium") {
+  if (config.model_selection?.complete === false) throw new Error("Model selection required: run init and choose stage models first");
   const normalizedComplexity = complexity === "mid" ? "medium" : complexity;
   const stageConfig = config.stages?.[stage];
   if (!stageConfig) throw new Error(`Missing stages.${stage} configuration`);
