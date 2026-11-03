@@ -100,7 +100,7 @@ if (-not $targetOrchestrator -and -not $ProjectHome) {
 }
 
 $target = if ($targetOrchestrator) { [System.IO.Path]::GetFullPath($targetOrchestrator).TrimEnd('\') } else { $resolvedProjectFull }
-$requiredServerVersion = "audit-orch-workspace-v6"
+$requiredServerVersion = "audit-orch-workspace-v7"
 $port = $null
 
 if ($Close) {

@@ -17,7 +17,7 @@ from auditor_data import build_workspace, context_from_query, ContextError
 from git_history import snapshot as git_snapshot, commit_detail as git_commit_detail, run_git as read_git_command, GitReadError
 
 PORT = 15788
-SERVER_VERSION = "audit-orch-workspace-v6"
+SERVER_VERSION = "audit-orch-workspace-v7"
 MAX_TAIL_BYTES = 256 * 1024
 MAX_TRANSCRIPT_BYTES = 192 * 1024
 MAX_EVENTS = 120

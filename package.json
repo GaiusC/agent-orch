@@ -1,6 +1,6 @@
 {
   "name": "agent-orch",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": true,
   "type": "module",
   "description": "Agent orchestration with environment audits, selected model routes, concise progress, reviewed parallel integration, exact Git commits, and safe worktree retirement.",

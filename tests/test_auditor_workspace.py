@@ -143,6 +143,71 @@ class WorkspaceDataTests(unittest.TestCase):
         self.assertEqual({activity[0]['job_id'],*activity[0]['operation']['related_job_ids']},{'work-first','work-continue'})
         self.assertIsNone(activity[0]['start'])
 
+    def test_async_finalizers_share_the_target_delivery_receipt_and_plan_links(self):
+        self.git('init','-b','main');self.git('commit','--allow-empty','-m','delivery');sha=self.git('rev-parse','HEAD')
+        self.job('work-delivery',commit_id=sha,committed_at='2026-01-01T01:00:00Z')
+        self.write('plans/p2.json',{'plan_id':'p2','type':'formal','task_ids':['supervise']})
+        for name in ['finalize-first','finalize-retry']:
+            self.job(name,type='task_finalize',target_job_id='work-delivery',commit_id=sha,
+                     plan_id='p2',task_id='supervise',subtask_id=None)
+        receipt={'operation_id':'delivery-receipt','job_id':'work-delivery','kind':'delivery.committed',
+                 'status':'completed','commit_id':sha,'occurred_at':'2026-01-01T01:00:00Z'}
+        self.write('runs/work-delivery/git-operations/delivery.json',receipt)
+        (self.orch/'events.jsonl').write_text(json.dumps({'git_operation':receipt})+'\n',encoding='utf-8')
+        before={p:p.read_bytes() for p in self.orch.rglob('*') if p.is_file()}
+        data=build_workspace(str(self.project),str(self.orch))
+        for plan in data['plans']:
+            deliveries=[e for e in plan['git_activity'] if e['git_kind']=='delivery.committed']
+            self.assertEqual(len(deliveries),1)
+            self.assertEqual(deliveries[0]['id'],'delivery-receipt')
+            self.assertEqual(deliveries[0]['job_id'],'work-delivery')
+            self.assertEqual(deliveries[0]['operation']['provenance'],'operation-receipt')
+            self.assertEqual(set(deliveries[0]['operation']['related_job_ids']),{'finalize-first','finalize-retry'})
+            self.assertEqual(deliveries[0]['start'],'2026-01-01T01:00:00Z')
+        self.assertEqual({link['plan_id'] for link in data['commit_links'][sha]},{'p','p2'})
+        self.assertEqual({p:p.read_bytes() for p in self.orch.rglob('*') if p.is_file()},before)
+
+    def test_legacy_finalizers_share_target_metadata_or_receipt_delivery(self):
+        sha='a'*40
+        for source in ['metadata','receipt']:
+            target='work-'+source
+            fields={'commit_id':sha,'committed_at':'2026-01-01T01:00:00Z'} if source=='metadata' else {}
+            self.job(target,**fields)
+            if source=='receipt':self.write(f'runs/{target}/finalization/receipt.json',{'commit_id':sha,'status':'closed'})
+            self.job('finalize-'+source,type='task_finalize',target_job_id=target,commit_id=sha,subtask_id=None)
+        deliveries=[e for e in self.plan()['git_activity'] if e['git_kind']=='delivery.committed']
+        self.assertEqual({e['job_id'] for e in deliveries},{'work-metadata','work-receipt'})
+        self.assertEqual(len(deliveries),2) # Distinct targets can legitimately share one commit.
+        for event in deliveries:
+            self.assertEqual(event['operation']['related_job_ids'],['finalize-'+event['job_id'][5:]])
+            self.assertEqual(event['operation']['provenance'],'legacy-fields')
+        self.assertIsNone(next(e for e in deliveries if e['job_id']=='work-receipt')['start'])
+
+    def test_unproven_finalizer_links_and_independent_deliveries_remain_visible(self):
+        sha='a'*40
+        self.job('work-target',commit_id=sha)
+        self.job('work-independent',commit_id=sha)
+        self.job('finalize-unknown',type='task_finalize',target_job_id='missing',commit_id=sha)
+        self.job('finalize-mismatch',type='task_finalize',target_job_id='work-target',commit_id='b'*40)
+        self.job('finalize-unlinked',type='task_finalize',commit_id=sha)
+        deliveries=[e for e in self.plan()['git_activity'] if e['git_kind']=='delivery.committed']
+        self.assertEqual({e['job_id'] for e in deliveries},
+                         {'work-target','work-independent','finalize-unknown','finalize-mismatch','finalize-unlinked'})
+        self.assertEqual(len(deliveries),5)
+
+    def test_finalizer_can_link_to_a_durable_receipt_when_target_job_is_missing(self):
+        sha='a'*40
+        self.job('finalize-only',type='task_finalize',target_job_id='work-missing',commit_id=sha)
+        self.write('runs/work-missing/git-operations/delivery.json',
+                   {'operation_id':'saved-delivery','job_id':'work-missing','kind':'delivery.committed',
+                    'status':'completed','commit_id':sha,'occurred_at':None})
+        data=build_workspace(str(self.project),str(self.orch))
+        deliveries=[e for p in data['plans'] for e in p['git_activity'] if e['git_kind']=='delivery.committed']
+        self.assertEqual(len(deliveries),1)
+        self.assertEqual(deliveries[0]['id'],'saved-delivery')
+        self.assertEqual(deliveries[0]['operation']['related_job_ids'],['finalize-only'])
+        self.assertIsNone(deliveries[0]['start'])
+
     def test_internal_checkpoints_are_opt_in_and_do_not_move_target_head(self):
         self.git('init','-b','main');self.git('commit','--allow-empty','-m','base');base=self.git('rev-parse','HEAD')
         tree=self.git('rev-parse','HEAD^{tree}');checkpoint=self.git('commit-tree',tree,'-p',base,'-m','internal checkpoint')

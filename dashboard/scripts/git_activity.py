@@ -60,6 +60,22 @@ def read_operations(root, jobs, read_json, warnings):
             if not job.get('integrated_into_job_id'):
                 fallback('delivery.committed',job.get('committed_at'),commit_id=commit,after_head=commit,workspace=job.get('project_dir'),manual=job.get('manual_commit_recorded',False))
         if job.get('cleaned_at'):fallback('workspace.cleaned',job['cleaned_at'],commit_id=commit)
+    # Async finalizers supervise a target job; their mirrored commit_id is not
+    # another delivery. Require both the explicit target and the same commit,
+    # and retain the supervisor links for plan/commit navigation. Do this after
+    # legacy recovery so it is independent of job enumeration order.
+    finalizers={job.get('id') or Path(job['_file']).parent.name:job.get('target_job_id')
+                for job in jobs if job.get('type')=='task_finalize' and job.get('target_job_id')}
+    for identifier,operation in list(operations.items()):
+        target=finalizers.get(operation.get('job_id'))
+        if not target or operation['kind']!='delivery.committed' or operation.get('provenance')!='legacy-fields':continue
+        delivery=next((candidate for candidate in operations.values()
+                       if candidate.get('job_id')==target and candidate['kind']=='delivery.committed'
+                       and candidate.get('commit_id')==operation.get('commit_id')),None)
+        if delivery is None or delivery is operation:continue
+        related=delivery.setdefault('related_job_ids',[])
+        if operation['job_id'] not in related:related.append(operation['job_id'])
+        del operations[identifier]
     # Continuations can share one workspace/base. Preserve all associations,
     # while presenting this single baseline fact only once.
     baselines={}

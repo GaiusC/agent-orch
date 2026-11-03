@@ -8,6 +8,10 @@ reviewed integration of parallel results. Existing uncommitted changes are
 preserved; dirty state is never a reason to automatically clone the repository.
 See [Git lifecycle](skills/orchestrate-agents/references/git-lifecycle.md).
 
+Version 0.7.2 shows asynchronous finalization as a single delivery, preserving
+supervisor links and legacy evidence. Existing model routes and job records are
+retained.
+
 Version 0.7.1 includes the updated local Auditor: manual-refresh project and plan
 navigation, execution timelines, dependency graphs, Git history, and English /
 Chinese controls. Durable Git operation receipts link execution evidence to

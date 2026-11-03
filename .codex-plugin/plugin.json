@@ -1,6 +1,6 @@
 {
   "name": "agent-orch",
-  "version": "0.7.1+codex.20261104.1",
+  "version": "0.7.2+codex.20261104.1",
   "description": "Stage-first orchestration with environment audits, selected models, concise worker events, reviewed parallel integration, recoverable Git commits, and a local Auditor workspace for execution and Git history.",
   "author": {
     "name": "Jieli Chen"
