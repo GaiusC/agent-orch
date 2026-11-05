@@ -161,7 +161,7 @@ export async function sharedWorkspacePaths(binding) {
 export async function canonicalPolicy(binding, fallback = {}) {
   const config = await json(path.join(binding.canonical_root, '.agent-orchestrator', 'config.json'), {});
   const local = await same(binding.coordinator_common, binding.canonical_common) ? fallback : {};
-  const policy = { max_worker_worktrees: 2, max_worktrees: 3, max_workspace_bytes: null, ...local, ...config.git_lifecycle };
+  const policy = { max_worker_worktrees: 3, max_worktrees: 5, max_workspace_bytes: null, ...local, ...config.git_lifecycle };
   if (![policy.max_worker_worktrees, policy.max_worktrees].every(n => Number.isInteger(n) && n >= 1)) throw new Error('Invalid canonical workspace capacity policy');
   return policy;
 }

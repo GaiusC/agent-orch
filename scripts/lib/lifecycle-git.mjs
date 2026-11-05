@@ -30,10 +30,12 @@ export function safePath(value, { preserve = false } = {}) {
 }
 export async function git(cwd, args, options = {}) {
   try {
-    const result = await execute('git', ['-c', `safe.directory=${path.resolve(cwd).replaceAll('\\', '/')}`, '--literal-pathspecs', ...args], {
+    const pending = execute('git', ['-c', `safe.directory=${path.resolve(cwd).replaceAll('\\', '/')}`, '--literal-pathspecs', ...args], {
       cwd, windowsHide: true, encoding: options.binary ? 'buffer' : 'utf8', maxBuffer: 128 * 1024 * 1024,
       timeout: 120000, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', ...options.env },
     });
+    if (options.input !== undefined) {pending.child.stdin.on('error',()=>{});pending.child.stdin.end(options.input);}
+    const result = await pending;
     return options.binary ? result.stdout : result.stdout.trimEnd();
   } catch (error) {
     if (options.allowFailure) return null;
@@ -44,11 +46,15 @@ export async function json(file, fallback = null) {
   try { return JSON.parse(await fs.readFile(file, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }
-export async function save(file, value) {
+export async function save(file, value, { durable = false } = {}) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-  await fs.writeFile(temporary, JSON.stringify(value, null, 2) + '\n');
+  if(durable) {
+    const handle=await fs.open(temporary,'wx');
+    try {await handle.writeFile(JSON.stringify(value,null,2)+'\n');await handle.sync();} finally {await handle.close();}
+  } else await fs.writeFile(temporary, JSON.stringify(value, null, 2) + '\n');
   await fs.rename(temporary, file);
+  if(durable && process.platform!=='win32') {const directory=await fs.open(path.dirname(file),'r');try{await directory.sync();}finally{await directory.close();}}
 }
 export async function fileState(root, file) {
   const target = path.resolve(root, file);
@@ -116,8 +122,8 @@ export async function scopedTree(cwd, files, directory, base = 'HEAD') {
     for (const file of files) {
       safePath(file);
       await fileState(cwd, file);
-      await git(cwd, ['add', '-A', '--', file], { env });
     }
+    if(files.length) await git(cwd,['add','-A','--pathspec-from-file=-','--pathspec-file-nul'],{env,input:files.join('\0')+'\0'});
     return { tree: await git(cwd, ['write-tree'], { env }), index, env };
   } catch (error) { await fs.rm(index, { force: true }); throw error; }
 }

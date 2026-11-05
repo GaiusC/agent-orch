@@ -1,7 +1,7 @@
 {
   "name": "agent-orch",
-  "version": "0.8.2+codex.20261104.1",
-  "description": "Stage-first orchestration with bounded Windows lifecycle arguments, runtime project identity, audited coordinator registration, shared workspace limits, recommended routes and independent review.",
+  "version": "0.8.3+codex.20261106.1",
+  "description": "Task branches and explicit cross-chat handoff with owner fencing, independently accepted delivery, recoverable pending merges and bounded workspaces.",
   "author": {
     "name": "Jieli Chen"
   },
@@ -17,8 +17,8 @@
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Agent Orch",
-    "shortDescription": "Bind project identity and supervise reviewed, bounded workspaces.",
-    "longDescription": "Keep large Git preservation lists out of process arguments and give environment reviewers compact references to complete on-disk audit evidence. Bind execution to the original project, register necessary coordinator copies through audited reconciliation and share workspace limits. Recommend current model routes, supervise bounded Worker upgrades and quota-only review fallback, independently accept exact changes, then commit and retire worktrees. Preserve model routes, unrelated edits and historical evidence; inspect activity in the local Auditor. Hooks do not wake idle chats.",
+    "shortDescription": "Hand off tasks, review changes, commit and merge safely.",
+    "longDescription": "Audit the original project, recommend current model routes and task branches, and transfer task authority explicitly across chats without rewriting Plans. Independently review and accept exact changes, commit to protected task refs, release recoverable workspaces before merge, and integrate parallel results with fresh evidence. Keep commit, merge and cleanup states separate in the local Auditor. Share limits across project copies: three Worker and five total auxiliary workspaces by default. Preserve existing routes, unrelated edits and historical records; unknown drift needs review. Hooks do not wake idle chats.",
     "developerName": "Jieli Chen",
     "category": "Productivity",
     "capabilities": [
@@ -26,9 +26,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Recommend current stage models, let me use, edit or customize the matrix, and initialize Git policies while preserving existing changes.",
-      "Implement and independently review this task, then finalize its exact local commit and safely retire its worktree while preserving unrelated edits.",
-      "Integrate accepted parallel task results, independently review and accept the combined patch, then commit and clean up."
+      "Audit this project, recommend models and a task branch, and initialize approved Git policies while preserving existing work.",
+      "Continue this task through an explicit cross-chat handoff, keeping its Plan, worker session and evidence.",
+      "Implement and independently review this task, commit exact accepted changes, merge under policy and safely retire workspaces."
     ]
   }
 }

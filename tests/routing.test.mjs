@@ -401,6 +401,11 @@ test("CLI health reports mcp_enabled and host_provider", async (t) => {
   const project = await createProject(root);
   await runCli(["init", "-ProjectDir", project, "-HostProvider", "cc_desktop"]);
 
+  const configPath = path.join(project, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  config.cli = { ...config.cli, claude: process.execPath, agy: process.execPath, codex: process.execPath };
+  await fs.writeFile(configPath, JSON.stringify(config));
+
   const result = runCli(["health", "-ProjectDir", project]);
   assert.equal(result.ok, true);
   assert.equal(result.mcp_enabled, true);

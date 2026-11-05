@@ -7,8 +7,9 @@ import { validateAcceptanceForCurrentPatch } from './acceptance.mjs';
 import { captureChanges } from './workspace.mjs';
 import { runVerification } from './verify.mjs';
 import crypto from 'node:crypto';
-import { prepareProgressChannel, reportProgress } from './notifications.mjs';
+import { prepareProgressChannel, reportProgress, withFileLock } from './notifications.mjs';
 import { recordGitOperation } from './git-events.mjs';
+import { validateTaskDelivery } from './branch-delivery.mjs';
 
 export async function startIntegration(orchestrator, args) {
   return repositoryLock(path.resolve(args.project_dir), () => startIntegrationUnlocked(orchestrator, args));
@@ -24,17 +25,20 @@ async function startIntegrationUnlocked(orchestrator, args) {
     if (getContractDigest(await loadPlannerContract(project, job.task_id)) !== job.contract_digest) throw new Error('Integration Plan changed; create a new integration task');
     await orchestrator.store.updateJob(job.id, { status: 'queued', phase: 'queued', error: null });
   } else {
+    if(args.target_job_id) args={...args,job_ids:[args.target_job_id]};
     if ((await orchestrator.store.listJobs()).some(j => j.project_dir === project && j.integration_job_ids && ['queued', 'running'].includes(j.status))) throw new Error('An integration is already active in this project');
-    if (!Array.isArray(args.job_ids) || args.job_ids.length < 2 || args.job_ids.length > 8 || new Set(args.job_ids).size !== args.job_ids.length) throw new Error('Integration requires 2-8 unique job ids');
+    if (!Array.isArray(args.job_ids) || args.job_ids.length < (args.target_job_id?1:2) || args.job_ids.length > 8 || new Set(args.job_ids).size !== args.job_ids.length) throw new Error('Integration requires 2-8 unique job ids, or one committed target_job_id');
     const { contract, subtask } = await loadPlannerSubtask(project, args.task_id, args.subtask_id);
     if (args.job_ids.some(id => !safeId(id))) throw new Error('Invalid integration source');
     job = await orchestrator.store.createJob({ id: `integrate-${crypto.randomUUID()}`, type: 'stage_work', provider: 'integration',
       status: 'queued', phase: 'queued', project_dir: project, task_id: args.task_id, subtask_id: args.subtask_id,
       contract_id: contract.contract_id, contract_digest: getContractDigest(contract), integration_job_ids: args.job_ids,
+      coordinator_fence:args.coordinator_fence || null, integration_target_job_id:args.target_job_id || null,
       writable_paths: subtask.writable_paths, forbidden_paths: subtask.forbidden_paths,
       acceptance_commands: subtask.required_tests, requires_agy_review: true, review_waiver: false,
       integration_position: 0, goal: subtask.objective });
   }
+  await orchestrator.taskLifecycle.assertJob(job);
   orchestrator.launch(job, signal => executeIntegration(orchestrator, job, config, signal));
   return orchestrator.publicJob(job);
 }
@@ -49,7 +53,13 @@ async function executeIntegration(orchestrator, job, config, signal) {
     if (!source || source.project_dir !== job.project_dir || source.status !== 'completed' || source.integration_job_ids || source.acceptance_status !== 'accepted') throw new Error('Integration sources must be accepted implementation jobs of this project');
     const evidence = await json(source.evidence_path);
     if (!evidence?.changes || evidence.changes.forbidden_changes?.length || evidence.changes.unauthorized_changes?.length || (evidence.verification?.configured !== false && !evidence.verification?.passed)) throw new Error('Integration source evidence is incomplete');
-    await validateAcceptanceForCurrentPatch({ artifactPath: source.acceptance_artifact_path, contract: await loadPlannerContract(job.project_dir, source.task_id), currentPatchDigest: evidence.changes.patch_digest });
+    if(source.task_commit_id) {
+      const proof=await validateTaskDelivery(orchestrator,source);
+      inputs.push({id,commit:proof.commit_id,reference:proof.ref,patch_digest:proof.patch_digest});
+      await operation('integration.input',{key:id,source_job_id:id,commit_id:proof.commit_id,ref:proof.ref,patch_digest:proof.patch_digest,recovered:true});
+      continue;
+    }
+    await validateAcceptanceForCurrentPatch({ projectDir: source.project_dir, job: source, artifactPath: source.acceptance_artifact_path, contract: await loadPlannerContract(job.project_dir, source.task_id), currentPatchDigest: evidence.changes.patch_digest });
     const before = await inventory(source.workspace.path);
     const patch = await git(source.workspace.path, ['diff', '--binary', '--no-ext-diff'], { binary: true });
     if (digest(patch) !== evidence.changes.patch_digest || await git(source.workspace.path, ['diff', '--cached', '--name-only']) || await git(source.workspace.path, ['ls-files', '--others', '--exclude-standard'])) throw new Error('Integration input changed after acceptance');
@@ -66,14 +76,17 @@ async function executeIntegration(orchestrator, job, config, signal) {
     } finally { await removeIndex(staged.index); }
   }
   if (!current.workspace) {
-    const workspace = await reserveWorkspace({ projectDir: job.project_dir, jobDir: directory, config, signal, kind: 'integration', onWait: async () => {
+    const task=await orchestrator.taskLifecycle.record(job.project_dir,job.task_id);
+    const workspace = await reserveWorkspace({ projectDir: job.project_dir, jobDir: directory, config, signal, kind: 'integration', baseCommit:task?.branch?.mode==='task'?task.branch.expected_tip:null,
+      resolveBase:task?.branch?.mode==='task'?()=>orchestrator.taskLifecycle.prepareBase(job):null,onWait: async () => {
       await store.updateJob(job.id, { status: 'running', phase: 'waiting_for_workspace' });
       const channel = await prepareProgressChannel(directory, { projectDir: job.project_dir, role: 'worker' });
       await reportProgress(channel, { checkpoint: 'blocked', message: 'Integration is waiting for an approved workspace/storage slot. Existing workspaces are preserved.' });
     } });
     current = await store.updateJob(job.id, { workspace, integration_inputs: inputs, phase: 'integrating', status: 'running' });
+    await orchestrator.taskLifecycle.noteWorkspace(job);
   }
-  await repositoryLock(job.project_dir, async () => {
+  await withFileLock(path.join(directory,'integration.lock'), async () => {
     current = await store.getJob(job.id);
     const workspace = current.workspace.path;
     for (let n = current.integration_position || 0; n < inputs.length; n++) {

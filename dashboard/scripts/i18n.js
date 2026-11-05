@@ -1,6 +1,10 @@
 // UI-only translations. Project content, Git messages, patches and evidence
 // are never translated. Chinese source labels also serve as stable keys.
 const english = {
+  '已提交待合并':'Committed, pending merge', '任务分支提交':'Task branch commit', '任务分支':'Task branch', '目标分支':'Target branch',
+  '交付状态':'Delivery state', '集成状态':'Integration state', '工作区状态':'Workspace state', '当前协调者':'Current coordinator', '执行代次':'Execution epoch',
+  '任务接续与分支':'Task continuity and branches', '已提交':'Committed', '待合并':'Pending merge', '已合并':'Merged', '已回收':'Cleaned', '待清理':'Cleanup deferred',
+  '保留中':'Retained', '尚未提交':'Uncommitted', '尚未准备':'Not prepared', '尚未分配':'Not allocated',
   '所有项目':'All projects', '返回项目首页':'Back to projects', '选择项目':'Select project',
   '切换项目':'Switch project', '刷新':'Refresh', '切换明暗主题':'Toggle light / dark theme',
   '项目选择':'Project selection', '项目':'Projects', '项目工作区':'Project workspaces',

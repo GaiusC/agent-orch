@@ -57,6 +57,7 @@ export function compactJob(job, managed = false) {
   const attention = job.status === "failed" || runtime_state === "interrupted";
   const action_required = attention || job.phase === "ready_for_acceptance" || (job.status === "completed" && /review|verify/.test(job.type) && job.phase === "completed");
   const value = { id: job.id, status: job.status, phase: job.phase, runtime_state, action_required };
+  for(const key of ['task_commit_id','task_branch','target_branch','delivery_status','integration_status','workspace_status']) if(job[key]) value[key]=job[key];
   if (job.adaptive_escalation) value.effective_complexity=job.effective_complexity;
   if (job.review_route_attempts?.length>1) value.actual_model=job.model;
   if (job.closeout_phase) {
@@ -69,7 +70,7 @@ export function compactJob(job, managed = false) {
 }
 
 function errorCode(error) {
-  return String(error || "").match(/\b(?:AGY|CODEX|JOB)_[A-Z_]+\b/)?.[0] || "JOB_FAILED";
+  return String(error || "").match(/\b(?:AGY|CODEX|JOB|TASK|BRANCH|TARGET|ENVIRONMENT|WORKSPACE)_[A-Z_]+\b/)?.[0] || "JOB_FAILED";
 }
 
 export function resultSummary(job, evidence) {
@@ -80,7 +81,8 @@ export function resultSummary(job, evidence) {
   }
   if (evidence.finalization) {
     const result = evidence.finalization;
-    summary.finalization = { status: result.status, commit_id: result.commit_id, cleanup: result.cleanup, remaining_count: result.remaining_paths.length };
+    summary.finalization = { status: result.status, commit_id: result.commit_id, cleanup: result.cleanup, remaining_count: result.remaining_path_count ?? result.remaining_paths?.length ?? 0,
+      ...(result.task_commit_id?{task_commit_id:result.task_commit_id,integration_status:result.integration_status,workspace_status:result.workspace_status}: {}) };
     summary.evidence_path = job.evidence_path;
     summary.details = ['full']; summary.next_action = result.status === 'closed' ? 'none' : 'inspect_closeout';
     return summary;
@@ -182,13 +184,14 @@ export class JobNotifications {
       const result = await withFileLock(file + ".lock", async () => {
         const state = await readLedger(file);
         if (cursor > state.cursor) throw new Error("Cursor is ahead of this project/consumer ledger");
-        const events = [];
+        const events = [],terminal_states=[];
         for (const id of ids) {
           const job = await this.store.getJob(id);
           if (!job || path.resolve(job.project_dir) !== path.resolve(project_dir)) throw new Error(`Unknown job in requested project: ${id}`);
           const progress = await this.progress(id, state.offsets[id] || 0);
           state.offsets[id] = progress.offset;
           const runtime = runtimeState(job, this.managed(id));
+          if(TERMINAL.has(job.status)) terminal_states.push({job_id:id,status:job.status,phase:job.phase});
           const signature = TERMINAL.has(job.status) ? `terminal:${job.status}` : runtime === "interrupted" ? "interrupted" : null;
           if (signature && state.signatures[id] !== signature) {
             events.push({ job_id: id, role: /review|verify/.test(job.type) ? "reviewer" : "worker", type: runtime === "interrupted" ? "attention" : "terminal", status: job.status, phase: job.phase, runtime_state: runtime, next_action: runtime === "interrupted" ? "inspect_session" : job.status === "completed" ? "inspect_result" : "inspect_failure", ...(job.error || runtime === "interrupted" ? { message: shortText(job.error?.split("\n")[0] || "Task interrupted; inspect preserved session.") } : {}) });
@@ -203,9 +206,9 @@ export class JobNotifications {
         if (events.length) state.cursor += 1;
         state.jobs = [...new Set([...state.jobs, ...ids])].filter(id => !state.signatures[id]?.startsWith("terminal:"));
         await writeJsonAtomic(file, state);
-        return { cursor: state.cursor, events };
+        return { cursor: state.cursor, events, ...(terminal_states.length===ids.length?{terminal:true,terminal_states}: {}) };
       }, signal);
-      if (result.events.length) return result;
+      if (result.events.length || result.terminal) return result;
       if (Date.now() >= deadline) return { ...result, timed_out: true };
       await pause(Math.min(250, Math.max(0, deadline - Date.now())));
     } while (true);

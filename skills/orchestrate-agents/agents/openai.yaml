@@ -1,13 +1,13 @@
 interface:
   display_name: "Agent Orch"
-  short_description: "Bind project identity, share limits and finalize reviewed work"
-  default_prompt: "Use $orchestrate-agents to audit and bind the original project, recommend model routes, supervise bounded workers and independent review, and finalize exact Git commits while preserving unrelated work."
+  short_description: "Hand off tasks, review changes and close Git work safely"
+  default_prompt: "Use $orchestrate-agents to audit the original project, recommend models and task branches, explicitly hand off tasks, independently review changes, and commit, merge and safely retire bounded workspaces while preserving unrelated work."
 
 dependencies:
   tools:
     - type: "mcp"
       value: "agent_orch"
-      description: "Runtime project identity, shared workspace limits, recommended routes, bounded Worker upgrades, quota-only review fallback and exact Git finalization"
+      description: "Task ownership and handoff, recommended branches and routes, independent review, recoverable delivery and shared workspace limits"
       transport: "stdio"
 
 policy:

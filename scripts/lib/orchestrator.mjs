@@ -17,6 +17,8 @@ import { recordGitOperation } from './git-events.mjs';
 import { workRouteChain, reviewUpgrade } from './route-recommendations.mjs';
 import { resolveStageRoutes } from './provider-registry.mjs';
 import { repositoryLock, inventory, digest as lifecycleDigest, canonicalPath, git as lifecycleGit, gitFileState, json as lifecycleJson } from "./lifecycle-git.mjs";
+import { resolveRepositoryProvenance } from './repository-provenance.mjs';
+import { TaskLifecycle } from './task-lifecycle.mjs';
 
 // -- Formal review evidence builder --
 
@@ -30,7 +32,8 @@ function buildReviewEvidence({ job, contract, patchDigest, repository, workspace
     contract_version: getContractVersion(contract),
     contract_digest: getContractDigest(contract),
     patch_digest: patchDigest || null,
-    repository_identity: contract?.repository_identity || repository || null,
+    repository_identity: repository.identity,
+    ...(repository.provenance ? { repository_provenance: repository.provenance } : {}),
     workspace: workspace || null,
     tests: tests || [],
     actual_model: model || job?.model || null,
@@ -135,9 +138,15 @@ export class WorkerOrchestrator {
     this.controllers = new Map();
     this.promises = new Map();
     this.gitLifecycle = new GitLifecycle(this);
+    this.taskLifecycle = new TaskLifecycle(this);
   }
 
   async allocateWorkspace(job, config, signal) {
+    await this.taskLifecycle.assertJob(job);
+    const workspace=await this.allocateWorkspaceImpl(job,config,signal);
+    await this.taskLifecycle.noteWorkspace(job);return workspace;
+  }
+  async allocateWorkspaceImpl(job, config, signal) {
     const jobDir = this.store.jobDir(job.id);
     const previous=job.escalated_from_job_id ? await this.store.getJob(job.escalated_from_job_id) : null;
     const current=await this.store.getJob(job.id);
@@ -155,7 +164,9 @@ export class WorkerOrchestrator {
       if (owner===current && owner.handoff_patch_digest && owner.handoff_patch_digest!==changes.patch_digest) throw new Error('Escalation checkpoint changed; inspect manually');
       return workspace;
     }
-    return prepareWorkspace({ projectDir: job.project_dir, jobDir, config, signal, onWait: async () => {
+    const task = await this.taskLifecycle.record(job.project_dir, job.task_id);
+    return prepareWorkspace({ projectDir: job.project_dir, jobDir, config, signal, baseCommit: task?.branch?.mode === 'task' ? task.branch.expected_tip : null,
+      resolveBase:task?.branch?.mode==='task'?()=>this.taskLifecycle.prepareBase(job):null,onWait: async () => {
       await this.store.updateJob(job.id, { phase: "waiting_for_workspace" });
       const channel = await prepareProgressChannel(jobDir, { projectDir: job.project_dir, role: "worker" });
       await reportProgress(channel, { checkpoint: "blocked", message: "Workspace capacity or storage budget exhausted. Waiting for an approved slot release; no clone was created." });
@@ -412,6 +423,7 @@ export class WorkerOrchestrator {
       contract_id: plannerContract.contract_id,
       contract_version: plannerContract.contract_version,
       contract_digest: plannerContract.contract_digest,
+      coordinator_fence: args.coordinator_fence || null,
       routing: { requested_complexity: complexity, selected_executor: provider },
       requires_agy_review: reviewGate.requires_agy_review,
       review_waiver: reviewGate.review_waiver,
@@ -428,6 +440,12 @@ export class WorkerOrchestrator {
     const projectDir = path.resolve(requireString(args, "project_dir"));
     const taskId = requireString(args, "task_id");
     const config = await assertProject(projectDir);
+    const observedJobs = await this.store.listJobs();
+    for(const job of observedJobs) {
+      if(job.project_dir!==projectDir || !['queued','running'].includes(job.status) || this.promises.has(job.id)
+        || !job.supervisor_pid || processExists(job.supervisor_pid) || (job.process_pid && !job.process_exited_at && processExists(job.process_pid))) continue;
+      await this.store.updateJob(job.id,{status:'failed',phase:'interrupted',error:'JOB_INTERRUPTED: recorded supervisor and provider processes exited; session/worktree evidence preserved',finished_at:nowIso()});
+    }
     const allJobs = await this.store.listJobs();
     let plannerContract;
     let subtask;
@@ -519,6 +537,7 @@ export class WorkerOrchestrator {
       escalation_reason:upgrade?.reason || null,
       adaptive_escalation:adaptiveAllowed,
       model_override: routeChain[0].model,
+      coordinator_fence: args.coordinator_fence || null,
       dependencies: contract.dependencies,
       read_paths: contract.read_paths,
       writable_paths: contract.writable_paths,
@@ -546,7 +565,7 @@ export class WorkerOrchestrator {
     const controller = new AbortController();
     this.controllers.set(job.id, controller);
     const promise = (async () => {
-      await this.store.updateJob(job.id, { supervisor_pid: process.pid });
+      await this.store.updateJob(job.id, { supervisor_pid: process.pid, coordination_protocol: 1 });
       return runner(controller.signal);
     })()
       .catch(async (error) => {
@@ -732,6 +751,8 @@ export class WorkerOrchestrator {
         throw new Error("review_target_unavailable: implementation worktree is missing");
       }
       reviewWorkspace = implementationJob.workspace.path;
+      await resolveRepositoryProvenance({ projectDir: job.project_dir,
+        contract: await loadPlannerContract(job.project_dir, job.task_id), job: implementationJob });
       await this.store.updateJob(job.id, { review_workspace: reviewWorkspace, implementation_job_id: implementationJob.id });
       reviewPlan = [
         job.plan,
@@ -838,7 +859,7 @@ export class WorkerOrchestrator {
         job,
         contract,
         patchDigest,
-        repository: contract?.repository_identity || null,
+        repository: await resolveRepositoryProvenance({ projectDir: job.project_dir, contract, job: implementationJob }),
         workspace: implementationJob?.workspace || null,
         tests: job.acceptance_commands || [],
         model: model || job.model || null,
@@ -1693,6 +1714,7 @@ export class WorkerOrchestrator {
   async applyUnlocked(jobId) {
     const job = await this.store.getJob(jobId);
     if (!job) throw new Error(`Unknown job: ${jobId}`);
+    if ((await this.taskLifecycle.record(job.project_dir, job.task_id))?.branch?.mode === 'task') throw new Error('TASK_BRANCH_FINALIZE_REQUIRED: commit the accepted result through stage-finalize');
     const appliedEvent = async (recovered=false) => {
       const head = await lifecycleGit(job.project_dir,['rev-parse','HEAD'],{allowFailure:true});
       if (!head) return;
@@ -1787,6 +1809,7 @@ export class WorkerOrchestrator {
     // and status === "accepted".
     const currentPatchDigest = evidence.changes?.patch_digest || null;
     await validateAcceptanceForCurrentPatch({
+      projectDir: job.project_dir, job,
       artifactPath: job.acceptance_artifact_path,
       contract,
       currentPatchDigest,
@@ -1838,8 +1861,9 @@ export class WorkerOrchestrator {
       const jobs = await this.store.listJobs();
       const active = jobs.find(item => item.type === 'task_finalize' && item.target_job_id === jobId && ['queued', 'running'].includes(item.status));
       if (active) return active;
+      if(jobs.some(item=>item.task_id===target.task_id && item.project_dir===target.project_dir && item.type==='task_finalize' && ['queued','running'].includes(item.status))) throw new Error('TASK_FINALIZATION_BUSY: finish the current task finalizer before publishing another candidate');
       const policy = await this.gitLifecycle.policy(target.project_dir);
-      if (!target.commit_id && !args.record_commit && (policy.commit_policy === 'manual' || (policy.commit_policy !== 'auto' && args.confirm_commit !== true))) throw new Error('Local commit needs approval under the project commit policy');
+      if (!target.commit_id && !target.task_commit_id && !args.record_commit && (policy.commit_policy === 'manual' || (policy.commit_policy !== 'auto' && args.confirm_commit !== true))) throw new Error('Local commit needs approval under the project commit policy');
       const created = await this.store.createJob({ id: newId('finalize'), type: 'task_finalize', provider: 'runtime', project_dir: target.project_dir,
         task_id: target.task_id, target_job_id: jobId, status: 'queued', phase: 'finalizing' });
       this.launch(created, async signal => {

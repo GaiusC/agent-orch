@@ -58,6 +58,7 @@ const SAFE_DIAGNOSTIC_TOOLS = [
 // Codex must NOT self-invoke via codex-exec / codex-continue.
 // MCP maintenance (mcp status|install|repair|remove) is CLI-only.
 const CODEX_TOOLS = [
+  "task-handoff",
   "environment-audit", "environment-reconcile", "stage-finalize", "stage-integrate",
   "stage-plan",
   "stage-work",
@@ -86,6 +87,7 @@ const CODEX_TOOLS = [
 // never becomes an executor itself: cc-exec/agy-exec start external workers.
 // MCP maintenance remains CLI-only.
 const CC_DESKTOP_TOOLS = [
+  "task-handoff",
   "environment-audit", "environment-reconcile", "stage-finalize", "stage-integrate",
   "stage-plan",
   "stage-work",

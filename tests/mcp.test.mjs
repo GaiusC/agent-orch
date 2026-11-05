@@ -59,7 +59,7 @@ async function createProject({ mcpEnabled = true, trusted = true } = {}) {
   return projectDir;
 }
 
-async function connect(env = process.env) {
+async function connect(env = process.env, actor = 'codex-session-1') {
   const client = new Client({ name: "agent-orch-test", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -67,6 +67,9 @@ async function connect(env = process.env) {
     env,
   });
   await client.connect(transport);
+  const call = client.callTool.bind(client);
+  const owned = new Set(['stage-plan','task-handoff','stage-work','stage-work-continue','stage-review','stage-accept','stage-finalize','stage-integrate','apply','cleanup','cancel']);
+  client.callTool = (request,...rest) => call(owned.has(request.name) ? {...request,arguments:{coordinator_session_id:actor,...request.arguments}} : request,...rest);
   return client;
 }
 
@@ -178,10 +181,10 @@ test("stage-work launches configured provider and reaches terminal StageRun", as
         project_dir: projectDir,
         task_id: "feature",
         planner_session_id: "codex-session-1",
+        branch: {mode:'current',confirm:true},
         contract: {
           contract_id: "feature-contract",
           contract_version: 1,
-          repository_identity: "fixture",
           executor_subtasks: [{
             subtask_id: "impl",
             role: "executor",
@@ -198,6 +201,8 @@ test("stage-work launches configured provider and reaches terminal StageRun", as
       },
     });
     assert.equal(plan.isError, false, plan.content[0].text);
+    assert.match(body(plan).contract.repository_identity, /^git-common:[a-f0-9]{64}$/,
+      "Plan must bind an omitted repository identity before provider work starts");
     const started = await client.callTool({
       name: "stage-work",
       arguments: { project_dir: projectDir, task_id: "feature", subtask_id: "impl" },
@@ -236,6 +241,7 @@ test("stage-work launches configured provider and reaches terminal StageRun", as
     });
     assert.equal(accepted.isError, false, accepted.content[0].text);
     assert.equal(body(accepted).acceptance.status, "accepted");
+    assert.equal(body(accepted).acceptance.repository_identity, body(plan).contract.repository_identity);
     const applied = await client.callTool({
       name: "apply",
       arguments: { project_dir: projectDir, job_id: jobId },
@@ -289,4 +295,33 @@ test("unknown tool is rejected", async () => {
   } finally {
     await client.close();
   }
+});
+
+test('MCP cross-chat handoff admits a new accepter, fences the old chat and keeps native Plan bytes immutable',async t=>{
+  const projectDir=await createProject();t.after(()=>fs.rm(projectDir,{recursive:true,force:true,maxRetries:6,retryDelay:100}));
+  const configFile=path.join(projectDir,'.agent-orchestrator/config.json'),config=JSON.parse(await fs.readFile(configFile,'utf8'));
+  config.cli.agy_env={AGENT_ORCH_FAKE_AGY_MODE:'review-pass'};config.review_gate={require_reviewer_for_implementation:true,allow_waiver:false};
+  await fs.writeFile(configFile,JSON.stringify(config));
+  const a=await connect({...process.env,CODEX_THREAD_ID:''},'chat-a'),b=await connect({...process.env,CODEX_THREAD_ID:''},'chat-b');
+  t.after(async()=>{await a.close();await b.close();});
+  const args={project_dir:projectDir,task_id:'handoff'};
+  const contract={contract_id:'handoff-contract',contract_version:1,executor_subtasks:[{subtask_id:'impl',role:'executor',objective:'Create feature.txt containing good',complexity:'low',writable_paths:['feature.txt'],forbidden_paths:['.git/','.env'],required_tests:['node verify.cjs']}],reviewer_tasks:[{review_id:'review',role:'reviewer',type:'verify',complexity:'low',target_subtask_ids:['impl'],required_checks:['Inspect the exact patch']}]};
+  const call=async(client,name,arguments_)=>{const r=await client.callTool({name,arguments:arguments_});assert.equal(r.isError,false,r.content[0].text);return body(r);};
+  const first=await call(a,'stage-plan',{...args,planner_session_id:'chat-a',contract});
+  const planFile=path.join(projectDir,'.agent-orchestrator/plans/handoff.execution.json'),contractFile=path.join(projectDir,'.agent-orchestrator/contracts/handoff.json');
+  const planBefore=await fs.readFile(planFile),contractBefore=await fs.readFile(contractFile);
+  const missing=await a.callTool({name:'stage-work',arguments:{...args,subtask_id:'impl'}});assert.equal(missing.isError,true);assert.match(body(missing).error,/BRANCH_SELECTION_REQUIRED/);
+  await call(a,'stage-plan',{...args,planner_session_id:'chat-a',contract,branch:{mode:'create',confirm:true}});
+  assert.deepEqual(await fs.readFile(contractFile),contractBefore);
+  const changed=await a.callTool({name:'stage-plan',arguments:{...args,planner_session_id:'chat-a',contract:{...contract,title:'unauthorized contract change'}}});
+  assert.equal(changed.isError,true);assert.deepEqual(await fs.readFile(contractFile),contractBefore);
+  const work=await call(a,'stage-work',{...args,subtask_id:'impl'});
+  const h=await call(a,'task-handoff',{...args,mode:'prepare',expected_epoch:1,to_session_id:'chat-b',reason:'user asks for a new chat'});
+  const claim=await call(b,'task-handoff',{...args,mode:'claim',expected_epoch:1,handoff_id:h.handoff_id,confirm:true,reason:'continue authorized task',host_model:'gpt-test'});assert.equal(claim.epoch,2);
+  const finished=await call(b,'wait-for-job',{project_dir:projectDir,job_id:work.job.id,consumer_id:'chat-b',timeout_ms:60000});assert.equal(finished.events[0].status,'completed');
+  const review=await call(b,'stage-review',{...args,review_id:'review',coordinator_epoch:2});await call(b,'wait-for-job',{project_dir:projectDir,job_id:review.job.id,consumer_id:'chat-b',timeout_ms:60000});
+  const denied=await a.callTool({name:'stage-accept',arguments:{...args,job_id:work.job.id,accepter_session_id:'chat-a',coordinator_epoch:1}});assert.equal(denied.isError,true);assert.match(body(denied).error,/TASK_OWNER_FENCED/);
+  const accepted=await call(b,'stage-accept',{...args,job_id:work.job.id,accepter_session_id:'chat-b',coordinator_epoch:2});assert.equal(accepted.acceptance.accepter_session_id,'chat-b');
+  const result=await call(b,'stage-finalize',{project_dir:projectDir,job_id:work.job.id,confirm_commit:true,confirm_merge:true,coordinator_epoch:2});assert.equal(result.status,'closed');
+  assert.deepEqual(await fs.readFile(planFile),planBefore);assert.equal(first.contract.contract_digest,accepted.acceptance.contract_digest);
 });

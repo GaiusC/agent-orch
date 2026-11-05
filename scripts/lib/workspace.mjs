@@ -47,7 +47,7 @@ export async function inspectGit(projectDir, logDir) {
   };
 }
 
-export async function prepareWorkspace({ projectDir, jobDir, config, requestedMode, signal, onWait }) {
+export async function prepareWorkspace({ projectDir, jobDir, config, requestedMode, signal, onWait, baseCommit, resolveBase }) {
   const git = await inspectGit(projectDir, jobDir);
   const mode = requestedMode || config.execution.workspace_mode || "isolated";
   if (mode === "in_place") {
@@ -58,7 +58,7 @@ export async function prepareWorkspace({ projectDir, jobDir, config, requestedMo
     return { mode: "in_place", path: path.resolve(projectDir), original_project_dir: path.resolve(projectDir), git, source_inventory: await inventory(projectDir), base_commit: git.head };
   }
   if (!git.is_git) throw new Error("Isolated implementation requires a Git repository. Use in_place only after explicitly allowing it in project config.");
-  return reserveWorkspace({ projectDir, jobDir, config, signal, onWait });
+  return reserveWorkspace({ projectDir, jobDir, config, signal, onWait, baseCommit, resolveBase });
 }
 
 export async function captureChanges({ workspace, jobDir, forbidden = [], writable = [] }) {
@@ -68,8 +68,8 @@ export async function captureChanges({ workspace, jobDir, forbidden = [], writab
   const patchPath = path.join(jobDir, "changes.patch");
   await fs.writeFile(patchPath, patchResult.stdout, "utf8");
   const stat = await runGit(workspace, ["diff", "--stat", "--no-ext-diff"], jobDir, "git-diff-stat");
-  const names = await runGit(workspace, ["diff", "--name-only", "--no-ext-diff"], jobDir, "git-diff-names");
-  const files = names.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const names = await runGit(workspace, ["diff", "--name-only", "-z", "--no-ext-diff"], jobDir, "git-diff-names");
+  const files = names.stdout.split('\0').filter(Boolean);
   const unauthorized = writable.length
     ? files.filter((file) => !writable.some((pattern) => allowsPath(pattern, file)))
     : [];

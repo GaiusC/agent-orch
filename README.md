@@ -2,6 +2,20 @@
 
 Agent Orch is a Codex plugin that provides a stage-first MCP workflow for planning, implementation, independent review, acceptance, and durable continuation across CC, AGY, and Codex Worker.
 
+Version 0.8.3 adds task-branch recommendations, explicit cross-chat handoff with
+owner/epoch fencing, and separate commit, target-merge and workspace states.
+Accepted results can be committed to a protected task ref and release their
+worktree before merge. Advanced targets require a new independently reviewed
+integration; conflicts remain for explicit resolution. Verified delivery receipts
+can carry an approved dirty baseline forward without hiding unrelated edits.
+Defaults are three Worker worktrees and five total auxiliary workspaces, with an
+integration slot reserved when capacity permits. Existing model routes are kept.
+Legacy Plans with missing repository identity recover only through verifiable
+native Plan/Work provenance and fresh Review evidence, without rewriting receipts.
+The Auditor shows ownership, task branches and pending merges separately. CI runs
+on Windows and Linux without depending on installed provider CLIs or personal data.
+See [task continuity and branches](skills/orchestrate-agents/references/task-continuity.md).
+
 Version 0.8.2 fixes Windows `ENAMETOOLONG` in environment review and preservation
 readiness. Git index records are read with fixed arguments and filtered by exact
 paths in process, retaining NUL delimiters and all conflict stages. Environment
@@ -76,6 +90,7 @@ The default MCP surface is provider-neutral:
 | --- | --- |
 | `environment-audit` | Collect read-only Git/worktree facts and explicit known clone paths; return a compact evidence index |
 | `environment-reconcile` | Prepare exact actions, then execute an approved plan after checking for state changes |
+| `task-handoff` | Inspect task ownership or explicitly prepare, claim and recover cross-chat authority |
 | `stage-integrate` | Combine accepted results in a bounded integration worktree; require fresh review and acceptance |
 | `stage-finalize` | Apply once, verify the actual target, commit exact task changes, and safely retire worktrees |
 | `stage-plan` | Persist the Planner contract and immutable Plan execution identity |

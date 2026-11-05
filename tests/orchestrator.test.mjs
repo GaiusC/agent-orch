@@ -69,7 +69,9 @@ async function waitFor(orchestrator, jobId, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const job = await orchestrator.status(jobId);
-    if (["completed", "failed", "cancelled"].includes(job.status)) return job;
+    // Terminal JSON can precede the runner's final durable writes. Drain it
+    // before callers delete temporary state, just as the public wait tool does.
+    if (["completed", "failed", "cancelled"].includes(job.status)) return orchestrator.wait(jobId);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for ${jobId}`);

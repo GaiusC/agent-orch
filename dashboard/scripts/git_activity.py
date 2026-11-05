@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 LABELS = {
+    'task_branch.committed':'任务分支提交',
     'baseline.recorded':'工作区基线', 'workspace.created':'创建隔离工作区',
     'integration.input':'保存集成输入', 'integration.merged':'合并集成输入',
     'integration.conflict':'集成冲突', 'integration.checkpoint':'保存集成检查点',

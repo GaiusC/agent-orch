@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, identity, inventory, json, save, repositoryLock, scopedTree, removeIndex, canonicalPath } from './lifecycle-git.mjs';
 import { recordGitOperation } from './git-events.mjs';
+import { baselineDrift, carryVerifiedBaseline } from './environment-baseline.mjs';
 import { bindProject, canonicalPolicy, sharedWorkspacePaths, familyRepositories, cleanupProjectBinding } from './project-identity.mjs';
 
 export async function directoryBytes(directory, stopAfter = Infinity) {
@@ -20,12 +21,13 @@ export async function directoryBytes(directory, stopAfter = Infinity) {
   return bytes;
 }
 
-export async function reserveWorkspace({ projectDir, jobDir, config, signal, kind = 'worker', baseCommit = null, onWait }) {
+export async function reserveWorkspace({ projectDir, jobDir, config, signal, kind = 'worker', baseCommit = null, resolveBase, onWait }) {
   const worktree = path.join(jobDir, 'worktree');
   const owner = path.basename(jobDir);
   const binding = await bindProject(projectDir);
   const deadline = Date.now() + 1000 * (config.execution.workspace_wait_timeout_seconds ?? 1800);
   let notified = false;
+  let basePrepared=false;
   while (true) {
     if (signal?.aborted) throw new Error('Workspace allocation cancelled');
     const allocation = await repositoryLock(binding.canonical_root, async () => {
@@ -57,18 +59,26 @@ export async function reserveWorkspace({ projectDir, jobDir, config, signal, kin
       const present = [];
       for (const entry of Object.values(registry)) if (registeredKeys.includes(await canonicalPath(entry.path))) present.push(entry);
       const linkedCount = Math.max(0, registeredPaths.length - 1);
-      const maxWorkers = policy.max_worker_worktrees ?? 2, maxTotal = policy.max_worktrees ?? 3;
+      const maxWorkers = policy.max_worker_worktrees ?? 3, maxTotal = policy.max_worktrees ?? 5;
       if (!Number.isInteger(maxWorkers) || maxWorkers < 1 || !Number.isInteger(maxTotal) || maxTotal < 1) throw new Error('Invalid worktree capacity policy');
-      if (linkedCount >= maxTotal || (kind === 'worker' && present.filter(e => e.kind === 'worker').length >= maxWorkers)) return null;
+      const reserve=policy.reserve_integration_slots ?? (maxTotal>maxWorkers?1:0);
+      if (!Number.isInteger(reserve) || reserve<0 || reserve>=maxTotal) throw new Error('Invalid integration reservation');
+      if (linkedCount >= maxTotal || (kind === 'worker' && (linkedCount>=maxTotal-reserve || present.filter(e => e.kind === 'worker').length >= maxWorkers))) return null;
       if (kind === 'integration' && present.some(entry => entry.kind === 'integration')) return null;
+      if(resolveBase && !basePrepared) return {resolve_base:true};
       const source = await inventory(projectDir);
       if (!source.head) throw new Error('Create a reviewed initial commit before allocating worker worktrees');
       if (Object.values(source.operations).some(Boolean)) throw new Error('Unfinished Git operation prevents allocation');
       let base = baseCommit || source.head;
-      if (!baseCommit && source.changes.length) {
-        const readiness = await json(path.join(projectDir, '.agent-orchestrator', 'environment', 'readiness.json'));
-        if (!readiness || readiness.fingerprint !== source.fingerprint || !['head', 'snapshot'].includes(readiness.baseline)) throw new Error('ENVIRONMENT_RECONCILIATION_REQUIRED: dirty source needs an audited, explicitly approved baseline; do not clone to bypass it');
+      if (source.changes.length) {
+        let readiness = await json(path.join(projectDir, '.agent-orchestrator', 'environment', 'readiness.json'));
+        if (readiness?.fingerprint!==source.fingerprint && await carryVerifiedBaseline(projectDir,source,{allowAdvance:policy.allow_verified_baseline_advance!==false})) readiness=await json(path.join(projectDir,'.agent-orchestrator/environment/readiness.json'));
+        if (!readiness || readiness.fingerprint !== source.fingerprint || !['head', 'snapshot'].includes(readiness.baseline)) {
+          const details=await baselineDrift(projectDir,source);
+          const error=new Error(`ENVIRONMENT_RECONCILIATION_REQUIRED: inspect compact drift evidence ${details.evidence_path}; preserve changes and approve a current baseline`);error.details=details;throw error;
+        }
         if (readiness.baseline === 'snapshot') {
+          if(baseCommit) throw new Error('TASK_SNAPSHOT_INTEGRATION_REQUIRED: reconcile inherited changes to reviewed commits before replacing a recorded task branch baseline');
           if (policy.allow_snapshot !== true) throw new Error('Snapshot baselines require project policy opt-in');
           const files = [...new Set(source.changes.flatMap(c => [c.path, c.from].filter(Boolean)))];
           const staged = await scopedTree(projectDir, files, path.join(jobDir, 'baseline'));
@@ -91,7 +101,9 @@ export async function reserveWorkspace({ projectDir, jobDir, config, signal, kin
       await recordGitOperation({projectDir,jobDir,job:await json(path.join(jobDir,'job.json'),{}),kind:'workspace.created',workspace:worktree,before_head:source.head,after_head:base,ref:null,occurred_at:registry[owner].created_at});
       return { mode: 'isolated', path: worktree, original_project_dir: repo.root, git: { is_git: true, root: repo.root, head: source.head }, base_commit: base, source_inventory: source, owner_job_id: owner };
     });
+    if(allocation?.resolve_base) {baseCommit=await resolveBase();basePrepared=true;continue;}
     if (allocation) return allocation;
+    basePrepared=false;
     if (!notified) { notified = true; await onWait?.(); }
     if (Date.now() >= deadline) throw new Error('WORKSPACE_CAPACITY_REQUIRED: capacity/storage budget exhausted; preserve pending work and release a reviewed slot');
     await new Promise(resolve => setTimeout(resolve, 250));

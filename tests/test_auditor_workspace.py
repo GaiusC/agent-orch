@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -217,6 +218,18 @@ class WorkspaceDataTests(unittest.TestCase):
         self.assertIn(checkpoint,[c['hash'] for c in extended['commits']]);self.assertTrue(any(r['kind']=='internal' for r in extended['refs']))
         self.assertEqual(self.git('rev-parse','HEAD'),base)
 
+    def test_task_commit_pending_merge_is_not_reported_as_target_delivery(self):
+        self.git('init','-b','main');self.git('commit','--allow-empty','-m','base');sha=self.git('rev-parse','HEAD')
+        self.job('work-pending',acceptance_status='accepted',task_commit_id=sha,task_branch='codex/task',target_branch='main',delivery_status='committed',integration_status='pending_merge',workspace_status='cleaned',closeout_phase='committed_pending_merge')
+        accepted=self.write('runs/work-pending/acceptance.json',{'status':'accepted','contract_digest':'v1'})
+        reference='refs/agent-orch/deliveries/work-pending';self.git('update-ref',reference,sha)
+        self.write('runs/work-pending/task-delivery.json',{'commit_id':sha,'ref':reference,'contract_digest':'v1','tree_id':self.git('rev-parse','HEAD^{tree}'),
+            'acceptance_sha256':hashlib.sha256(accepted.read_bytes()).hexdigest(),'evidence_sha256':hashlib.sha256((self.orch/'runs/work-pending/evidence.json').read_bytes()).hexdigest()})
+        self.write('tasks/t.json',{'task_id':'t','owner_session_id':'chat-b','epoch':2,'delivery_status':'committed','integration_status':'pending_merge','workspace_status':'cleaned'})
+        data=build_workspace(str(self.project),str(self.orch));plan=next(p for p in data['plans'] if p['id']=='p')
+        self.assertEqual(plan['state'],'committed_pending_merge');self.assertEqual(plan['delivery']['commits'],[])
+        self.assertEqual(plan['task_lifecycles'][0]['owner_session_id'],'chat-b');self.assertEqual(plan['jobs'][0]['workspace_status'],'cleaned')
+
     def git(self,*args,env=None):
         return subprocess.run(['git','-c','safe.directory='+str(self.project).replace('\\','/'),'-c','user.name=Auditor test','-c','user.email=auditor@example.invalid','-c','core.hooksPath=/dev/null','-C',str(self.project),*args],check=True,capture_output=True,text=True,encoding='utf-8',env={**os.environ,**(env or {})},timeout=15).stdout.strip()
 
@@ -245,7 +258,12 @@ class WorkspaceDataTests(unittest.TestCase):
 
     def test_http_project_context_is_scoped_and_static_pages_do_not_rebind(self):
         other=self.project/'other';other.mkdir()
-        with patch.object(SERVER,'SERVER_PROJECT_DIR',str(self.project)):
+        db=self.project/'fixture-chat-index.sqlite'
+        con=sqlite3.connect(db)
+        try:con.execute('create table threads(id text,cwd text)');con.commit()
+        finally:con.close()
+        def fixture_context(query,default_cwd):return context_from_query(query,default_cwd,db)
+        with patch.object(SERVER,'SERVER_PROJECT_DIR',str(self.project)), patch.object(SERVER,'context_from_query',fixture_context):
             server=ThreadingHTTPServer(('127.0.0.1',0),SERVER.DashboardAPIHandler)
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             base=f'http://127.0.0.1:{server.server_port}'

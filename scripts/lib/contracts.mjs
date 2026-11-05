@@ -189,10 +189,18 @@ export async function loadContracts(projectDir) {
 
 export async function persistPlannerContract(projectDir, taskId, contract, plannerSession) {
   assertPlannerContractValid(contract);
+  const dir = path.join(projectOrchestratorRoot(projectDir), "contracts");
+  const file = path.join(dir, `${taskId}.json`);
+  const readExisting=target=>readJson(target).catch(error=>{if(error.code==='ENOENT') return null;throw error;});
+  const existing=await readExisting(file);
+  const native=await readExisting(path.join(projectPlansRoot(projectDir),`${taskId}.execution.json`));
+  const input={...contract,
+    ...(!contract.plan_id && existing?.plan_id?{plan_id:existing.plan_id}:{}),
+    ...(native && !contract.repository_identity && existing?.repository_identity?{repository_identity:existing.repository_identity}:{})};
   // Ensure a Plan exists for this contract; plan_id is stored on the contract.
-  const plan = await ensurePlanForContract(projectDir, taskId, contract);
+  const plan = await ensurePlanForContract(projectDir, taskId, input);
   const normalized = normalizePlannerContract({
-    ...contract,
+    ...input,
     task_id: taskId,
     planner_session_id: plannerSession,
     contract_id: contract.contract_id || taskId,
@@ -200,9 +208,14 @@ export async function persistPlannerContract(projectDir, taskId, contract, plann
     plan_id: plan.plan_id,
   });
   normalized.contract_digest = computeContractDigest(normalized);
-  const dir = path.join(projectOrchestratorRoot(projectDir), "contracts");
+  if(native) {
+    const comparable=value=>Array.isArray(value)?value.map(comparable):value && typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(k=>[k,comparable(value[k])])):value;
+    const semantics=value=>{const {file,contract_digest,...body}=value;return JSON.stringify(comparable(body));};
+    if(!existing || native.contract_id!==normalized.contract_id || native.contract_digest!==existing.contract_digest || semantics(existing)!==semantics(normalized)) throw new Error(`Plan execution identity is immutable for task_id=${taskId}; contract changed before persistence`);
+    normalizePlannerContract(existing,file);
+    return {...existing,file};
+  }
   await fs.mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${taskId}.json`);
   await writeJsonAtomic(file, normalized);
   return { ...normalized, file };
 }

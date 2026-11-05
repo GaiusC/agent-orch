@@ -4,9 +4,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { persistPlannerContract } from "../scripts/lib/contracts.mjs";
+import { computeContractDigest, persistPlannerContract } from "../scripts/lib/contracts.mjs";
 import { WorkerOrchestrator } from "../scripts/lib/orchestrator.mjs";
 import { StateStore } from "../scripts/lib/state.mjs";
+import { StageRuntime } from "../scripts/lib/stage-runtime.mjs";
+import { bindProject } from "../scripts/lib/project-identity.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/(.:)/, "$1"));
 const fakeCodex = path.join(here, "fixtures", "fake-codex-worker.mjs");
@@ -200,4 +202,107 @@ test("formal AGY review requires current-turn PASS output and preserves patch di
   assert.equal(result.evidence.result_source, "stdout");
   assert.match(result.evidence.result, /VERDICT: PASS/);
   assert.equal(result.evidence.review_evidence.implementation_job_id, started.id);
+});
+
+test("legacy native Plan without repository identity can recover through fresh review without rewriting history", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-orch-legacy-identity-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const projectDir = await createProject(root);
+  const configFile = path.join(projectDir, ".agent-orchestrator", "config.json");
+  const config = JSON.parse(await fs.readFile(configFile, "utf8"));
+  config.review_gate = { require_reviewer_for_implementation: true, allow_waiver: false };
+  await fs.writeFile(configFile, JSON.stringify(config));
+
+  // Model a 0.8.2 Plan that already ran without this optional contract field.
+  const contractFile = path.join(projectDir, ".agent-orchestrator", "contracts", "feature.json");
+  const contract = JSON.parse(await fs.readFile(contractFile, "utf8"));
+  delete contract.repository_identity;
+  contract.contract_digest = computeContractDigest(contract);
+  await fs.writeFile(contractFile, JSON.stringify(contract));
+  const binding = await bindProject(projectDir);
+  const store = new StateStore(path.join(projectDir, ".agent-orchestrator", "state"), {
+    jobsRoot: path.join(projectDir, ".agent-orchestrator", "runs"),
+    orchestratorRoot: path.join(projectDir, ".agent-orchestrator"),
+  });
+  await store.init();
+  const runtime = new StageRuntime(store, projectDir);
+  const identity = await runtime.savePlanIdentity("feature", {
+    project_id: binding.project_id, coordinator_common: binding.coordinator_common,
+    provider: "codex", model: "fixture-host", invocation: "in_session", session_id: "planner-session",
+    contract_id: contract.contract_id, contract_digest: contract.contract_digest,
+  });
+  const contractBefore = await fs.readFile(contractFile);
+  const planBefore = await fs.readFile(identity.file);
+  const orchestrator = new WorkerOrchestrator(store);
+  const work = await orchestrator.startStageWork({ project_dir: projectDir, task_id: "feature", subtask_id: "impl" },
+    [{ provider: "codex_worker", model: "fixture-worker", invocation: "cli" }]);
+  const finished = await waitFor(orchestrator, work.id);
+  assert.equal(finished.status, "completed", finished.error);
+
+  const first = await orchestrator.startVerify({ project_dir: projectDir, task_id: "feature", review_id: "review", model: "fixture-reviewer" });
+  assert.equal((await waitFor(orchestrator, first.id)).status, "completed");
+  const firstJob = await store.getJob(first.id);
+  const oldEvidence = JSON.parse(await fs.readFile(firstJob.evidence_path, "utf8"));
+  oldEvidence.review_evidence.repository_identity = null;
+  delete oldEvidence.review_evidence.repository_provenance;
+  await fs.writeFile(firstJob.evidence_path, JSON.stringify(oldEvidence));
+  const oldEvidenceBefore = await fs.readFile(firstJob.evidence_path);
+  const accept = () => orchestrator.accept({ project_dir: projectDir, task_id: "feature", job_id: work.id,
+    accepter_provider: "codex", accepter_model: "fixture-host", session_id: "planner-session" });
+  await assert.rejects(accept, /REPOSITORY_IDENTITY_REVIEW_REQUIRED/,
+    "Do not repair or silently bless an old review receipt missing repository provenance");
+
+  const second = await orchestrator.startVerify({ project_dir: projectDir, task_id: "feature", review_id: "review", model: "fixture-reviewer" });
+  const reviewed = await waitFor(orchestrator, second.id);
+  assert.equal(reviewed.status, "completed", reviewed.error);
+  const result = await orchestrator.result(second.id);
+  const reviewIdentity = result.evidence.review_evidence;
+  assert.match(reviewIdentity.repository_identity, /^git-common:[a-f0-9]{64}$/);
+  assert.equal(reviewIdentity.repository_provenance.source, "verified_native_plan");
+  assert.equal(reviewIdentity.repository_provenance.project_id, binding.project_id);
+  assert.equal(reviewIdentity.contract_digest, contract.contract_digest);
+
+  // A copied Plan, absent binding or mismatched work ancestry must not authorize fallback.
+  const originalPlan = JSON.parse(planBefore.toString());
+  for (const patch of [{ project_id: "foreign-project" }, { coordinator_common: path.join(root, "foreign.git") }, { contract_digest: "foreign-contract" }]) {
+    await fs.writeFile(identity.file, JSON.stringify({ ...originalPlan, ...patch }));
+    await assert.rejects(accept, /REPOSITORY_IDENTITY_MISMATCH/);
+  }
+  await fs.rm(identity.file);
+  await assert.rejects(accept, /REPOSITORY_IDENTITY_UNAVAILABLE/);
+  await fs.writeFile(identity.file, planBefore);
+  const workJob = await store.getJob(work.id);
+  await store.updateJob(work.id, { workspace: { ...workJob.workspace, source_inventory: { ...workJob.workspace.source_inventory, common: path.join(root, "foreign.git") } } });
+  await assert.rejects(accept, /REPOSITORY_IDENTITY_MISMATCH/);
+  await store.updateJob(work.id, { workspace: workJob.workspace });
+
+  const foreign = path.join(root, "foreign");
+  await fs.mkdir(foreign);
+  git(foreign, "init");
+  await store.updateJob(work.id, { workspace: { ...workJob.workspace, path: foreign } });
+  await assert.rejects(accept, /REPOSITORY_IDENTITY_MISMATCH/);
+  await store.updateJob(work.id, { workspace: workJob.workspace });
+
+  const artifact = await accept();
+  assert.equal(artifact.status, "accepted");
+  assert.equal(artifact.repository_identity, reviewIdentity.repository_identity);
+  assert.equal(artifact.contract_digest, contract.contract_digest);
+  assert.deepEqual(await fs.readFile(contractFile), contractBefore);
+  assert.deepEqual(await fs.readFile(identity.file), planBefore);
+  assert.deepEqual(await fs.readFile(firstJob.evidence_path), oldEvidenceBefore);
+
+  const acceptedJob = await store.getJob(work.id);
+  const acceptanceBefore = await fs.readFile(acceptedJob.acceptance_artifact_path);
+  await fs.writeFile(acceptedJob.acceptance_artifact_path, JSON.stringify({ ...artifact, repository_identity: "foreign-repository" }));
+  await assert.rejects(() => orchestrator.apply(work.id), /REPOSITORY_IDENTITY_MISMATCH/);
+  await fs.writeFile(acceptedJob.acceptance_artifact_path, acceptanceBefore);
+  assert.equal((await orchestrator.apply(work.id)).applied, true,
+    "The normal apply gate must validate the runtime repository proof too");
+  const closed = await orchestrator.finalize(work.id, { confirm_commit: true });
+  assert.equal(closed.status, "closed");
+  assert.match(closed.commit_id, /^[a-f0-9]{40}$/);
+  assert.equal(await fs.stat(workJob.workspace.path).then(() => true, () => false), false);
+  assert.deepEqual(await fs.readFile(contractFile), contractBefore);
+  assert.deepEqual(await fs.readFile(identity.file), planBefore);
+  assert.deepEqual(await fs.readFile(firstJob.evidence_path), oldEvidenceBefore);
 });

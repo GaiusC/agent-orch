@@ -14,6 +14,7 @@ import { recommendRoutes } from './lib/route-recommendations.mjs';
 import { git, inventory } from "./lib/lifecycle-git.mjs";
 import { WorkerOrchestrator } from "./lib/orchestrator.mjs";
 import { DEFAULT_GIT_POLICY } from "./lib/git-lifecycle.mjs";
+import { branchRecommendation } from './lib/task-lifecycle.mjs';
 
 const command = process.argv[2];
 const args = parseArgs(process.argv.slice(3));
@@ -24,7 +25,7 @@ const LEGACY_MCP_SERVER_ID = "agent-orch";
 // Tool names that have been removed from the CLI and are only available
 // via MCP.  Calling one of these produces an explicit MCP-only error.
 const MCP_ONLY_COMMANDS = new Set([
-  "environment-audit", "environment-reconcile", "stage-finalize", "stage-integrate",
+  "environment-audit", "environment-reconcile", "stage-finalize", "stage-integrate", "task-handoff",
   "stage-plan",
   "stage-work",
   "stage-work-continue",
@@ -76,6 +77,8 @@ Common options:
   --UseExistingRoutes          Explicitly reuse existing routes during init.
   --HostModel <id>             Exact current host model for in-session Plan/Accept.
   --UseRecommendedRoutes       Explicitly approve the discovered recommendation.
+  --UseRecommendedGitPolicy    Approve new task branches, exact auto-commits,
+                               ask-before-merge and safe cleanup (3 workers/5 total).
 
 Examples:
   agent-orch init -ProjectDir . -HostProvider codex
@@ -236,7 +239,8 @@ async function initProject() {
       if (!recommendation.available) throw new Error('Recommendation incomplete: '+recommendation.missing.join(', '));
       selection=recommendation.selection;
     } else if (!process.stdin.isTTY || !process.stderr.isTTY) {
-      output({ ...selectionRequest(catalog,{hostModel}), environment: { is_git: hasGit === "true", modified_paths: environmentBefore.changes?.length ?? null, inspection_error: environmentBefore.inspection_error || null }, git_policy_choices: ["ask", "auto", "manual"], git_policy_default: "ask" });
+      output({ ...selectionRequest(catalog,{hostModel}), environment: { is_git: hasGit === "true", modified_paths: environmentBefore.changes?.length ?? null, inspection_error: environmentBefore.inspection_error || null }, git_policy_choices: ["ask", "auto", "manual"], git_policy_default: existing.git_lifecycle?.commit_policy || "ask",
+        git_recommendation:{branch:hasGit==='true'?await branchRecommendation(projectDir):null,policy:{...DEFAULT_GIT_POLICY,...existing.git_lifecycle,...(!existing.git_lifecycle?{commit_policy:'auto',merge_policy:'ask',branch_policy:'recommended_auto'}:{})},choices:['use_recommended','edit_recommended','audit_only']} });
       process.exitCode = 2;
       return;
     }
@@ -254,6 +258,8 @@ async function initProject() {
   const next = materializeProjectConfig(selected, { trusted: true, hostProvider: hostProvider ? String(hostProvider) : null });
   const gitPolicyFile = args.GitPolicyFile || args.gitPolicyFile;
   if (gitPolicyFile) next.git_lifecycle = { ...DEFAULT_GIT_POLICY, ...await readJson(path.resolve(String(gitPolicyFile))) };
+  else if (args.UseRecommendedGitPolicy || args.useRecommendedGitPolicy) next.git_lifecycle={...DEFAULT_GIT_POLICY,...existing.git_lifecycle,
+    ...(!existing.git_lifecycle?{commit_policy:'auto',merge_policy:'ask',branch_policy:'recommended_auto'}:{})};
   else if (!existing.git_lifecycle && process.stdin.isTTY && process.stderr.isTTY) {
     const readline = createInterface({ input: process.stdin, output: process.stderr });
     try {

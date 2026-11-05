@@ -9,12 +9,15 @@ import { validateHostToolTrust } from "./lib/policy.mjs";
 import { runProcess, commandExists } from "./lib/process.mjs";
 import { StateStore } from "./lib/state.mjs";
 import { WorkerOrchestrator } from "./lib/orchestrator.mjs";
-import { requireString } from "./lib/utils.mjs";
+import { pathExists, requireString } from "./lib/utils.mjs";
+import { hasRepositoryIdentity, repositoryIdentityForProject } from './lib/repository-provenance.mjs';
 import { loadPlannerContract, loadPlannerSubtask, persistPlannerContract } from "./lib/contracts.mjs";
 import { resolveStageRoutes } from "./lib/provider-registry.mjs";
 import { StageRuntime } from "./lib/stage-runtime.mjs";
 import { compactJob } from "./lib/notifications.mjs";
 import { startIntegration } from "./lib/integration.mjs";
+import { branchRecommendation } from './lib/task-lifecycle.mjs';
+import { discoverHostModel } from './lib/model-selection.mjs';
 
 const commonTaskProperties = {
   project_dir: { type: "string", description: "Absolute path to the trusted project root." },
@@ -39,9 +42,17 @@ const waitProperties = {
 
 const tools = [
   {
+    name: 'task-handoff',
+    description: 'Inspect task ownership or explicitly prepare/claim/recover cross-chat authority. Preserves immutable Plans and existing provider work; prior coordinators are fenced by execution epoch. Never grants code acceptance or publication.',
+    inputSchema: { type: 'object', properties: { project_dir: {type:'string'}, task_id: {type:'string'}, mode:{enum:['inspect','prepare','claim','recover']},
+      expected_epoch:{type:'integer',minimum:1}, to_session_id:{type:'string'}, from_session_id:{type:'string'}, handoff_id:{type:'string'}, reason:{type:'string'},
+      confirm:{type:'boolean'}, allow_model_change:{type:'boolean'}, host_model:{type:'string'}, coordinator_session_id:{type:'string'} }, required:['project_dir','task_id','mode'], additionalProperties:false },
+    annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false},
+  },
+  {
     name: "stage-integrate",
-    description: "Combine 2-8 accepted task results in a bounded integration worktree, serialize merges and run combination tests. Requires a separate Planner task and fresh independent code review/acceptance. Resume conflicts in the same job/worktree.",
-    inputSchema: { type: "object", properties: { project_dir: { type: "string" }, task_id: { type: "string" }, subtask_id: { type: "string" }, job_ids: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 8 }, job_id: { type: "string" }, consumer_id: waitProperties.consumer_id }, required: ["project_dir"], oneOf: [{ required: ["task_id", "subtask_id", "job_ids"], not: { required: ["job_id"] } }, { required: ["job_id"], not: { required: ["job_ids"] } }], additionalProperties: false },
+    description: "Combine 2-8 accepted task results, or one committed target_job_id after target advancement, in a bounded integration worktree. Requires a separate Plan and fresh independent Review/Accept. Resume conflicts in the same job/worktree.",
+    inputSchema: { type: "object", properties: { project_dir: { type: "string" }, task_id: { type: "string" }, subtask_id: { type: "string" }, job_ids: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 8 }, target_job_id:{type:'string'},job_id: { type: "string" }, consumer_id: waitProperties.consumer_id }, required: ["project_dir"], oneOf: [{ required: ["task_id", "subtask_id", "job_ids"], not: { anyOf:[{required:["job_id"]},{required:["target_job_id"]}] } }, {required:['task_id','subtask_id','target_job_id'],not:{anyOf:[{required:['job_id']},{required:['job_ids']}]}}, { required: ["job_id"], not: { anyOf:[{required:["job_ids"]},{required:["target_job_id"]}] } }], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
   {
@@ -58,8 +69,8 @@ const tools = [
   },
   {
     name: "stage-finalize",
-    description: "Finish an accepted task: apply once, verify actual target files, commit only its exact changes under project policy, then safely retire its worktree. Retry resumes from persisted receipts.",
-    inputSchema: { type: "object", properties: { project_dir: { type: "string" }, job_id: { type: "string" }, background: { type: "boolean", default: false, description: "Use true for long checks: return a runtime job and supervise it through wait-for-job/result." }, consumer_id: waitProperties.consumer_id, confirm_commit: { type: "boolean" }, commit_message: { type: "string" }, record_commit: { type: "string", description: "Full existing commit id to verify and record in manual mode; does not create a commit." }, cleanup: { type: "boolean", default: true } }, required: ["job_id"], additionalProperties: false },
+    description: "Verify and commit exact accepted changes to the bound task branch, merge under a separate policy, and safely retire recoverable worktrees. Reports committed_pending_merge independently of directory cleanup. Legacy jobs retain exact apply/commit compatibility; retries recover persisted receipts.",
+    inputSchema: { type: "object", properties: { project_dir: { type: "string" }, job_id: { type: "string" }, background: { type: "boolean", default: false, description: "Use true for long checks: return a runtime job and supervise it through wait-for-job/result." }, consumer_id: waitProperties.consumer_id, confirm_commit: { type: "boolean" }, confirm_merge:{type:'boolean'}, merge:{type:'boolean'}, delete_branch:{type:'boolean'}, commit_message: { type: "string" }, record_commit: { type: "string", description: "Full existing commit id to verify and record in manual mode; does not create a commit." }, cleanup: { type: "boolean", default: true } }, required: ["job_id"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   },
   {
@@ -72,6 +83,7 @@ const tools = [
         task_id: { type: "string" },
         contract: { type: "object" },
         planner_session_id: { type: "string" },
+        branch: { type: 'object', properties: { mode: {enum:['create','reuse','current']}, task_branch:{type:'string'}, target_branch:{type:'string'}, reuse_from_task_id:{type:'string'}, confirm:{type:'boolean'} }, additionalProperties:false },
       },
       required: ["project_dir", "task_id", "contract", "planner_session_id"],
       additionalProperties: false,
@@ -317,7 +329,7 @@ const tools = [
   },
   {
     name: "apply",
-    description: "After Codex acceptance, apply a verified CC patch from its isolated worktree to the original project. This is the only normal path from worker output to the main workspace.",
+    description: "Compatibility apply for accepted legacy/current-branch jobs. Task-branch jobs require stage-finalize so commit, merge and recoverable cleanup remain independently recorded.",
     inputSchema: { type: "object", properties: { job_id: { type: "string" }, project_dir: { type: "string", description: "Absolute path to the trusted project root (optional; resolved from job if omitted)." } }, required: ["job_id"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   },
@@ -335,11 +347,19 @@ const PROVIDER_TOOL_NAMES = new Set([
   "codex-exec", "codex-continue", "accepter-accept",
 ]);
 const PRIMARY_TOOL_NAMES = new Set([
+  "task-handoff",
   "environment-audit", "environment-reconcile", "stage-finalize", "stage-integrate",
   "stage-plan", "stage-work", "stage-work-continue", "stage-review", "stage-accept",
   "wait-for-job", "health", "status", "result", "cancel", "apply", "cleanup",
 ]);
 const exposeProviderTools = process.env.AGENT_ORCH_EXPOSE_PROVIDER_TOOLS === "1";
+const OWNER_TOOLS = new Set(['stage-plan','stage-work','stage-work-continue','stage-review','stage-accept','stage-finalize','stage-integrate','apply','cleanup','cancel',...PROVIDER_TOOL_NAMES]);
+for (const tool of tools) if (OWNER_TOOLS.has(tool.name)) {
+  tool.inputSchema.properties.coordinator_session_id = { type:'string', description:'Actual current chat identity when host metadata is unavailable; never impersonate the Plan creator.' };
+  tool.inputSchema.properties.coordinator_epoch = { type:'integer', minimum:1, description:'Expected task execution epoch from task-handoff inspect.' };
+}
+tools.find(t=>t.name==='environment-reconcile').inputSchema.properties.coordinator_session_id={type:'string'};
+tools.find(t=>t.name==='stage-plan').annotations.readOnlyHint=false;
 
 // -- Project-scoped orchestrator cache --
 // Each project gets its own StateStore rooted under .agent-orchestrator/,
@@ -383,7 +403,7 @@ async function resolveJobOrchestrator(jobId) {
 }
 
 const server = new Server(
-  { name: "agent-orch-mcp", version: "0.8.2" },
+  { name: "agent-orch-mcp", version: "0.8.3" },
   { capabilities: { tools: {} } },
 );
 
@@ -560,7 +580,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
     // Enforce before stage files, contracts or provider jobs can be created.
     let projectBinding = null;
-    if (effectiveProjectDir && !['health', 'environment-audit', 'environment-reconcile', 'status', 'result', 'wait-for-job', 'cancel', 'cleanup'].includes(name)) projectBinding = await bindProject(path.resolve(effectiveProjectDir));
+    if (effectiveProjectDir && !['health', 'environment-audit', 'environment-reconcile', 'task-handoff', 'status', 'result', 'wait-for-job', 'cancel', 'cleanup'].includes(name)) projectBinding = await bindProject(path.resolve(effectiveProjectDir));
 
     // For project-scoped tools, get the per-project orchestrator.
     let orchestrator;
@@ -578,9 +598,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       orchestrator = resolvedJobOrch.orchestrator;
     }
 
-    // Tool dispatch — only reachable after policy validation passes.
+    const taskId = args.task_id || (args.job_id && orchestrator ? (await orchestrator.store.getJob(args.job_id))?.task_id : null);
+    const declaredActor = args.coordinator_session_id || args.planner_session_id || args.accepter_session_id;
+    const actor = process.env.CODEX_THREAD_ID || declaredActor;
+    if (process.env.CODEX_THREAD_ID && declaredActor && declaredActor !== actor && OWNER_TOOLS.has(name)) throw new Error('CALLER_SESSION_MISMATCH: use the actual current chat identity');
+    if (taskId && OWNER_TOOLS.has(name) && name !== 'stage-plan' && await pathExists(stageRuntime.planIdentityFile(taskId))) {
+      await orchestrator.taskLifecycle.ensure(effectiveProjectDir, taskId, await stageRuntime.loadPlanIdentity(taskId));
+    }
+    const dispatch = async (owner) => {
+    if(owner && name!=='stage-finalize') {
+      const target=name==='cancel' && args.job_id?await orchestrator.store.getJob(args.job_id):null;
+      if(target?.type!=='task_finalize') await orchestrator.taskLifecycle.assertNoFinalization(effectiveProjectDir,taskId);
+    }
+    if(owner && name==='stage-finalize' && args.background!==true) await orchestrator.taskLifecycle.assertNoFinalization(effectiveProjectDir,taskId);
+    if (owner) args.coordinator_fence = { session_id: owner.owner_session_id, epoch: owner.epoch };
+    // Tool dispatch — only reachable after policy and task-authority validation.
     switch (name) {
+      case 'task-handoff': {
+        const plan = await stageRuntime.loadPlanIdentity(args.task_id);
+        const config = await loadProjectConfig(effectiveProjectDir);
+        const [route] = resolveStageRoutes(config,'plan',config.stages?.plan?.default_complexity || 'high');
+        const model = await discoverHostModel() || args.host_model || route.model;
+        return response(await orchestrator.taskLifecycle.handoff(effectiveProjectDir, args.task_id,
+          {...args,actor_identity:{provider:route.provider,model,invocation:route.invocation}},actor,plan));
+      }
       case "stage-integrate": {
+        if (owner && !owner.legacy && !owner.branch) throw new Error('TASK_BRANCH_SELECTION_REQUIRED');
         const job = await startIntegration(orchestrator, args);
         return startedResponse(null, job, args, orchestrator);
       }
@@ -594,7 +637,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         const projectDir = path.resolve(requireString(args, "project_dir"));
         const config = await loadProjectConfig(projectDir);
         const [route] = resolveStageRoutes(config, "plan", config.stages?.plan?.default_complexity || "high");
-        const contract = await persistPlannerContract(projectDir, requireString(args, "task_id"), args.contract, requireString(args, "planner_session_id"));
+        const taskId = requireString(args, "task_id");
+        let contractInput = args.contract;
+        // Bind new native Plans before hashing their contract. Existing Plan
+        // identities remain immutable and use the evidence-only recovery path.
+        if (contractInput && !hasRepositoryIdentity(contractInput.repository_identity)
+            && !(await pathExists(stageRuntime.planIdentityFile(taskId)))) {
+          contractInput = { ...contractInput, repository_identity: await repositoryIdentityForProject(projectDir) };
+        }
+        const contract = await persistPlannerContract(projectDir, taskId, contractInput, requireString(args, "planner_session_id"));
         const identity = await stageRuntime.savePlanIdentity(args.task_id, {
           project_id: projectBinding.project_id,
           coordinator_common: projectBinding.coordinator_common,
@@ -605,6 +656,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           contract_id: contract.contract_id,
           contract_digest: contract.contract_digest,
         });
+        const task = await orchestrator.taskLifecycle.ensure(projectDir, taskId, identity, { legacy:false,locked:true });
+        if (args.branch) await orchestrator.taskLifecycle.bindBranch(projectDir, taskId, args.branch, actor);
+        else if (!task.branch && config.git_lifecycle?.branch_policy==='recommended_auto') await orchestrator.taskLifecycle.bindBranch(projectDir,taskId,{mode:'create',confirm:true},actor);
         const stageRun = await stageRuntime.create("plan", {
           status: "completed",
           task_id: args.task_id,
@@ -615,9 +669,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           contract_id: contract.contract_id,
           finished_at: new Date().toISOString(),
         });
-        return response({ stage_run: stageRun, contract, plan_execution_identity: identity });
+        return response({ stage_run: stageRun, contract, plan_execution_identity: identity,
+          task: {owner_session_id:task.owner_session_id,epoch:task.epoch}, branch_recommendation:await branchRecommendation(projectDir,taskId) });
       }
       case "stage-work": {
+        if (owner && !owner.legacy && !owner.branch) throw new Error('TASK_BRANCH_SELECTION_REQUIRED: approve a branch through stage-plan.branch or environment-reconcile bind_branch');
         const projectDir = path.resolve(requireString(args, "project_dir"));
         const config = await loadProjectConfig(projectDir);
         const { subtask } = await loadPlannerSubtask(projectDir, requireString(args, "task_id"), requireString(args, "subtask_id"));
@@ -683,8 +739,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case "stage-accept": {
         const projectDir = path.resolve(requireString(args, "project_dir"));
         const config = await loadProjectConfig(projectDir);
-        const identity = await stageRuntime.loadPlanIdentity(requireString(args, "task_id"));
-        const [route] = resolveStageRoutes(config, "accept", config.stages?.plan?.default_complexity || "high");
+        const originalIdentity = await stageRuntime.loadPlanIdentity(requireString(args, "task_id"));
+        const identity = owner?.epoch > 1 ? owner.owner_identity : originalIdentity;
+        const [configuredRoute] = resolveStageRoutes(config, "accept", config.stages?.plan?.default_complexity || "high");
+        const route = owner?.epoch > 1 ? { ...configuredRoute, model: await discoverHostModel() || owner.owner_identity.model } : configuredRoute;
         const accepterSessionId = requireString(args, "accepter_session_id");
         for (const [field, actual, expected] of [
           ["provider", route.provider, identity.provider],
@@ -759,8 +817,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       case "cleanup": return response(await orchestrator.cleanup(requireString(args, "job_id")));
       default: throw new Error(`Unknown tool: ${name}`);
     }
+    };
+    if (taskId && OWNER_TOOLS.has(name)) return await orchestrator.taskLifecycle.mutate(effectiveProjectDir, taskId, actor, args.coordinator_epoch, dispatch);
+    return await dispatch(null);
   } catch (error) {
-    return response({ error: error?.message || String(error), tool: name }, true);
+    return response({ error: error?.message || String(error), ...(error.details?{details:error.details}:{}), tool: name }, true);
   }
 });
 

@@ -1,13 +1,14 @@
 """Normalize persisted orchestration facts for the manual-refresh workspace UI."""
 from datetime import datetime, timezone
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
 import sqlite3
 from urllib.parse import parse_qs
 
-from git_history import git_state, commit_status, GitReadError
+from git_history import git_state, commit_status, GitReadError, run_git
 from git_activity import read_operations, plan_activity
 
 WORK_TYPES = {'stage_work','stage_work_continue','auto_execute','cc_execute','cc_continue','agy_execute','agy_continue','codex_execute'}
@@ -113,6 +114,7 @@ def build_workspace(project_dir,orchestrator_dir):
     contracts=load('contracts/*.json')
     stages=load('stages/*.json')
     jobs=load('runs/*/job.json')
+    lifecycles=load('tasks/*.json')
     job_by_id={}
     commit_cache={}
     normalized_jobs=[]
@@ -136,6 +138,20 @@ def build_workspace(project_dir,orchestrator_dir):
                      'workspace':(job.get('workspace') or {}).get('path'),'review':binding,'delivery':delivery,
                      'patch_digest':(evidence.get('changes') or {}).get('patch_digest'),
                      'source_file':job['_file']})
+        item.update({k:job.get(k) for k in ('task_commit_id','task_branch','target_branch','delivery_status','integration_status','workspace_status')})
+        item['task_commit_verified']=False
+        if job.get('task_commit_id') and re.fullmatch(r'[a-f0-9]{40}|[a-f0-9]{64}',str(job['task_commit_id'])):
+            directory=Path(job['_file']).parent;proof=read_json(directory/'task-delivery.json');candidate=job['task_commit_id']
+            reference='refs/agent-orch/deliveries/'+directory.name
+            try:
+                accepted=read_json(directory/'acceptance.json')
+                item['task_commit_verified']=bool(proof.get('commit_id')==candidate and proof.get('ref')==reference
+                    and proof.get('contract_digest')==job.get('contract_digest') and accepted.get('status')=='accepted'
+                    and proof.get('acceptance_sha256')==hashlib.sha256((directory/'acceptance.json').read_bytes()).hexdigest()
+                    and proof.get('evidence_sha256')==hashlib.sha256((directory/'evidence.json').read_bytes()).hexdigest()
+                    and run_git(project_dir,'rev-parse','--verify',reference).strip()==candidate
+                    and run_git(project_dir,'rev-parse',candidate+'^{tree}').strip()==proof.get('tree_id'))
+            except (OSError,GitReadError,ValueError):pass
         normalized_jobs.append(item);job_by_id[job_id]=item
     normalized_jobs.sort(key=sort_time)
     plans={p['plan_id']:{'id':p['plan_id'],'title':str(p.get('name') or p['plan_id']).removeprefix('Plan for '),
@@ -259,6 +275,8 @@ def build_workspace(project_dir,orchestrator_dir):
         elif any(j.get('status')=='cancelled' for j in current):state='cancelled'
         elif required_units and not required_units.issubset(observed_units):state='partial' if current else 'planned'
         elif any(current_contracts.get(j.get('task_id')) and j.get('contract_current') is None for j in current):state='binding_unknown'
+        elif current and any(j.get('task_commit_id') and not j.get('task_commit_verified') for j in current):state='binding_unknown'
+        elif current and any(j.get('task_commit_id') and not j.get('commit_id') for j in current):state='committed_pending_merge'
         elif current and all(j.get('phase') in ('applied','applied_and_cleaned') or j.get('applied_at') or j.get('commit_id') or j['delivery'].get('exists') for j in current):state='applied'
         elif current and all(j.get('acceptance_status')=='accepted' for j in current):state='accepted'
         elif current and all(j.get('status')=='completed' for j in current):
@@ -269,6 +287,7 @@ def build_workspace(project_dir,orchestrator_dir):
         if state not in ('failed','cancelled','running','partial','binding_unknown') and current and all(j.get('status')=='completed' and j.get('acceptance_status')=='accepted' and j['delivery'].get('reachable') for j in current):state='delivered'
         delivery_state='committed' if state=='delivered' else deliveries[0]['state'] if len(deliveries)==1 else 'partial' if deliveries else 'unlinked'
         plan.update({'state':state,'events':events,'git_activity':activity,'graph':{'nodes':nodes,'edges':edges},'job_count':len(plan['jobs']),
+                     'task_lifecycles':[v for v in lifecycles if v.get('task_id') in plan['task_ids']],
                      'task_count':len(set(plan['task_ids'])),'failure_count':sum(j.get('status')=='failed' for j in plan['jobs']),
                      'delivery':{'state':delivery_state,'commits':list({d['commit_id']:d for d in deliveries}.values())}})
         if not plan['created_at']:
@@ -293,4 +312,5 @@ def build_workspace(project_dir,orchestrator_dir):
                 existing=commit_links.setdefault(sha,[])
                 if not any(l['plan_id']==plan['id'] and l['label']==link['label'] for l in existing):existing.append(link)
     return {'project_dir':project_dir,'orchestrator_dir':orchestrator_dir,'plans':result,'counts':counts,'warnings':warnings,'git':git,'commit_links':commit_links,
+            'task_lifecycles':lifecycles,
             'generated_at':datetime.now(timezone.utc).isoformat(),'refresh':'manual','schema_version':1}

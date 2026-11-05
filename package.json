@@ -1,9 +1,9 @@
 {
   "name": "agent-orch",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "private": true,
   "type": "module",
-  "description": "Agent orchestration with runtime project identity, shared workspace limits, recommended routes, independent review and safe Git finalization.",
+  "description": "Task-bound agent orchestration with explicit handoff, independent review, separate commit/merge states and bounded Git workspaces.",
   "scripts": {
     "agent-orch": "node scripts/agent-orch.mjs",
     "test": "node --test tests/*.test.mjs",
@@ -11,7 +11,8 @@
     "start:mcp": "node scripts/mcp-stdio-bridge.mjs",
     "test:e2e-codex-mcp": "node scripts/e2e-codex-mcp.mjs",
     "test:e2e-providers": "node scripts/e2e-providers.mjs",
-    "test:e2e-git-lifecycle": "node scripts/e2e-git-lifecycle.mjs"
+    "test:e2e-git-lifecycle": "node scripts/e2e-git-lifecycle.mjs",
+    "test:e2e-task-lifecycle": "node scripts/e2e-task-lifecycle.mjs"
   },
   "engines": {
     "node": ">=18.18"

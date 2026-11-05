@@ -71,6 +71,7 @@ test("CLI initializes a project and runs a CC implementation to apply (via orche
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   config.cli.claude = process.execPath;
   config.cli.agy = process.execPath;
+  config.cli.codex = process.execPath;
   config.cli.claude_prefix_args = [fakeCc];
   config.cli.agy_prefix_args = [fakeAgy];
   config.execution.cc_timeout_seconds = 20;

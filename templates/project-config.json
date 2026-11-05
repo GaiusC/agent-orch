@@ -232,8 +232,8 @@
   "git_lifecycle": {
     "commit_policy": "ask",
     "target_branch": null,
-    "max_worker_worktrees": 2,
-    "max_worktrees": 3,
+    "max_worker_worktrees": 3,
+    "max_worktrees": 5,
     "max_workspace_bytes": null,
     "allow_snapshot": false,
     "allow_in_place": false

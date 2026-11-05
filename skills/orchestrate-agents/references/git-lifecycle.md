@@ -17,8 +17,8 @@ commit-policy choice. Existing policy survives resume.
 {
   "commit_policy": "ask",
   "target_branch": null,
-  "max_worker_worktrees": 2,
-  "max_worktrees": 3,
+  "max_worker_worktrees": 3,
+  "max_worktrees": 5,
   "max_workspace_bytes": null,
   "allow_snapshot": false,
   "allow_in_place": false
@@ -30,6 +30,12 @@ commit-policy choice. Existing policy survives resume.
 commit through `stage-finalize.record_commit` and verifies its accepted file
 states; it does not create another commit. Push/release/history rewriting are
 separate permissions. `target_branch` restricts the delivery branch if set.
+
+For new task branches, use the separate `merge_policy` (ask by default). Commit,
+merge and cleanup have independent states; a protected task commit may release
+its directory while waiting for merge. Read [task-continuity.md](task-continuity.md)
+for branch selection/reuse, owner/epoch handoff, pending-merge recovery, integration
+and verified baseline carry. The original Plan and old review receipts stay intact.
 
 The total worktree limit excludes the canonical source directory and includes
 registered external linked worktrees. A worker cap and one integration slot
@@ -70,6 +76,17 @@ and cleanup remain available for recovery; new execution requires registration.
 New native Plans persist the project id and coordinator Git common directory;
 copying their execution identity into another coordinator is refused even after
 that coordinator is registered. Legacy Plan bytes remain unchanged.
+
+New native Plans derive an omitted `repository_identity` from the actual Git
+common directory before computing the contract digest; explicit existing labels
+are retained. Older native Plans that omitted it can produce fresh repository
+proof only when the immutable Plan project/common directory and contract digest,
+the current project binding, and the recorded Work source/worktree repository all
+agree. Recovery does not rewrite the contract, Plan identity or failed receipts.
+After loading the repaired runtime, run a fresh native Review before Accept when
+the review gate is required. Repeating Review with an older installed runtime
+cannot repair the missing provenance. Unverifiable bindings remain blocked;
+never fill receipts manually or use a placeholder repository label.
 
 To retain a necessary independent coordinator, audit the **original** project
 with the copy's absolute path in `clone_paths`. Prepare and approve:

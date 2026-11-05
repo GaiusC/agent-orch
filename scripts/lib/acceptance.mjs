@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { getContractId, getContractVersion, getContractDigest } from "./contracts.mjs";
 import { newId, nowIso, pathExists, readJson, writeJsonAtomic } from "./utils.mjs";
+import { hasRepositoryIdentity, resolveRepositoryProvenance } from './repository-provenance.mjs';
 
 // -- Acceptance status constants --
 
@@ -116,7 +117,7 @@ export function assertAcceptanceArtifactValid(artifact) {
  *  - status is "accepted"
  *  - artifact is not stale (patch_digest matches current)
  */
-export async function validateAcceptanceForCurrentPatch({ artifactPath, contract, currentPatchDigest }) {
+export async function validateAcceptanceForCurrentPatch({ artifactPath, contract, currentPatchDigest, projectDir, job }) {
   let artifact;
   try {
     artifact = await readJson(artifactPath);
@@ -146,6 +147,14 @@ export async function validateAcceptanceForCurrentPatch({ artifactPath, contract
   // Patch digest must match the current evidence
   if (currentPatchDigest && artifact.patch_digest !== currentPatchDigest) {
     throw new Error(`Acceptance artifact patch_digest mismatch: artifact="${artifact.patch_digest}" != current="${currentPatchDigest}". Re-accept after implementation update.`);
+  }
+
+  if (!hasRepositoryIdentity(contract?.repository_identity)) {
+    const repository = await resolveRepositoryProvenance({ projectDir, contract, job });
+    if (artifact.repository_identity !== repository.identity
+        || JSON.stringify(artifact.repository_provenance) !== JSON.stringify(repository.provenance)) {
+      throw new Error('REPOSITORY_IDENTITY_MISMATCH: acceptance repository proof no longer matches the native Plan and implementation');
+    }
   }
 
   return artifact;
@@ -209,6 +218,19 @@ export async function saveAcceptance({
     ? { mode: evidence.workspace.mode || "isolated", path: evidence.workspace.path || null }
     : null;
 
+  const repository = await resolveRepositoryProvenance({ projectDir: job.project_dir, contract, job });
+  if (status === ACCEPTANCE_STATUS.ACCEPTED && repository.provenance && job.requires_agy_review && !job.review_waiver) {
+    const review = verification?.evidence_path ? await readJson(verification.evidence_path) : null;
+    const binding = review?.review_evidence;
+    if (!binding || binding.repository_identity !== repository.identity
+        || JSON.stringify(binding.repository_provenance) !== JSON.stringify(repository.provenance)
+        || binding.contract_digest !== contract.contract_digest || binding.patch_digest !== patchDigest
+        || binding.implementation_job_id !== job.id || review.result_source === 'conversation_store'
+        || !/VERDICT:\s*PASS\b/i.test(review.result || '')) {
+      throw new Error('REPOSITORY_IDENTITY_REVIEW_REQUIRED: run a fresh native review with the repaired runtime; historical review receipts are not rewritten');
+    }
+  }
+
   const artifact = {
     acceptance_id: newId("accept"),
     task_id: job.task_id,
@@ -219,7 +241,8 @@ export async function saveAcceptance({
     patch_digest: patchDigest,
     test_evidence_ids: testEvidenceIds,
     reviewer_evidence_ids: reviewerEvidenceIds,
-    repository_identity: contract?.repository_identity || null,
+    repository_identity: repository.identity,
+    ...(repository.provenance ? { repository_provenance: repository.provenance } : {}),
     workspace_identity: workspaceIdentity,
     accepter_host: accepterHost,
     accepter_provider: accepterProvider,

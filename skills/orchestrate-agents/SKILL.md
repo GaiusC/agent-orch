@@ -1,6 +1,6 @@
 ---
 name: orchestrate-agents
-description: Bind execution to the original project and share workspace limits across audited coordinator copies. Reconcile large preservation sets with bounded Windows arguments and review complete on-disk audits through compact references. Recommend current routes, supervise bounded Worker upgrades and quota-only reviewer fallbacks, independently accept changes, integrate results, commit exact changes and safely retire worktrees. Use for Agent Orch initialization, implementation, repair, review and workspace reconciliation.
+description: Audit the original project, recommend model routes and task branches, explicitly hand off tasks across chats with owner fencing, independently review and accept changes, and separately commit, merge and safely retire bounded worktrees. Preserve unrelated edits, historical evidence and current routes. Use for Agent Orch initialization, implementation, repair, review, task continuation and Git workspace reconciliation.
 ---
 
 # Orchestrate Agents
@@ -31,6 +31,7 @@ Before using the stage workflow, require a Codex host model that exposes local M
 7. Audit the user's original project before allocating or creating any workspace, including when restarting a Plan or abandoning an old job. Include known coordinator copies in `clone_paths`, even if created by file copy plus `git init`. An audit of a fresh empty/clean copy does not cover its source. When legacy changes, clones, or worktrees need interpretation, read [git-lifecycle.md](references/git-lifecycle.md). Provide the reviewer a compact background packet with facts, evidence, permissions, and unknowns; do not forward entire transcripts or invent authorship. Use `stage-review` with `review_kind: environment` and `audit_id` only when interpretation is needed. Its advisory findings never substitute for code acceptance.
 8. Prepare concrete `environment-reconcile` actions, then ask once for unresolved decisions and execute the approved plan. `confirm: true` must reflect actual authorization. Never clone, copy files into a new Git repository, stash, reset, or delete unknown content merely to obtain a clean status. A new Plan/job does not authorize a new coordinator repository; use the existing project and let `stage-work` allocate bounded worktrees. Dirty-source work requires an explicitly approved HEAD/snapshot baseline; unknown changes may remain preserved if the task does not depend on them. Provenance, permission or path-length failures require diagnosis, not an automatic fresh repository; a genuinely necessary relocation must name the source, destination, reuse alternatives and retention/cleanup disposition for review.
 9. Select `git_lifecycle.commit_policy` once: `ask`, `auto`, or `manual`. Terminal initialization offers this choice; the main chat can supply `--GitPolicyFile`. Auto means local commits of accepted, verified, precisely scoped task changes only; it never grants push, publication, or history-rewrite permission. Missing policy defaults to ask.
+10. Show the audit's branch recommendation and choose use/edit/audit-only. An independent deliverable normally gets `codex/<task-id>`; continue the recorded branch for the same task. Reuse another task's branch only with named predecessor, completed subtasks and no active or retained workspaces. Bind via `stage-plan.branch` or approved `environment-reconcile` `bind_branch`; do not switch the user's checkout. Explicit `--UseRecommendedGitPolicy` approves new managed task branches and local automatic commits; merge still asks. Default capacity is **3 Worker / 5 total auxiliary workspaces**, counting known external worktrees and registered coordinator copies. A capacity wait is not permission to clone. Read [task-continuity.md](references/task-continuity.md) before handoff, branch reuse or closing a pending merge.
 
 Runtime identity errors require inspection of the original project. Do not
 delete identity sidecars, change the caller's thread identity, or start a fresh
@@ -51,9 +52,11 @@ The default MCP workflow is:
 4. `stage-work-continue` when focused repair is needed
 5. `stage-review` when the contract requires independent evidence
 6. `stage-accept`
-7. `stage-finalize` (apply once, verify the actual target, commit exact task changes under policy, and safely clean)
+7. `stage-finalize` (verify and commit exact accepted task changes; merge only under its separate policy; safely clean recoverable workspaces)
 
 For parallel work, use `stage-integrate` with 2-8 accepted job ids and a separate persisted integration Plan/subtask. Wait on the existing wait-for-job channel, then obtain fresh independent code review and acceptance of the combined result before finalizing it. Conflicts remain in the integration worktree; resolve/stage them and resume with its job_id. Do not apply concurrent patches directly to the main directory.
+
+For a single committed result whose target advanced, use `stage-integrate` with `target_job_id` and a new integration Plan based on the target. Cleaned sources are recovered from protected refs and verified delivery proofs. Review and accept the combined patch again; do not silently rebase an accepted patch.
 
 Do not route by calling provider-specific wrappers. They are hidden by default and exist only for explicitly enabled diagnostics.
 
@@ -133,9 +136,11 @@ AGY review may run headless verification commands, but Agent Orch enforces read-
 
 Treat worker and reviewer prose as claims. Inspect the diff and deterministic evidence before calling `stage-accept`.
 
-`stage-accept` must use the same Plan provider, model, invocation, and session identity recorded by `stage-plan`. It calls the formal acceptance kernel; it must not create a shortcut artifact or silently fall back.
+`stage-accept` uses the immutable Plan identity until an explicitly authorized `task-handoff` transfers the task. After transfer, use the recorded current owner and epoch; an approved model change is recorded separately and never edits the original Plan. The actual host identity is checked. Read-only observation is permitted for other chats, but only the current owner may review, accept, cancel, commit or retire task work. Never impersonate the old chat, edit identity records or create a replacement Plan to bypass a handoff. The formal acceptance kernel remains mandatory.
 
 After acceptance, call `stage-finalize` with `background: true` and the stable `consumer_id`; it returns a runtime job, supervised with the same `wait-for-job`/`result` protocol. This keeps long final checks out of a single blocking MCP call. Under ask policy, obtain authorization for the concrete commit and pass `confirm_commit: true`. Under manual policy, the user commits first; pass the full `record_commit` id to verify and record that commit. Inspect the resulting commit id, remaining modifications, cleanup status, and continuation availability. A preserved historical edit means the task is closed with a known residual, not that the entire repository is clean.
+
+Task-branch delivery commits in the owned detached workspace using normal hooks. `merge:false` releases a safely committed directory and returns `committed_pending_merge`; `task_commit_id` is not a target delivery `commit_id`. Merging needs `confirm_merge:true` or explicit `merge_policy:auto`. A checked-out target must be clean with no ignored/untracked collision; another checkout, advanced target or conflict remains pending. `delete_branch:true` only retires a managed, merged, unreferenced branch at its exact expected tip; deletion may defer without invalidating delivery. Direct `apply` is rejected for task-branch jobs. `record_commit` remains the legacy/current-branch path; for new task branches choose ask plus explicit commit confirmation or auto for coordinator-owned commits.
 
 `apply` and `cleanup` remain compatibility tools. Apply alone does not finish a task; normal cleanup requires a recorded delivery commit. Failed/incomplete work can be explicitly retired through a prepared environment action with `disposition: wip`, preserving a reachable local checkpoint and index/working patches first. Ignored unique artifacts or active references prevent retirement. Removing a worktree ends exact session continuation; never promise it after cleanup.
 

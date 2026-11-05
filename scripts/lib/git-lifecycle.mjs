@@ -8,6 +8,9 @@ import { assertProject } from './config.mjs';
 import { releaseWorkspace, directoryBytes } from './workspace-pool.mjs';
 import { recordGitOperation } from './git-events.mjs';
 import { bindProject, registerCoordinator } from './project-identity.mjs';
+import { finalizeTaskBranch, validateTaskDelivery } from './branch-delivery.mjs';
+import { branchRecommendation, taskLock } from './task-lifecycle.mjs';
+import { baselineFields } from './environment-baseline.mjs';
 
 const terminal = job => ['completed', 'failed', 'cancelled'].includes(job.status);
 const alive = job => !terminal(job) || (job.process_pid && !job.process_exited_at && processExists(job.process_pid));
@@ -40,7 +43,7 @@ export function environmentReviewPlan(audit, auditPath) {
   ].join('\n\n');
 }
 export const DEFAULT_GIT_POLICY = {
-  commit_policy: 'ask', target_branch: null, max_worker_worktrees: 2, max_worktrees: 3,
+  commit_policy: 'ask', target_branch: null, max_worker_worktrees: 3, max_worktrees: 5,
   max_workspace_bytes: null, allow_snapshot: false, allow_in_place: false,
 };
 
@@ -91,6 +94,7 @@ export class GitLifecycle {
       modifications: source.changes.map(change => ({ ...change, provenance: 'preexisting_or_external', task_relation: 'unknown', completion: 'unknown', authorization: 'preserve' })),
       jobs: jobs.filter(j => path.resolve(j.project_dir) === path.resolve(project)).map(j => ({ id: j.id, task_id: j.task_id, status: j.status, phase: j.phase, session_id: j.session_id, workspace: j.workspace?.path, alive: alive(j) })),
     };
+    audit.branch_recommendation = await branchRecommendation(project, context.task_id || null);
     audit.digest = digest(audit);
     const evidence = path.join(this.root(project), 'audits', `${audit.audit_id}.json`);
     await save(evidence, audit);
@@ -99,6 +103,7 @@ export class GitLifecycle {
       audit_id: audit.audit_id, fingerprint: source.fingerprint, modified_paths: source.changes.length,
       worktrees: worktrees.length, clones: clones.length, unknown_groups: source.changes.length ? 1 : 0,
       action_required: Boolean(source.changes.length || clones.length || worktrees.length > 1 || projectIdentity.status === 'blocked'), project_identity: projectIdentity, evidence_path: evidence,
+      branch_recommendation: audit.branch_recommendation,
     };
   }
   async worktrees(project) {
@@ -171,18 +176,44 @@ export class GitLifecycle {
   }
   async reconcile(project, args) {
     await bindProject(project, { checkFresh: false });
-    return repositoryLock(project, async () => {
+    const prior = args.plan_id ? await json(path.join(this.root(project),'plans',`${safeId(args.plan_id)}.json`)) : null;
+    const actions = args.mode==='execute' ? prior?.actions || [] : args.actions || [];
+    const ids = new Set();
+    for (const action of actions) {
+      if (action.kind==='bind_branch') {ids.add(action.task_id);if(action.reuse_from_task_id) ids.add(action.reuse_from_task_id);}
+      if (action.kind==='cleanup' && action.job_id) { const job=await this.store.getJob(action.job_id); if(job?.task_id) ids.add(job.task_id); }
+      for(const task of await this.orchestrator.taskLifecycle.environmentOwners(project,action)) ids.add(task.task_id);
+    }
+    const actor=process.env.CODEX_THREAD_ID || args.coordinator_session_id;
+    const execute=()=>repositoryLock(project, async () => {
       const audit = await this.loadAudit(project, args.audit_id);
       const state = await assertNoOperation(project);
       const directory = this.root(project);
       const existingPlan = args.plan_id ? await json(path.join(directory, 'plans', `${safeId(args.plan_id)}.json`)) : null;
       if (args.mode === 'execute' && existingPlan?.status === 'executed') return { status: 'already_reconciled', plan_id: existingPlan.plan_id };
       if (state.fingerprint !== (existingPlan?.next_fingerprint || audit.source.fingerprint)) throw new Error('ENVIRONMENT_CHANGED: audit is stale');
+      for(const action of actions) {
+        const owners=await this.orchestrator.taskLifecycle.environmentOwners(project,action);
+        const epochs={};
+        for(const task of owners) {
+          await this.orchestrator.taskLifecycle.assertNoFinalization(project,task.task_id);
+          await this.orchestrator.taskLifecycle.assertOwner(project,task.task_id,actor,args.mode==='execute'?action.task_epochs?.[task.task_id]:null);
+          if(args.mode==='execute' && action.task_epochs?.[task.task_id]!==task.epoch) throw new Error('ENVIRONMENT_TASK_OWNERSHIP_CHANGED');
+          epochs[task.task_id]=task.epoch;
+        }
+        if(args.mode!=='execute' && owners.length) action.task_epochs=epochs;
+      }
       if (args.mode !== 'execute') {
         if (!Array.isArray(args.actions) || !args.actions.length) throw new Error('A concrete action list is required');
         const covered = new Set();
         for (const action of args.actions) {
-          if (!['preserve', 'commit', 'wip', 'cleanup', 'register_coordinator'].includes(action.kind)) throw new Error('Unsupported reconciliation action; unknown clones are never deleted automatically');
+          if (!['preserve', 'commit', 'wip', 'cleanup', 'register_coordinator', 'bind_branch'].includes(action.kind)) throw new Error('Unsupported reconciliation action; unknown clones are never deleted automatically');
+          if (action.kind==='bind_branch') {
+            if (!action.reason || !action.task_id) throw new Error('Branch binding needs a persisted task and reason');
+            const task=await this.orchestrator.taskLifecycle.assertOwner(project,action.task_id,actor,action.expected_epoch);
+            if(!task) throw new Error('TASK_PLAN_IDENTITY_REQUIRED');
+            action.expected_epoch=task.epoch;continue;
+          }
           if (action.kind === 'register_coordinator') {
             if (!path.isAbsolute(action.path || '') || !action.reason) throw new Error('Coordinator registration requires an absolute path and reason');
             let target;
@@ -215,6 +246,10 @@ export class GitLifecycle {
       if (args.confirm !== true) throw new Error('Explicit approval of the prepared reconciliation plan is required');
       for (let n = plan.position || 0; n < plan.actions.length; n++) {
         const action = plan.actions[n];
+        if (action.kind==='bind_branch') {
+          await this.orchestrator.taskLifecycle.assertOwner(project,action.task_id,actor,action.expected_epoch);
+          action.receipt=await this.orchestrator.taskLifecycle.bindBranch(project,action.task_id,{...action,confirm:true},actor,{repositoryLocked:true});
+        }
         if (action.kind === 'register_coordinator') action.receipt = await registerCoordinator(project, action.path, { audit_id: audit.audit_id, source_fingerprint: (await inventory(project)).fingerprint, target_fingerprint: action.target_fingerprint, reason: action.reason });
         if (action.kind === 'commit') action.receipt = await this.commitExact(project, action.paths, action.message, path.join(directory, 'plans', plan.plan_id, String(n)));
         if (action.kind === 'wip') {
@@ -241,6 +276,13 @@ export class GitLifecycle {
           for (const item of audit.worktrees) if (target?.workspace?.path && await canonicalPath(item.path) === await canonicalPath(target.workspace.path)) audited = item;
           if (!audited?.fingerprint || (await inventory(target.workspace.path)).fingerprint !== audited.fingerprint) throw new Error('Cleanup target changed since environment audit');
           action.receipt = action.disposition === 'wip' ? await this.retire(action.job_id) : await this.cleanup(action.job_id);
+          const task=target?.task_id?await this.orchestrator.taskLifecycle.record(project,target.task_id):null;
+          if(task) {
+            task.workspace_status='cleaned';
+            if(action.disposition==='wip') task.delivery_status='wip_preserved';
+            task.history.push({kind:'environment_retirement',job_id:target.id,disposition:action.disposition || 'delivery',actor,at:now()});
+            await save(path.join(project,'.agent-orchestrator/tasks',`${safeId(task.task_id)}.json`),task,{durable:true});
+          }
         }
         plan.position = n + 1;
         plan.next_fingerprint = (await inventory(project)).fingerprint;
@@ -248,6 +290,7 @@ export class GitLifecycle {
       }
       const current = await inventory(project);
       const readiness = { audit_id: audit.audit_id, fingerprint: current.fingerprint, baseline: plan.baseline,
+        ...await baselineFields(project,current),
         preserved: current.changes.map(c => c.path), preserved_states: Object.fromEntries(current.changes.map(c => [c.path, current.files[c.path] || null])),
         preserved_index: current.changes.length ? await indexForPaths(project, current.changes.map(c => c.path)) : '',
         approved_at: now(), actions: plan.actions };
@@ -256,6 +299,9 @@ export class GitLifecycle {
       await this.event(project, 'environment.reconciled');
       return { status: 'reconciled', baseline: readiness.baseline, remaining_paths: readiness.preserved, receipts: plan.actions.map(a => a.receipt).filter(Boolean) };
     });
+    const ordered=[...ids].sort();
+    const lock=position=>position===ordered.length?execute():taskLock(project,ordered[position],()=>lock(position+1));
+    return lock(0);
   }
   async snapshot(project, files, message = 'Agent Orch local baseline') {
     const directory = path.join(this.root(project), 'snapshots');
@@ -275,9 +321,9 @@ export class GitLifecycle {
       return { ...value, evidence_path: evidencePath };
     } finally { await removeIndex(staged.index); }
   }
-  async commitExact(project, files, message, directory) {
+  async commitExact(project, files, message, directory, { allowDetached = false } = {}) {
     const before = await assertNoOperation(project);
-    if (!before.branch) throw new Error('Automatic commit requires an attached target branch');
+    if (!before.branch && !allowDetached) throw new Error('Automatic commit requires an attached target branch');
     const unique = [...new Set(files)].sort();
     if (!unique.length) throw new Error('Cannot commit an empty task');
     const staged = await scopedTree(project, unique, directory, before.head);
@@ -297,7 +343,7 @@ export class GitLifecycle {
       const after = await inventory(project);
       if (after.index_digest !== before.index_digest || !sameFiles(after.files, before.files)) throw new Error('ENVIRONMENT_CHANGED during commit; inspect preserved index and files');
       // Only synchronize task entries; keep unrelated staged changes exactly as staged.
-      await git(project, ['reset', '--quiet', 'HEAD', '--', ...unique]);
+      await git(project, ['reset', '--quiet', 'HEAD', '--pathspec-from-file=-', '--pathspec-file-nul'], { input: unique.join('\0')+'\0' });
       const receipt = { commit, parent: before.head, tree: staged.tree, files: unique, working_files: before.files, index_digest: before.index_digest, final_index_digest: (await inventory(project)).index_digest, finished_at: now(), status: 'committed' };
       await save(journalFile, receipt);
       return receipt;
@@ -308,6 +354,7 @@ export class GitLifecycle {
     if (args.signal?.aborted) throw new Error('Finalization cancelled');
     const initial = await this.store.getJob(jobId);
     if (!initial) throw new Error('Unknown job');
+    if ((await this.orchestrator.taskLifecycle.record(initial.project_dir,initial.task_id))?.branch?.mode === 'task') return finalizeTaskBranch(this,jobId,args);
     return repositoryLock(initial.project_dir, async () => {
       let job = await this.store.getJob(jobId);
       const directory = path.join(this.store.jobDir(jobId), 'finalization');
@@ -333,7 +380,7 @@ export class GitLifecycle {
           const { loadPlannerContract } = await import('./contracts.mjs');
           const { validateAcceptanceForCurrentPatch } = await import('./acceptance.mjs');
           if (job.acceptance_status !== 'accepted') throw new Error('A valid acceptance artifact is required before finalization');
-          await validateAcceptanceForCurrentPatch({ artifactPath: job.acceptance_artifact_path, contract: await loadPlannerContract(job.project_dir, job.task_id), currentPatchDigest: evidence.changes.patch_digest });
+          await validateAcceptanceForCurrentPatch({ projectDir: job.project_dir, job, artifactPath: job.acceptance_artifact_path, contract: await loadPlannerContract(job.project_dir, job.task_id), currentPatchDigest: evidence.changes.patch_digest });
           if (!args.record_commit && job.workspace.source_inventory && state.branch !== job.workspace.source_inventory.branch) throw new Error('SOURCE_BRANCH_CHANGED: local commit target needs fresh approval');
           const actualPatch = await git(job.workspace.path, ['diff', '--binary', '--no-ext-diff'], { binary: true });
           if (digest(actualPatch) !== evidence.changes.patch_digest) throw new Error('ACCEPTED_WORKTREE_CHANGED: review the current deliverable before finalizing');
@@ -343,7 +390,7 @@ export class GitLifecycle {
           const { loadPlannerContract } = await import('./contracts.mjs');
           const { validateAcceptanceForCurrentPatch } = await import('./acceptance.mjs');
           if (job.acceptance_status !== 'accepted' || digest(await fs.readFile(job.patch_path)) !== evidence.changes.patch_digest) throw new Error('Accepted patch evidence is required to record a manual commit');
-          await validateAcceptanceForCurrentPatch({ artifactPath: job.acceptance_artifact_path, contract: await loadPlannerContract(job.project_dir, job.task_id), currentPatchDigest: evidence.changes.patch_digest });
+          await validateAcceptanceForCurrentPatch({ projectDir: job.project_dir, job, artifactPath: job.acceptance_artifact_path, contract: await loadPlannerContract(job.project_dir, job.task_id), currentPatchDigest: evidence.changes.patch_digest });
           if (await git(job.project_dir, ['merge-base', '--is-ancestor', args.record_commit, 'HEAD'], { allowFailure: true }) === null) throw new Error('Manual commit must be reachable from the current target HEAD');
           for (const file of files) {
             const expected = await gitFileState(job.workspace.path, file);
@@ -401,6 +448,16 @@ export class GitLifecycle {
           cleanup: args.cleanup !== false, remaining_paths: remaining.changes.map(c => c.path), finished_at: now() };
         await save(path.join(directory, 'receipt.json'), receipt);
         await this.store.updateJob(jobId, { closeout_phase: receipt.status, closeout_receipt: path.join(directory, 'receipt.json') });
+        const task=await this.orchestrator.taskLifecycle.record(job.project_dir,job.task_id);
+        if(task) {
+          task.delivery_status='merged';task.integration_status='merged';task.workspace_status=args.cleanup===false?'retained':'cleaned';
+          if(task.branch) task.branch.expected_tip=job.commit_id;
+          await save(path.join(job.project_dir,'.agent-orchestrator/tasks',`${safeId(job.task_id)}.json`),task);
+          if(task.branch) {
+            const registryFile=path.join(state.common,'agent-orch/task-branches.json'),registry=await json(registryFile,{});
+            if(registry[task.branch.task_ref]?.owner_task_id===job.task_id) {registry[task.branch.task_ref].expected_tip=job.commit_id;await save(registryFile,registry);}
+          }
+        }
         return receipt;
       } catch (error) {
         const current = await this.store.getJob(jobId);
@@ -424,7 +481,10 @@ export class GitLifecycle {
     if (!job) throw new Error('Unknown job');
     if (job.cleaned_at) { await this.operation(job,'workspace.cleaned',{workspace:job.workspace?.path,commit_id:job.commit_id,recovered:true,occurred_at:job.cleaned_at}); return { removed: false, already_cleaned: true }; }
     if (!terminal(job) || alive(job)) throw new Error('Active process or task prevents cleanup');
-    if (!job.commit_id) throw new Error('Cleanup requires a committed finalization receipt; preserve unfinished work');
+    const pending = job.task_commit_id && !job.commit_id;
+    if (!job.commit_id && !pending) throw new Error('Cleanup requires a committed finalization receipt; preserve unfinished work');
+    const branchProof = job.task_commit_id ? await validateTaskDelivery(this.orchestrator,job) : null;
+    const recoverableCommit = job.commit_id || job.task_commit_id;
     if (job.workspace?.mode === 'in_place') {
       await this.markCleaned(job);
       return { removed: false, task_retired: true, continuation_available: false };
@@ -434,7 +494,7 @@ export class GitLifecycle {
     const cleanupIntent = path.join(this.store.jobDir(jobId), 'cleanup-intent.json');
     const previous = await json(cleanupIntent);
     if (!await fs.stat(workspace).catch(() => null)) {
-      if (!previous || previous.job_id !== jobId || previous.workspace !== workspace || previous.commit_id !== job.commit_id) throw new Error('Missing worktree without a cleanup receipt requires inspection');
+      if (!previous || previous.job_id !== jobId || previous.workspace !== workspace || previous.commit_id !== recoverableCommit) throw new Error('Missing worktree without a cleanup receipt requires inspection');
       await releaseWorkspace(job.project_dir, job.workspace.owner_job_id || job.id);
       await this.markCleaned(job,true);
       return { removed: true, recovered: true, continuation_available: false };
@@ -449,14 +509,16 @@ export class GitLifecycle {
       if (other.id !== jobId && alive(other) && reference && await canonicalPath(reference) === await canonicalPath(workspace)) throw new Error('Workspace is referenced by an active task/reviewer');
     }
     const head = await git(workspace, ['rev-parse', 'HEAD']);
-    if (head !== (job.workspace.base_commit || job.workspace.git.head)) throw new Error('Worktree contains independent commits; preserve it');
+    if (head !== (job.workspace.base_commit || job.workspace.git.head) && head !== branchProof?.commit_id) throw new Error('Worktree contains independent commits; preserve it');
     const ignored = (await git(workspace, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'])).split('\0').filter(Boolean);
     if (ignored.length) throw new Error('Worktree has ignored artifacts; relocate or explicitly inspect them before cleanup');
     const changes = await git(workspace, ['diff', '--binary', '--no-ext-diff'], { binary: true });
     const evidence = await json(job.evidence_path);
-    if (digest(changes) !== evidence.changes.patch_digest) throw new Error('Worktree changed after review; cleanup refused');
+    if (head === branchProof?.commit_id) {
+      if (changes.length || await git(workspace,['rev-parse','HEAD^{tree}']) !== branchProof.tree_id) throw new Error('Committed worktree changed after proof');
+    } else if (digest(changes) !== evidence.changes.patch_digest) throw new Error('Worktree changed after review; cleanup refused');
     if ((await git(workspace, ['diff', '--cached', '--name-only'])) || (await git(workspace, ['ls-files', '--others', '--exclude-standard']))) throw new Error('Worktree contains extra staged/untracked content');
-    await save(cleanupIntent, { job_id: jobId, workspace, commit_id: job.commit_id, source_common: repo.common, patch_digest: evidence.changes.patch_digest, created_at: now() });
+    await save(cleanupIntent, { job_id: jobId, workspace, commit_id: recoverableCommit, source_common: repo.common, patch_digest: evidence.changes.patch_digest, created_at: now() });
     await git(job.project_dir, ['worktree', 'remove', '--force', workspace]);
     await releaseWorkspace(job.project_dir, job.workspace.owner_job_id || job.id);
     await this.markCleaned(job);
@@ -473,10 +535,12 @@ export class GitLifecycle {
     const index = readiness.preserved.length ? await indexForPaths(project, readiness.preserved) : '';
     if (index !== readiness.preserved_index) return;
     readiness.fingerprint = current.fingerprint; readiness.carried_at = now();
+    Object.assign(readiness,await baselineFields(project,current));
     await save(file, readiness);
   }
   async markCleaned(job,recovered=false) {
-    await this.store.updateJob(job.id, { cleaned_at: now(), closeout_phase: 'closed', phase: 'applied_and_cleaned', continuation_available: false });
+    const pending = job.task_commit_id && !job.commit_id;
+    await this.store.updateJob(job.id, { cleaned_at: now(), workspace_status:'cleaned', closeout_phase: pending?'committed_pending_merge':'closed', phase: pending?'committed_pending_merge':'applied_and_cleaned', continuation_available: false });
     await this.operation(job,'workspace.cleaned',{workspace:job.workspace?.path,commit_id:job.commit_id,recovered});
     if (job.provider && job.task_id) {
       const session = await this.store.getSession(job.project_dir, job.provider, job.task_id);
@@ -509,7 +573,7 @@ export class GitLifecycle {
     if ((await inventory(workspace)).fingerprint !== state.fingerprint) throw new Error('Retirement target changed during preservation');
     await git(job.project_dir, ['worktree', 'remove', '--force', workspace]);
     await releaseWorkspace(job.project_dir, job.workspace.owner_job_id || job.id);
-    await this.store.updateJob(jobId, { status: 'cancelled', phase: 'wip_preserved', cleaned_at: now(), closeout_phase: 'wip_preserved', retirement_evidence: evidencePath, continuation_available: false });
+    await this.store.updateJob(jobId, { status: 'cancelled', phase: 'wip_preserved', cleaned_at: now(), workspace_status:'cleaned', closeout_phase: 'wip_preserved', retirement_evidence: evidencePath, continuation_available: false });
     if (job.provider && job.task_id) {
       const session = await this.store.getSession(job.project_dir, job.provider, job.task_id);
       if (session?.workspace_path && await canonicalPath(session.workspace_path) === await canonicalPath(workspace)) await this.store.clearSession(job.project_dir, job.provider, job.task_id, { session_id: session.session_id, last_job_id: session.last_job_id });
